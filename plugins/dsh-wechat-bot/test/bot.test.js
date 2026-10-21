@@ -124,19 +124,18 @@ test('multi-part replies are sent in order as separate messages', async t => {
   assert.deepEqual(recent.filter(m => m.from_you).map(m => m.text), ['草', '不对', '其实挺好'], 'own replies are context once, not duplicated by echoes')
 })
 
-test('while sending is impossible (locked screen) replies wait, then go out on unlock', async t => {
-  const env = await watching(t, { reply: () => ({ to: null, reply: ['来了'] }) })
+test('while sending is impossible (locked screen) the bot keeps thinking; replies go out on unlock', async t => {
+  const env = await watching(t, { reply: input => ({ to: null, reply: [`回${input.new.at(-1).text}`] }) })
   await env.simulator.handlers()['sim/status']({ canSend: false, reason: 'screen_locked' })
   await until(() => !env.bot.connection.canSend, { what: 'locked status' })
   say(env, 'wxid_alice', '小鲸鱼，在吗')
-  await sleep(150)
+  await until(() => env.model.calls.length === 1, { what: 'thinking during the lock' })
+  await until(() => env.bot.runners.get(GROUP).status === 'waiting', { what: 'reply waiting to be sent' })
   assert.deepEqual(sent(env), [])
-  assert.equal(env.bot.runners.get(GROUP).status, 'waiting')
   say(env, 'wxid_bob', '它锁屏了吧')
   await env.simulator.handlers()['sim/status']({ canSend: true })
-  await until(() => sent(env).length === 1, { what: 'reply after unlock' })
-  assert.deepEqual(env.model.calls[0].input.new.map(m => m.text), ['小鲸鱼，在吗'], 'thinking waited for the unlock')
-  await until(() => env.model.calls.length === 2, { what: 'message received while locked is still processed' })
+  await until(() => sent(env).length === 2, { what: 'both replies after unlock' })
+  assert.deepEqual(sent(env), ['回小鲸鱼，在吗', '回它锁屏了吧'])
 })
 
 test('a reply that became stale while locked is dropped instead of sent late', async t => {
@@ -246,4 +245,93 @@ test('the adapter is restarted after it crashes and watching resumes', async t =
   await until(() => env.bot.runners.has(GROUP))
   say(env, 'wxid_alice', '还在吗')
   await until(() => env.model.calls.length === 1, { what: 'processing after reconnect' })
+})
+
+test('a long burst is processed in consecutive batches without re-asking about the backlog', async t => {
+  const env = await watching(t, { settings: { maxMessages: 3 }, reply: () => ({ reply: [] }) })
+  for (let i = 0; i < 7; i++) say(env, 'wxid_alice', `第${i}条`)
+  await until(() => new Set(env.model.calls.flatMap(c => c.input.new.map(m => m.text))).size === 7, { what: 'all seven seen' })
+  await sleep(100)
+  const batches = env.model.calls.map(c => c.input.new.map(m => m.text.slice(1, -1)).join(','))
+  assert.equal(new Set(batches).size, batches.length, `no batch is asked twice: ${batches}`)
+})
+
+test('a reply to the bot identified only by message id still counts as addressing it', async t => {
+  const env = await watching(t, { reply: () => ({ reply: ['在'] }) })
+  say(env, 'wxid_alice', '有人吗', { mentions: ['wxid_bot'] })
+  await until(() => sent(env).length === 1)
+  const own = env.simulator.messages.get(GROUP).find(m => m.fromSelf)
+  env.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '你是谁', quote: { messageId: 'unknown-to-adapter' } })
+  say(env, 'wxid_alice', '回你呢', { quote: { messageId: own.id } })
+  await until(() => env.model.calls.length >= 2)
+  const addressed = Object.fromEntries(env.model.calls.at(-1).input.new.map(m => [m.text, m.addressed]))
+  assert.equal(addressed['回你呢'], 'you')
+})
+
+test('the configured mode applies until someone explicitly changes it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-mode-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const first = await watching(t, { dir })
+  say(first, 'wxid_alice', '随便聊聊')
+  await until(() => first.model.calls.length === 1)
+  await first.bot.dispose()
+
+  const second = await startBot(t, { dir, settings: { mode: 'mention' } })
+  await until(() => second.bot.runners.has(GROUP))
+  assert.equal(second.bot.runners.get(GROUP).mode, 'mention', 'config change takes effect')
+  second.bot.setMode(GROUP, 'silent')
+  await second.bot.dispose()
+
+  const third = await startBot(t, { dir, settings: { mode: 'mention' } })
+  await until(() => third.bot.runners.has(GROUP))
+  assert.equal(third.bot.runners.get(GROUP).mode, 'silent', 'an explicit choice survives restarts')
+})
+
+test('unwatching a chat mid-reply stops the rest of the reply, even across a lock', async t => {
+  const env = await watching(t, { reply: () => ({ reply: ['一', '二', '三'] }) })
+  env.bot.on('chat-log', (_chat, entry) => {
+    if (entry.type === 'sent') env.simulator.handlers()['sim/status']({ canSend: false })
+  })
+  say(env, 'wxid_alice', '说三句')
+  await until(() => logTypes(env).includes('waiting'))
+  await env.bot.setWatched([])
+  await env.simulator.handlers()['sim/status']({ canSend: true })
+  await sleep(100)
+  assert.deepEqual(sent(env), ['一'])
+})
+
+test('/mute during a multi-part reply stops the remaining parts', async t => {
+  const env = await watching(t, { settings: { owner: { id: 'wxid_owner', name: '主人' } }, reply: () => ({ reply: ['一', '二'] }) })
+  // Hold the second part back (as a locked screen would) while the owner mutes the bot.
+  env.bot.on('chat-log', (_chat, entry) => {
+    if (entry.type === 'sent' && entry.part.text === '一') env.simulator.handlers()['sim/status']({ canSend: false })
+  })
+  say(env, 'wxid_alice', '说两句')
+  await until(() => logTypes(env).includes('waiting'))
+  say(env, 'wxid_owner', '/mute 10')
+  await until(() => logTypes(env).includes('mute'))
+  await env.simulator.handlers()['sim/status']({ canSend: true })
+  await until(() => sent(env).includes('好，安静 10 分钟'))
+  await sleep(60)
+  assert.deepEqual(sent(env), ['一', '好，安静 10 分钟'])
+})
+
+test('an adapter that reports it cannot send is believed after login', async t => {
+  const env = await startBot(t, { simulator: { loggedIn: false } })
+  await env.simulator.handlers()['sim/status']({ canSend: false, reason: 'screen_locked' })
+  await until(() => env.bot.connection.reason === 'screen_locked')
+  await env.bot.login()
+  await until(() => env.bot.ready)
+  await sleep(50)
+  assert.equal(env.bot.connection.canSend, false)
+})
+
+test('concurrent watch changes never leave a stray chat runner behind', async t => {
+  const env = await startBot(t, { settings: { idleMinutes: 0.001 }, reply: () => ({ reply: ['在吗'] }) })
+  await until(() => env.bot.ready)
+  await Promise.all([env.bot.setWatched([GROUP]), env.bot.setWatched([GROUP])])
+  await env.bot.setWatched([])
+  const before = env.model.calls.length
+  await sleep(200)
+  assert.equal(env.model.calls.length, before, 'no idle checks from an orphaned runner')
 })

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { addressOf, nameMatchers } from './addressing.js'
 import { Batcher } from './batcher.js'
 import { CommandRegistry, MODES, parseCommand } from './commands.js'
@@ -60,7 +60,8 @@ export class ChatRunner {
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
     this.lastBotTurn = state.lastBotTurn
-    this.mode = MODES[state.mode] ? state.mode : this.settings.mode
+    // Only a mode chosen explicitly (console, /mode, tool) is persisted; otherwise config decides.
+    this.modeOverride = MODES[state.mode] ? state.mode : undefined
     this.mutedUntil = state.mutedUntil ?? 0
     this.stats = state.stats?.date === today() ? state.stats : { date: today(), batches: 0, sent: 0 }
     this.seen = new Set(this.transcript.map(m => m.id))
@@ -78,10 +79,14 @@ export class ChatRunner {
       memory: this.memory.toJSON(),
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurn: this.lastBotTurn,
-      mode: this.mode,
+      mode: this.modeOverride,
       mutedUntil: this.mutedUntil,
       stats: this.stats,
     }
+  }
+
+  get mode() {
+    return this.modeOverride ?? this.settings.mode
   }
 
   dispose() {
@@ -93,7 +98,7 @@ export class ChatRunner {
 
   setMode(mode) {
     if (!MODES[mode]) throw new Error(`unknown mode ${mode}`)
-    this.mode = mode
+    this.modeOverride = mode
     this.#write('mode', { mode })
     this.#scheduleIdle()
   }
@@ -124,7 +129,10 @@ export class ChatRunner {
     this.#scheduleIdle()
     const parsed = message.kind === 'text' ? parseCommand(message.text) : null
     const command = parsed && this.commands.get(parsed.name)
-    if (command) return void this.#command(message, command, parsed)
+    if (command) {
+      this.#command(message, command, parsed).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
+      return
+    }
     this.batcher.push(message)
   }
 
@@ -202,8 +210,8 @@ export class ChatRunner {
 
   // Direct, model-free reply (command output). Queued behind nothing: it is short and immediate.
   async #say(text) {
-    const clientId = createHash('sha256').update(`${this.chat.id}\0say\0${Date.now()}\0${text}`).digest('hex').slice(0, 16)
-    const result = await this.#sendOne({ kind: 'text', text }, clientId, Date.now())
+    const clientId = `say:${randomUUID()}`
+    const result = await this.#sendOne({ kind: 'text', text }, clientId, { started: Date.now() })
     if (result) this.#sent(result.messageId, { kind: 'text', text })
   }
 
@@ -215,7 +223,14 @@ export class ChatRunner {
 
   #addresses(batch) {
     const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(), lastBotTurn: this.lastBotTurn }
-    return new Map(batch.map(m => [m.id, m.command ? { addressed: 'you', reasons: ['command'] } : addressOf(m, context)]))
+    return new Map(batch.map(m => [m.id, m.command ? { addressed: 'you', reasons: ['command'] } : addressOf(this.#withQuoteSender(m), context)]))
+  }
+
+  // Adapters may identify a quoted message only by id; look its sender up locally.
+  #withQuoteSender(message) {
+    if (!message.quote?.messageId || message.quote.senderId) return message
+    const quoted = this.transcript.find(m => m.id === message.quote.messageId)
+    return quoted ? { ...message, quote: { ...message.quote, senderId: quoted.sender.id, senderName: quoted.sender.name } } : message
   }
 
   #recent(excluding) {
@@ -256,15 +271,13 @@ export class ChatRunner {
     }
   }
 
+  // Thinking does not wait for the adapter to be able to send (e.g. a locked screen):
+  // the reply waits in #sendOne instead, and is dropped if it goes stale meanwhile.
   async #turn(batch, event) {
+    const started = Date.now()
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
     if (skip) return this.#write('skipped', { reason: skip, count: batch.length })
-    if (!this.link.canSend()) {
-      this.#setStatus('waiting')
-      this.#write('waiting', { reason: 'adapter_cannot_send' })
-      await this.link.whenCanSend(this.abort.signal)
-    }
     if (batch.length) {
       this.#write('batch', { count: batch.length, addressed: Object.fromEntries([...address].map(([id, a]) => [id, a.addressed])) })
       if (this.stats.date !== today()) this.stats = { date: today(), batches: 0, sent: 0 }
@@ -275,9 +288,11 @@ export class ChatRunner {
     const decision = await this.#decide({ batch, address, event, mustReply })
     if (this.disposed) return
 
-    const newer = this.batcher.size
+    const newer = this.batcher.arrived
     const superseded = this.supersedes.get(batch[0]) ?? 0
-    if (newer && (event || superseded < this.settings.maxSupersede)) {
+    // Re-asking only helps if the newer messages can join this batch.
+    const canGrow = batch.length < this.settings.maxMessages
+    if (newer && (event || (canGrow && superseded < this.settings.maxSupersede))) {
       // People kept talking while we were thinking; answer the whole conversation instead.
       if (batch.length) {
         this.supersedes.set(batch[0], superseded + 1)
@@ -295,7 +310,7 @@ export class ChatRunner {
       return this.emit('change')
     }
     const target = batch.find(m => m.id === decision.to)
-    await this.#deliver(decision.reply, { batch, target, event })
+    await this.#deliver(decision.reply, { batch, target, event, started })
   }
 
   async #decide({ batch, address, event, mustReply }) {
@@ -336,17 +351,18 @@ export class ChatRunner {
 
   // ── delivery ────────────────────────────────────────────────────────────
 
-  async #deliver(parts, { batch, target, event }) {
+  async #deliver(parts, { batch, target, event, started }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
-    const started = Date.now()
+    const commanded = batch.some(m => m.command)
+    // A /mute or /mode silent that arrives mid-reply stops the rest of it (explicit /ask etc. still finish).
+    const blocked = () => !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
     for (const [index, part] of parts.entries()) {
-      if (this.disposed) return
       if (index && this.settings.typingDelay) await sleep(typingMs(part.text ?? ''))
       const content = part.kind === 'sticker'
         ? { kind: 'sticker', path: this.settings.stickers[part.name] }
         : { kind: 'text', text: part.text }
-      const result = await this.#sendOne(content, `${turnId}:${index}`, started)
+      const result = await this.#sendOne(content, `${turnId}:${index}`, { started, blocked })
       if (!result) return
       this.#sent(result.messageId, part)
     }
@@ -369,15 +385,22 @@ export class ChatRunner {
 
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
   // it is stale, retries definite failures, and never repeats an uncertain send.
-  async #sendOne(content, clientId, started) {
+  // `blocked()` may return a reason to give up (checked again after every wait).
+  async #sendOne(content, clientId, { started, blocked = () => null }) {
     let failures = 0
     for (;;) {
+      if (this.disposed) return null
       if (!this.link.canSend()) {
+        const previous = this.status
+        this.#setStatus('waiting')
         this.#write('waiting', { reason: 'adapter_cannot_send' })
         await this.link.whenCanSend(this.abort.signal)
+        this.#setStatus(previous)
+        if (this.disposed) return null
       }
-      if (Date.now() - started > this.settings.staleMs) {
-        this.#write('dropped', { reason: 'stale', clientId })
+      const reason = Date.now() - started > this.settings.staleMs ? 'stale' : blocked()
+      if (reason) {
+        this.#write('dropped', { reason, clientId })
         return null
       }
       try {

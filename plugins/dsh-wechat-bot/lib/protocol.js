@@ -118,6 +118,7 @@ export function parseStatus(value) {
 
 export function parseAccount(value) {
   if (!isObject(value) || !ACCOUNT_STATES.includes(value.state)) fail('account')
+  if (value.state === 'ready' && value.self === undefined) fail('account.self')
   return {
     state: value.state,
     ...(value.self !== undefined ? { self: person(value.self, 'account.self') } : {}),

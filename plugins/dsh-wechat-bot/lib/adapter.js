@@ -119,6 +119,12 @@ export function spawnAdapter({ command, args = [], cwd, env }, options) {
   })
   const client = new AdapterClient({ input: child.stdout, output: child.stdin }, options)
   createInterface({ input: child.stderr }).on('line', line => client.emit('log', { level: 'debug', message: line }))
+  // Writing to a process that just died must not crash the host.
+  child.stdin.on('error', () => client.peer.close())
+  // A closed connection means the process is of no further use; never leave it running.
+  client.peer.closed.then(() => {
+    if (child.exitCode === null && child.signalCode === null) setTimeout(() => child.exitCode === null && child.kill(), 1_000).unref()
+  })
   // Resolves with the exit code (or null if the process never started).
   client.exited = new Promise(resolve => {
     child.once('error', error => {

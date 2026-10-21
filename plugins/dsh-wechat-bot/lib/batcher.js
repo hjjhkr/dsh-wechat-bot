@@ -5,6 +5,7 @@
 // together once it calls `release()`.
 export class Batcher {
   #pending = []
+  #arrived = 0
   #firstAt = 0
   #quietTimer
   #maxTimer
@@ -23,9 +24,15 @@ export class Batcher {
     return this.#busy
   }
 
+  // Messages pushed since the consumer last took a batch (excludes leftover backlog).
+  get arrived() {
+    return this.#arrived
+  }
+
   push(message) {
     if (!this.#pending.length) this.#firstAt = Date.now()
     this.#pending.push(message)
+    this.#arrived++
     if (this.#busy) return
     if (this.#full()) return this.#flush()
     this.#arm()
@@ -40,6 +47,7 @@ export class Batcher {
   // Mark the consumer busy with work that did not come from a batch (e.g. an idle check).
   hold() {
     this.#disarm()
+    this.#arrived = 0
     this.#busy = true
   }
 
@@ -87,6 +95,7 @@ export class Batcher {
       chars += next.text.length
     }
     this.#firstAt = Date.now()
+    this.#arrived = 0
     return batch
   }
 

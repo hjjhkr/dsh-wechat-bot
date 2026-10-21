@@ -33,7 +33,7 @@ export function addressOf(message, context) {
 
   const others = message.mentions.filter(id => id !== self.id && id !== 'all')
   if (others.length) reasons.push('at_someone_else')
-  if (message.quote && message.quote.senderId !== self.id) reasons.push('quotes_someone_else')
+  if (message.quote?.senderId && message.quote.senderId !== self.id) reasons.push('quotes_someone_else')
   if (reasons.length) return { addressed: 'other', reasons }
 
   if (names.mentioned(message.text)) return { addressed: 'maybe', reasons: ['mentions_your_name'] }

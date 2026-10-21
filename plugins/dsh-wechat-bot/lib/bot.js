@@ -19,6 +19,9 @@ export class Bot extends EventEmitter {
   #restarts = 0
   #disposed = false
   #canSendWaiters = new Set()
+  #statusSeen = false
+  #lastSelf
+  #watchQueue = Promise.resolve()
 
   constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry() }) {
     super()
@@ -37,8 +40,11 @@ export class Bot extends EventEmitter {
     clearTimeout(this.restartTimer)
     for (const runner of this.runners.values()) runner.dispose()
     for (const waiter of this.#canSendWaiters) waiter.reject(new Error('bot_disposed'))
-    await this.#saveChats()
-    await this.adapter?.shutdown()
+    try {
+      await this.#saveChats()
+    } finally {
+      await this.adapter?.shutdown()
+    }
   }
 
   view() {
@@ -73,6 +79,7 @@ export class Bot extends EventEmitter {
   async #connect() {
     if (this.#disposed) return
     let adapter
+    this.#statusSeen = false
     try {
       adapter = this.adapter = this.createAdapter()
       adapter.on('log', ({ level, message }) => this.note(level, message))
@@ -86,7 +93,8 @@ export class Bot extends EventEmitter {
       this.#onAccount(await adapter.accountStatus())
     } catch (error) {
       this.note('error', `适配器启动失败：${error.message}`)
-      adapter?.peer.close()
+      // Ends the process too; the resulting 'close' schedules the next attempt.
+      await adapter?.shutdown()
     }
   }
 
@@ -102,7 +110,8 @@ export class Bot extends EventEmitter {
     this.restartTimer.unref?.()
   }
 
-  #onStatus(status) {
+  #onStatus(status, { synthetic = false } = {}) {
+    if (!synthetic) this.#statusSeen = true
     const previous = this.connection
     this.connection = { state: status.connection, canSend: status.canSend, reason: status.reason, detail: status.detail }
     if (status.canSend) for (const waiter of this.#canSendWaiters) waiter.resolve()
@@ -120,7 +129,9 @@ export class Bot extends EventEmitter {
       if (wasReady) this.note('warn', '小号已退出登录')
       return
     }
-    if (this.connection.state !== 'connected') this.#onStatus({ connection: 'connected', canSend: true })
+    this.#lastSelf = account.self
+    // Adapters that never report status are assumed able to send once logged in.
+    if (!this.#statusSeen) this.#onStatus({ connection: 'connected', canSend: true }, { synthetic: true })
     if (!wasReady) {
       this.note('info', `小号已登录：${account.self.name}`)
       await this.#applyWatch().catch(error => this.note('error', `恢复监听失败：${error.message}`))
@@ -157,7 +168,14 @@ export class Bot extends EventEmitter {
     return this.watched
   }
 
-  async #applyWatch() {
+  // Serialized: concurrent callers (console clicks, re-login) must not race on runners.
+  #applyWatch() {
+    const run = this.#watchQueue.then(() => this.#applyWatchNow())
+    this.#watchQueue = run.catch(() => {})
+    return run
+  }
+
+  async #applyWatchNow() {
     const wanted = new Set(this.watched.map(c => c.id))
     for (const [id, runner] of this.runners) {
       if (wanted.has(id)) continue
@@ -165,12 +183,17 @@ export class Bot extends EventEmitter {
       runner.dispose()
       this.runners.delete(id)
     }
-    if (!this.ready) return this.#changed()
-    await this.adapter.watch([...wanted])
+    if (!this.ready || this.#disposed) return this.#changed()
+    // Register every runner before subscribing, so no new message finds its chat missing.
+    const added = []
     for (const chat of this.watched) {
       if (this.runners.has(chat.id)) continue
-      const runner = await this.#runner(chat)
-      this.runners.set(chat.id, runner)
+      this.runners.set(chat.id, await this.#runner(chat))
+      added.push(chat)
+    }
+    await this.adapter.watch([...wanted])
+    for (const chat of added) {
+      const runner = this.runners.get(chat.id)
       try {
         runner.prime(await this.adapter.history(chat.id, runner.settings.recentLimit))
       } catch (error) {
@@ -187,7 +210,8 @@ export class Bot extends EventEmitter {
     const runner = new ChatRunner({
       chat, state, persona: this.persona, commands: this.commands,
       settings: { ...this.settings, ...this.settings.chats?.[chat.id] },
-      account: () => this.account.self,
+      // During an adapter restart the account is briefly unknown; keep using the last one.
+      account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),
       link: {
         send: (content, clientId) => this.adapter.send(chat.id, clientId, content),
@@ -204,6 +228,7 @@ export class Bot extends EventEmitter {
   }
 
   #whenCanSend(signal) {
+    if (signal?.aborted) return Promise.reject(signal.reason)
     if (this.connection.canSend) return Promise.resolve()
     const waiter = Promise.withResolvers()
     this.#canSendWaiters.add(waiter)

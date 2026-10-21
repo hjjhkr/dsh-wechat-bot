@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnAdapter } from '../lib/adapter.js'
+import { Bot } from '../lib/bot.js'
+import { parseAccount } from '../lib/protocol.js'
+import { Store } from '../lib/store.js'
 import { until } from './helpers.js'
 
 const simulatorBin = fileURLToPath(new URL('../bin/simulator.js', import.meta.url))
@@ -63,4 +69,33 @@ test('a crashed adapter rejects in-flight requests instead of hanging', async t 
   t.after(() => client.shutdown())
   await assert.rejects(client.initialize({ dataDir: '.' }), { code: 'closed' })
   assert.equal(await client.exited, 3)
+})
+
+test('an adapter that fails the handshake is ended, not leaked, before the next attempt', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-leak-'))
+  t.after(() => rm(dataDir, { recursive: true, force: true }))
+  // Answers every request as protocol v2, which the plugin refuses.
+  const script = `require('readline').createInterface({ input: process.stdin }).on('line', line => {
+    process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(line).id, result: { protocolVersion: 2 } }) + '\n')
+  })`
+  const spawned = []
+  const bot = new Bot({
+    dataDir, store: new Store(dataDir), persona: '', think: async () => '',
+    createAdapter: () => {
+      const client = spawnAdapter({ command: process.execPath, args: ['-e', script] })
+      spawned.push(client)
+      return client
+    },
+  })
+  await bot.start()
+  assert.ok(bot.log.some(e => e.message.includes('protocol')), 'the mismatch is reported')
+  await until(() => spawned.length >= 2, { timeoutMs: 8000, what: 'a retry' })
+  assert.notEqual(await spawned[0].exited, undefined, 'the first process exited before the retry')
+  await bot.dispose()
+  await Promise.all(spawned.map(client => client.exited))
+})
+
+test('an account reported ready must say which account it is', () => {
+  assert.throws(() => parseAccount({ state: 'ready' }), { code: 'invalid_params' })
+  assert.deepEqual(parseAccount({ state: 'ready', self: { id: 'wxid_bot' } }).self, { id: 'wxid_bot', name: 'wxid_bot' })
 })
