@@ -12,7 +12,7 @@
     "./locale/*.json": "./locale/*.json",
     "./icon": "./icon.svg"
   },
-  "bin": { "wechat-bot-simulator": "bin/simulator.js" },
+  "bin": { "wechat-bot-simulator": "bin/simulator.js", "wechat-bot-check-adapter": "bin/check-adapter.js" },
   "files": ["lib", "client", "bin", "personas", "locale", "icon.svg", "cordis.patch.yml"],
   "scripts": { "test": "node --test test/*.test.js" },
   "engines": { "dsh": ">=0.2.1-rc.2 <0.3.0-0" },

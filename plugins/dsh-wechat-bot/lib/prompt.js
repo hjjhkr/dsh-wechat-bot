@@ -82,7 +82,7 @@ export function turnInput(turn) {
     memory: turn.memory,
   }
   if (turn.event) input.event = turn.event
-  return JSON.stringify(input, null, 1)
+  return JSON.stringify(input)
 }
 
 // Human-readable rendering of a batch, used for the DSH session transcript.

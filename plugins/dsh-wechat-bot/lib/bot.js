@@ -6,8 +6,8 @@ const LOG_LIMIT = 300
 const BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000]
 
 // Owns the adapter connection and one ChatRunner per watched chat.
-// Emits 'change' whenever something visible in the console changed, and
-// 'log' for connection-level log entries.
+// Emits 'change' whenever something visible in the console changed, 'log' for
+// connection-level log entries and 'watch' (chat) when a chat starts being watched.
 export class Bot extends EventEmitter {
   adapter = null
   connection = { state: 'starting', canSend: false }
@@ -23,7 +23,7 @@ export class Bot extends EventEmitter {
   constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry() }) {
     super()
     Object.assign(this, { createAdapter, store, persona, settings, think, dataDir, commands })
-    store.onError = error => this.#write('error', `保存状态失败：${error.message}`)
+    store.onError = error => this.note('error', `保存状态失败：${error.message}`)
   }
 
   async start() {
@@ -58,7 +58,8 @@ export class Bot extends EventEmitter {
     return this.runners.get(chatId)?.log ?? []
   }
 
-  #write(level, message) {
+  // Adds an entry to the connection log shown in the console.
+  note(level, message) {
     const entry = { time: Date.now(), level, message }
     this.log.push(entry)
     if (this.log.length > LOG_LIMIT * 2) this.log.splice(0, LOG_LIMIT)
@@ -74,17 +75,17 @@ export class Bot extends EventEmitter {
     let adapter
     try {
       adapter = this.adapter = this.createAdapter()
-      adapter.on('log', ({ level, message }) => this.#write(level, message))
+      adapter.on('log', ({ level, message }) => this.note(level, message))
       adapter.on('status', status => this.#onStatus(status))
       adapter.on('account', account => this.#onAccount(account))
       adapter.on('message', message => this.runners.get(message.chatId)?.receive(message))
       adapter.once('close', () => this.#onClose(adapter))
       const info = await adapter.initialize({ dataDir: this.dataDir, client: { name: 'dsh-wechat-bot', version: '1' } })
-      this.#write('info', `已连接适配器 ${info.name} ${info.version}`)
+      this.note('info', `已连接适配器 ${info.name} ${info.version}`)
       this.#restarts = 0
       this.#onAccount(await adapter.accountStatus())
     } catch (error) {
-      this.#write('error', `适配器启动失败：${error.message}`)
+      this.note('error', `适配器启动失败：${error.message}`)
       adapter?.peer.close()
     }
   }
@@ -96,7 +97,7 @@ export class Bot extends EventEmitter {
     this.account = { state: 'offline' }
     this.#changed()
     const delay = BACKOFF_MS[Math.min(this.#restarts++, BACKOFF_MS.length - 1)]
-    this.#write('warn', `适配器已断开，${delay / 1000} 秒后重连`)
+    this.note('warn', `适配器已断开，${delay / 1000} 秒后重连`)
     this.restartTimer = setTimeout(() => this.#connect(), delay)
     this.restartTimer.unref?.()
   }
@@ -106,7 +107,7 @@ export class Bot extends EventEmitter {
     this.connection = { state: status.connection, canSend: status.canSend, reason: status.reason, detail: status.detail }
     if (status.canSend) for (const waiter of this.#canSendWaiters) waiter.resolve()
     if (previous.state !== status.connection || previous.canSend !== status.canSend || previous.reason !== status.reason) {
-      this.#write('info', `连接状态：${status.connection}${status.canSend ? '' : '（暂不能发送）'}${status.reason ? ` ${status.reason}` : ''}`)
+      this.note('info', `连接状态：${status.connection}${status.canSend ? '' : '（暂不能发送）'}${status.reason ? ` ${status.reason}` : ''}`)
     }
     this.#changed()
   }
@@ -116,13 +117,13 @@ export class Bot extends EventEmitter {
     this.account = account
     this.#changed()
     if (account.state !== 'ready') {
-      if (wasReady) this.#write('warn', '小号已退出登录')
+      if (wasReady) this.note('warn', '小号已退出登录')
       return
     }
     if (this.connection.state !== 'connected') this.#onStatus({ connection: 'connected', canSend: true })
     if (!wasReady) {
-      this.#write('info', `小号已登录：${account.self.name}`)
-      await this.#applyWatch().catch(error => this.#write('error', `恢复监听失败：${error.message}`))
+      this.note('info', `小号已登录：${account.self.name}`)
+      await this.#applyWatch().catch(error => this.note('error', `恢复监听失败：${error.message}`))
     }
   }
 
@@ -173,9 +174,10 @@ export class Bot extends EventEmitter {
       try {
         runner.prime(await this.adapter.history(chat.id, runner.settings.recentLimit))
       } catch (error) {
-        this.#write('warn', `读取「${chat.name}」历史失败：${error.message}`)
+        this.note('warn', `读取「${chat.name}」历史失败：${error.message}`)
       }
-      this.#write('info', `开始监听「${chat.name}」`)
+      this.note('info', `开始监听「${chat.name}」`)
+      this.emit('watch', chat)
     }
     this.#changed()
   }
