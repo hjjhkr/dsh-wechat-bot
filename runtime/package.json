@@ -1,8 +1,0 @@
-{
-  "private": true,
-  "description": "Isolated official DSH runtime for the WeChat bot",
-  "name": "wechat-bot-dsh-runtime",
-  "dependencies": {
-    "@deepseek-ai/dsh": "0.2.1-rc.2"
-  }
-}

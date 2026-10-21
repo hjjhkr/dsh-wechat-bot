@@ -1,5 +1,0 @@
-- insert:
-    - id: wechat-bridge
-      name: dsh-wechat-bridge
-      config:
-        configPath: ""

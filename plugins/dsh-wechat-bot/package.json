@@ -1,0 +1,27 @@
+{
+  "name": "dsh-wechat-bot",
+  "version": "0.2.0",
+  "description": "WeChat group-chat member for DeepSeek Harness, driven through a small JSON-RPC adapter protocol.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./client/index.js",
+    "./protocol": "./lib/protocol.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "bin": { "wechat-bot-simulator": "bin/simulator.js" },
+  "files": ["lib", "client", "bin", "locale", "icon.svg", "cordis.patch.yml"],
+  "scripts": { "test": "node --test test/*.test.js" },
+  "engines": { "dsh": ">=0.2.1-rc.2 <0.3.0-0" },
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-sidebar-right"]
+    }
+  }
+}
