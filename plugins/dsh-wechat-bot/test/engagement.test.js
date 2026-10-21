@@ -161,3 +161,11 @@ test('an engaged turn must answer the target, and the script records whom it ans
   assert.match(env.model.calls.at(-1).messages.at(-1).text, /你正在按命令回应 阿离/)
   assert.equal(env.bot.runner.lastBotTurn.toSenderId, 'wxid_alice')
 })
+
+test('an engagement overrides the speaking mode: in at mode the target is still answered without an @', async t => {
+  const env = await watching(t, { settings: { mode: 'at' } })
+  say(env, 'wxid_carol', '/attack 阿离')
+  await until(() => sent(env).length === 2)
+  say(env, 'wxid_alice', '你谁啊')
+  await until(() => sent(env).includes('attack→阿离:你谁啊'))
+})

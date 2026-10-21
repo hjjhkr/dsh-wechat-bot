@@ -13,7 +13,8 @@
 ## 能做什么
 
 - **合并连发的消息**：2 秒内连发的几条合成一批，以 JSON 数组一次交给模型。回复只针对思考开始时已有的消息；思考期间新来的消息成为下一批，不会反复重想。
-- **判断在跟谁说话**：程序先根据 **@、引用、叫名字、刚聊完接着说** 算出每条消息的 `addressed`（you / maybe / other / none）和依据，再交给模型判断；有人直接找它却不回，会纠正一次。
+- **判断在跟谁说话**：程序先根据 **@、引用、叫名字、刚聊完接着说** 算出每条消息的 `addressed`（you / maybe / other / none）和依据，再交给模型判断；有人直接找它却不回，会纠正一次。交给模型的消息**按人分组**（阿离：1、2、3；老鲍：1、2），每人的长期记忆放在自己的组里，另附时间顺序，模型不必从交错的消息里分辨谁说了什么。
+- **定向互动**：`/attack 昵称` 持续嘲讽某人、`/comfort 昵称` 持续安慰某人，主动开场后 **TA 说一句才回一句**，TA 不说话就不发，其他人一律不理；`/unattack` `/uncomfort` 停止，TA 一小时不说话自动结束。
 - **三种发言模式**（可用命令随时切换）：`free` 每批都给模型自由接话；`infer`（默认）像是在跟它说话才给模型；`at` 只回 @ 和引用；另有 `silent` 静音。
 - **命令即时执行、插队**：`/` 命令在插件运行时里直接执行，不经过模型；回复插到所有排队消息前面立即发出；改变状态的命令（切模式、禁言、忘记、清上下文、`/ask`）会打断正在思考的旧回答，旧批次按新状态重新处理。
 - **模型与思考强度可调**：`/model` 切换模型、`/think off|low|high|max` 调思考强度，切换前按 DSH 的模型目录校验，重启后保持。
@@ -22,6 +23,8 @@
 - **扛得住、能自愈**：积压上限、限速、模型超时、连续失败熔断、看门狗、适配器崩溃自动重启；有压力与混沌测试。
 - **锁屏也工作**：插件不依赖桌面；发不出去就排队，过时丢弃。
 - **在 DSH 里看得见**：右侧栏控制台（连接、群、模式、日志、健康指标）；工作区里的「微信 · 群名」会话实时显示模型收到了什么、输出了什么；`/wechat eval` 用真实模型评测"该不该说话、在跟谁说"。
+
+**原则：说不说由脚本决定，说什么由模型决定。** 对象判断、发言模式、目标识别（按数据库里的发送者 id）、定向互动的触发、记忆归属、限速熔断都是确定的程序逻辑，可测试、不会被模型"理解错"；模型只负责措辞和是否在可选场合接话。
 
 完整命令见 [docs/commands.md](docs/commands.md)。和最初版本的对比见 [docs/handoff.md](docs/handoff.md)。
 
@@ -37,6 +40,7 @@ plugins/dsh-wechat-bot/        DSH 插件（安装的就是这个目录）
     chat.js                    一个群的流水线：命令 → 合批 → 模式 → 对象判断 → 模型 → 记忆 → 发送
     batcher.js addressing.js prompt.js decision.js memory.js
     commands.js cron.js        命令（含 /cron）
+    engagement.js              /attack /comfort：按昵称或 @ 找人（脚本完成，不交给模型）
     models.js                  /model /think：模型与思考强度切换（按 DSH 模型目录校验）
     guard.js                   限速、熔断、超时、发送优先通道
     protocol.js rpc.js adapter.js simulator.js   适配器协议、传输、模拟器
@@ -104,7 +108,10 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
    消息 → 以 / 开头？ ─是→ 命令运行时：立即执行 → 回复走优先通道插队发出
             │                         ├ 改状态的命令：打断正在思考的旧回答，旧批次按新状态重算
             │否                       ├ /ask /tldr：先回"收到"，插队交给模型（不受限速）
-            ▼                         └ /cron：写入本地定时库，到点按原文发送
+            ▼                         ├ /cron：写入本地定时库，到点按原文发送
+            │                         └ /attack /comfort：脚本按 @/昵称定目标，模型写开场白
+   定向互动中？ ─是→ 只留目标（按发送者 id）的消息；没有就跳过；一批只回一次
+            ▼
    合批（2s 静默 / 8s 上限 / 最多 20 条，溢出转上下文）
             ▼
    对象判断 addressed + 依据 → 模式过滤（free / infer / at / silent）
@@ -124,9 +131,9 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
 ```bash
 cd plugins/dsh-wechat-bot
 mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"   # 开发用，指向 DSH 自带模块
-node --test test/*.test.js                  # 74 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
+node --test test/*.test.js                  # 91 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
 STRESS_SCALE=3 node --test test/stress.test.js
-cd ../../adapters/wechat-db && python -m pytest tests     # 12 项
+cd ../../adapters/wechat-db && python -m pytest tests     # 17 项
 ```
 
 | 测试文件 | 覆盖 |
@@ -135,6 +142,7 @@ cd ../../adapters/wechat-db && python -m pytest tests     # 12 项
 | `bot` | 合批到模型、纠正、插话/沉默、思考中新消息进下一批、多条回复、锁屏、发送失败语义、重启恢复 |
 | `commands` | 四种模式各自放行哪些消息、命令插队、打断旧回答、`/ask` 越过限速、刷命令限流 |
 | `models` | 模型/思考强度切换的校验、持久化、`/ask` 降级、聊天里的 `/model` `/think` |
+| `engagement` | 找人（@ 优先、精确、唯一模糊、重名/找不到/自己）、按人分组的模型输入、开场、只回目标、一批一回、目标沉默不发、替换与停止、禁言暂停、超时结束、重启保持、必须回复 |
 | `cron` | 时间解析（相对、钟点、日期、每天、时区、DST）、非法输入、定时库限额与只取一次、到点发送、重启补发/错过、不执行命令、锁屏 |
 | `stress` | 50 人刷屏、混乱模型、适配器崩溃风暴、发送故障+锁屏抖动、看门狗、长时间运行 |
 | `dsh` | 用 DSH 真实会话服务验证「微信 · 群名」会话的流式、失败、取消、崩溃恢复 |

@@ -134,9 +134,9 @@ test('chaotic model: errors, hangs and garbage trip the breaker, and the bot rec
   }
   const health = env.bot.runner.health()
   t.diagnostic(`${n} msgs, ${env.model.calls.length} model calls, ${health.counters.modelErrors} failures, ` +
-    `breaker trips ${env.bot.chatLog().filter(e => e.type === 'breaker_open').length}, ${sentTexts(env).length} sent`)
+    `breaker trips ${health.counters.breakerTrips}, ${sentTexts(env).length} sent`)
   assert.ok(health.counters.modelErrors > 0)
-  assert.ok(env.bot.chatLog().some(e => e.type === 'breaker_open'), 'the breaker opened at least once')
+  assert.ok(health.counters.breakerTrips > 0, 'the breaker opened at least once') // counted: the log is a bounded ring
   assert.ok(sentTexts(env).length > 0, 'replies still went out during the chaos')
   chaos = false
   await until(() => env.bot.runner.breaker.wait() === 0, { timeoutMs: 2000, what: 'breaker cool-down' })

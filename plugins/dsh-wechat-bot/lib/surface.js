@@ -71,7 +71,7 @@ export function describeState(state) {
   lines.push(`群聊：${chat.name}，${chat.mode ?? '-'}，${STATUS[chat.status] ?? chat.status}`)
   if (chat.counters) {
     const c = chat.counters
-    lines.push(`健康：收到 ${c.received}，积压 ${chat.backlog}，溢出转上下文 ${c.overflow}，限速延后 ${c.deferred}，模型失败 ${c.modelErrors}，发送失败 ${c.sendErrors}，自动恢复 ${state.recoveries}`)
+    lines.push(`健康：收到 ${c.received}，积压 ${chat.backlog}，溢出转上下文 ${c.overflow}，限速延后 ${c.deferred}，模型失败 ${c.modelErrors}，熔断 ${c.breakerTrips} 次，发送失败 ${c.sendErrors}，自动恢复 ${state.recoveries}`)
     if (chat.engagement) lines.push(`正在${STYLES[chat.engagement.style]} ${chat.engagement.target.name}：只回 TA，/un${chat.engagement.style} 停止`)
     if (chat.breaker.open) lines.push(`模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`)
   }

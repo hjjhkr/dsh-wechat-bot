@@ -110,7 +110,7 @@ export class ChatRunner {
       threshold: this.settings.breakerThreshold, baseMs: this.settings.breakerBaseMs, maxMs: this.settings.breakerMaxMs,
     })
     this.commandRates = new Map()
-    this.counters = { received: 0, overflow: 0, deferred: 0, interrupted: 0, modelErrors: 0, sendErrors: 0, internalErrors: 0 }
+    this.counters = { received: 0, overflow: 0, deferred: 0, interrupted: 0, modelErrors: 0, breakerTrips: 0, sendErrors: 0, internalErrors: 0 }
     this.notices = {}
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
@@ -520,7 +520,10 @@ export class ChatRunner {
       if (turn.interrupted) return this.#reconsider(batch, turn.interrupted)
       this.counters.modelErrors++
       const coolDown = this.breaker.failure()
-      if (coolDown) this.#write('breaker_open', { coolDownMs: coolDown, reason: error.code ?? error.message })
+      if (coolDown) {
+        this.counters.breakerTrips++
+        this.#write('breaker_open', { coolDownMs: coolDown, reason: error.code ?? error.message })
+      }
       throw error
     } finally {
       this.turn = null
