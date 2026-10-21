@@ -34,6 +34,14 @@ export const Config = z.object({
     staleMinutes: z.natural().min(1).default(10),
     typingDelay: z.boolean().default(true),
   }).default({}),
+  guard: z.object({
+    maxTurnsPerMinute: z.natural().min(1).default(8).description('Model calls per minute; extra batches wait and merge.'),
+    modelTimeoutSeconds: z.natural().min(5).default(90),
+    maxTextChars: z.natural().min(100).default(2000).description('Longer incoming messages are truncated.'),
+    breakerThreshold: z.natural().min(1).default(3).description('Consecutive model failures before pausing.'),
+    breakerBaseSeconds: z.natural().min(1).default(30).description('First pause; doubles per repeated trip.'),
+    stuckMinutes: z.natural().min(1).default(5).description('Watchdog rebuilds the chat runner if busy longer.'),
+  }).default({}),
 })
 
 export function apply(ctx, config) {

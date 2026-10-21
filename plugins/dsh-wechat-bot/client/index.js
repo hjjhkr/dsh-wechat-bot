@@ -112,25 +112,24 @@ window.__ModuleLoader__.load({
         error && h('span', { className: 'wxb-error' }, error))
     }
 
-    function ChatPicker({ watched, onSaved }) {
+    function ChatPicker({ current, onSaved }) {
       const [chats, setChats] = useState(null)
       const [query, setQuery] = useState('')
-      const [selected, setSelected] = useState(() => new Set(watched.map(c => c.id)))
+      const [selected, setSelected] = useState(current?.id ?? null)
       const [error, setError] = useState(null)
       useEffect(() => { api.act('listChats').then(setChats, e => setError(e.message)) }, [])
       const shown = useMemo(() => (chats ?? []).filter(c => !query || c.name.includes(query)), [chats, query])
-      const toggle = id => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
       const save = async () => {
-        try { await api.act('watch', { chatIds: [...selected] }); onSaved() } catch (e) { setError(e.message) }
+        try { await api.act('watch', { chatId: selected }); onSaved() } catch (e) { setError(e.message) }
       }
       return h('div', { className: 'wxb-card' },
         h('div', { className: 'wxb-row' },
-          h('input', { type: 'text', placeholder: '搜索聊天', value: query, onChange: e => setQuery(e.target.value) }),
-          h('button', { className: 'primary', onClick: save }, `监听 ${selected.size} 个`)),
+          h('input', { type: 'text', placeholder: '搜索群聊', value: query, onChange: e => setQuery(e.target.value) }),
+          h('button', { className: 'primary', disabled: !selected, onClick: save }, '服务这个群')),
         error && h('div', { className: 'wxb-error' }, error),
         !chats ? h('div', { className: 'wxb-muted' }, '加载中…') : h('div', { className: 'wxb-list' },
           shown.map(c => h('label', { key: c.id },
-            h('input', { type: 'checkbox', checked: selected.has(c.id), onChange: () => toggle(c.id) }),
+            h('input', { type: 'radio', name: 'wxb-chat', checked: selected === c.id, onChange: () => setSelected(c.id) }),
             h('span', null, c.name),
             h('span', { className: 'wxb-muted' }, c.kind === 'group' ? `群${c.memberCount ? ` · ${c.memberCount}人` : ''}` : '私聊')))))
     }
@@ -151,16 +150,29 @@ window.__ModuleLoader__.load({
         h('button', { onClick: send }, '发送'))
     }
 
-    function ChatLog({ chat, simulator, refresh }) {
-      const [log] = usePoll(`/api/wechat-bot.log?chat=${encodeURIComponent(chat.id)}`, 1500)
-      const setMode = async mode => { await api.act('mode', { chatId: chat.id, mode }); refresh() }
+    const STATUS = { idle: '空闲', thinking: '思考中', sending: '发送中', waiting: '等待可发送', throttled: '限速/熔断等待', stopped: '未运行' }
+
+    function Health({ chat, recoveries }) {
+      const c = chat.counters
+      if (!c) return null
+      const items = [['收到', c.received], ['积压', chat.backlog], ['溢出转上下文', c.overflow], ['限速延后', c.deferred],
+        ['模型失败', c.modelErrors], ['发送失败', c.sendErrors], ['自动恢复', recoveries], ['近 1 分钟调用', chat.turnsLastMinute]]
+      return h('div', { className: 'wxb-row wxb-muted', style: { fontSize: 12 } },
+        chat.breaker.open && h('span', { className: 'wxb-error' }, `模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`),
+        items.map(([label, value]) => h('span', { key: label }, `${label} ${value}`)))
+    }
+
+    function ChatLog({ chat, recoveries, simulator, refresh }) {
+      const [log] = usePoll('/api/wechat-bot.log', 1500)
+      const setMode = async mode => { await api.act('mode', { mode }); refresh() }
       const entries = log?.entries ?? []
       return h('div', { className: 'wxb-card' },
         h('div', { className: 'wxb-row' },
           h('strong', null, chat.name),
-          h('span', { className: 'wxb-muted' }, chat.status),
+          h('span', { className: 'wxb-muted' }, STATUS[chat.status] ?? chat.status),
           h('span', { style: { flex: 1 } }),
           MODES.map(([mode, label]) => h('button', { key: mode, 'aria-pressed': chat.mode === mode, onClick: () => setMode(mode) }, label))),
+        h(Health, { chat, recoveries }),
         simulator && h(Simulate, { chat }),
         h('div', { className: 'wxb-log' }, entries.length ? [...entries].reverse().map((e, i) => h('div', { key: `${e.time}-${i}`, className: e.type },
           e.text,
@@ -171,7 +183,6 @@ window.__ModuleLoader__.load({
     function Console({ sessionId }) {
       const [state, error, refresh] = usePoll(`/api/wechat-bot.state?session=${encodeURIComponent(sessionId ?? '')}`, 2000)
       const [picking, setPicking] = useState(false)
-      const [active, setActive] = useState(null)
       if (error) return h('div', { className: 'wxb' }, h('div', { className: 'wxb-error' }, `无法连接插件：${error}`))
       if (!state) return h('div', { className: 'wxb wxb-muted' }, '加载中…')
       if (!state.setup?.completedAt) {
@@ -182,19 +193,17 @@ window.__ModuleLoader__.load({
       if (state.here?.workspace && state.here.workspace !== state.setup.workspace) {
         return h('div', { className: 'wxb' }, h('div', { className: 'wxb-card wxb-muted' }, `微信机器人的控制台在工作区 ${state.setup.workspace}。`))
       }
-      const current = state.watched.find(c => c.id === active) ?? state.watched[0]
+      const current = state.chat
       return h('div', { className: 'wxb' },
         h(Status, { state }),
         state.account.state !== 'ready' && h(Login, { refresh }),
         state.capabilities?.window && h('div', { className: 'wxb-card' }, h(WindowToggle)),
         h('div', { className: 'wxb-row' },
-          h('h3', { style: { flex: 1 } }, '监听的聊天'),
-          state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : '选择聊天')),
-        picking && h(ChatPicker, { watched: state.watched, onSaved: () => { setPicking(false); refresh() } }),
-        state.watched.length > 1 && h('div', { className: 'wxb-row' }, state.watched.map(c =>
-          h('button', { key: c.id, 'aria-pressed': c.id === current.id, onClick: () => setActive(c.id) }, c.name))),
-        current ? h(ChatLog, { key: current.id, chat: current, simulator: state.capabilities?.simulator, refresh })
-          : h('div', { className: 'wxb-card wxb-muted' }, '还没有监听任何聊天，点「选择聊天」。'),
+          h('h3', { style: { flex: 1 } }, '服务的群'),
+          state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : current ? '换一个群' : '选择群')),
+        picking && h(ChatPicker, { current, onSaved: () => { setPicking(false); refresh() } }),
+        current ? h(ChatLog, { key: current.id, chat: current, recoveries: state.recoveries, simulator: state.capabilities?.simulator, refresh })
+          : h('div', { className: 'wxb-card wxb-muted' }, '还没有选择要服务的群，点「选择群」。'),
         h('details', null, h('summary', { className: 'wxb-muted' }, '连接日志'),
           h('div', { className: 'wxb-log' }, [...state.log].reverse().map((e, i) =>
             h('div', { key: i, className: e.level === 'error' ? 'error' : '' }, `${new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false })} ${e.message}`)))))

@@ -5,43 +5,57 @@ import { CommandRegistry } from './commands.js'
 const LOG_LIMIT = 300
 const BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000]
 
-// Owns the adapter connection and one ChatRunner per watched chat.
-// Emits 'change' whenever something visible in the console changed, 'log' for
-// connection-level log entries and 'watch' (chat) when a chat starts being watched.
+export const botDefaults = Object.freeze({
+  watchdogMs: 15_000,       // how often the watchdog looks
+  stuckMs: 5 * 60_000,      // thinking/sending longer than this = stuck → rebuild the chat runner
+})
+
+// Owns the adapter connection and the ChatRunner of the one group the bot serves.
+// Self-healing: the adapter is restarted with backoff when it dies, and a
+// watchdog rebuilds the runner (keeping its context and memory) if it hangs.
+// Emits 'change' when something visible changed, 'log' for connection-level
+// entries, 'chat-log' for the chat's entries and 'watch' (chat) when watching starts.
 export class Bot extends EventEmitter {
   adapter = null
   connection = { state: 'starting', canSend: false }
   account = { state: 'offline' }
   chats = []
-  watched = []
+  chat = null
+  runner = null
   log = []
-  runners = new Map()
+  recoveries = 0
   #restarts = 0
   #disposed = false
   #canSendWaiters = new Set()
   #statusSeen = false
   #lastSelf
-  #watchQueue = Promise.resolve()
+  #queue = Promise.resolve()
 
   constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry() }) {
     super()
-    Object.assign(this, { createAdapter, store, persona, settings, think, dataDir, commands })
+    Object.assign(this, { createAdapter, store, persona, think, dataDir, commands })
+    this.settings = { ...botDefaults, ...settings }
     store.onError = error => this.note('error', `保存状态失败：${error.message}`)
   }
 
   async start() {
-    const saved = await this.store.loadBot()
-    this.watched = saved.watched ?? []
+    this.chat = (await this.store.loadBot()).chat ?? null
+    this.watchdog = setInterval(() => this.#checkStuck(), this.settings.watchdogMs)
+    this.watchdog.unref?.()
     await this.#connect()
   }
 
   async dispose() {
     this.#disposed = true
     clearTimeout(this.restartTimer)
-    for (const runner of this.runners.values()) runner.dispose()
+    clearInterval(this.watchdog)
+    const runner = this.runner
+    this.runner = null
+    runner?.dispose()
     for (const waiter of this.#canSendWaiters) waiter.reject(new Error('bot_disposed'))
     try {
-      await this.#saveChats()
+      if (runner) this.store.saveChatLater(this.chat.id, runner.snapshot())
+      await this.store.flush()
     } finally {
       await this.adapter?.shutdown()
     }
@@ -53,15 +67,13 @@ export class Bot extends EventEmitter {
       capabilities: this.adapter?.capabilities ?? null,
       connection: this.connection,
       account: this.account,
-      watched: this.watched.map(chat => {
-        const runner = this.runners.get(chat.id)
-        return { ...chat, status: runner?.status ?? 'stopped', mode: runner?.mode, mutedUntil: runner?.mutedUntil }
-      }),
+      recoveries: this.recoveries,
+      chat: this.chat && { ...this.chat, ...(this.runner?.health() ?? { status: 'stopped' }) },
     }
   }
 
-  chatLog(chatId) {
-    return this.runners.get(chatId)?.log ?? []
+  chatLog() {
+    return this.runner?.log ?? []
   }
 
   // Adds an entry to the connection log shown in the console.
@@ -76,6 +88,8 @@ export class Bot extends EventEmitter {
     this.emit('change')
   }
 
+  // ── adapter connection ──────────────────────────────────────────────────
+
   async #connect() {
     if (this.#disposed) return
     let adapter
@@ -85,12 +99,14 @@ export class Bot extends EventEmitter {
       adapter.on('log', ({ level, message }) => this.note(level, message))
       adapter.on('status', status => this.#onStatus(status))
       adapter.on('account', account => this.#onAccount(account))
-      adapter.on('message', message => this.runners.get(message.chatId)?.receive(message))
+      adapter.on('message', message => {
+        if (message.chatId === this.chat?.id) this.runner?.receive(message)
+      })
       adapter.once('close', () => this.#onClose(adapter))
       const info = await adapter.initialize({ dataDir: this.dataDir, client: { name: 'dsh-wechat-bot', version: '1' } })
       this.note('info', `已连接适配器 ${info.name} ${info.version}`)
       this.#restarts = 0
-      this.#onAccount(await adapter.accountStatus())
+      await this.#onAccount(await adapter.accountStatus())
     } catch (error) {
       this.note('error', `适配器启动失败：${error.message}`)
       // Ends the process too; the resulting 'close' schedules the next attempt.
@@ -134,7 +150,7 @@ export class Bot extends EventEmitter {
     if (!this.#statusSeen) this.#onStatus({ connection: 'connected', canSend: true }, { synthetic: true })
     if (!wasReady) {
       this.note('info', `小号已登录：${account.self.name}`)
-      await this.#applyWatch().catch(error => this.note('error', `恢复监听失败：${error.message}`))
+      await this.#serial(() => this.#applyChat()).catch(error => this.note('error', `恢复监听失败：${error.message}`))
     }
   }
 
@@ -153,63 +169,57 @@ export class Bot extends EventEmitter {
     return this.chats
   }
 
-  async setWatched(chatIds) {
-    const known = new Map([...this.watched, ...this.chats].map(c => [c.id, c]))
-    if (chatIds.some(id => !known.has(id))) await this.listChats()
-    const byId = new Map([...this.watched, ...this.chats].map(c => [c.id, c]))
-    const missing = chatIds.filter(id => !byId.has(id))
-    if (missing.length) throw new Error(`unknown chats: ${missing.join(', ')}`)
-    this.watched = chatIds.map(id => {
-      const { name, kind } = byId.get(id)
-      return { id, name, kind }
+  // ── the watched group ───────────────────────────────────────────────────
+
+  // Chooses the group to serve (null = none). Serialized with re-login so they never race.
+  setChat(chatId) {
+    return this.#serial(async () => {
+      let chat = null
+      if (chatId) {
+        if (!this.chats.some(c => c.id === chatId)) await this.listChats()
+        const found = this.chats.find(c => c.id === chatId)
+        if (!found) throw new Error(`unknown chat ${chatId}`)
+        chat = { id: found.id, name: found.name, kind: found.kind }
+      }
+      if (this.runner && this.chat?.id !== chat?.id) this.#stopRunner()
+      this.chat = chat
+      await this.store.updateBot({ chat })
+      await this.#applyChat()
+      return chat
     })
-    await this.store.updateBot({ watched: this.watched })
-    await this.#applyWatch()
-    return this.watched
   }
 
-  // Serialized: concurrent callers (console clicks, re-login) must not race on runners.
-  #applyWatch() {
-    const run = this.#watchQueue.then(() => this.#applyWatchNow())
-    this.#watchQueue = run.catch(() => {})
+  #serial(task) {
+    const run = this.#queue.then(task)
+    this.#queue = run.catch(() => {})
     return run
   }
 
-  async #applyWatchNow() {
-    const wanted = new Set(this.watched.map(c => c.id))
-    for (const [id, runner] of this.runners) {
-      if (wanted.has(id)) continue
-      this.store.saveChatLater(id, runner.snapshot())
-      runner.dispose()
-      this.runners.delete(id)
-    }
+  #stopRunner() {
+    this.store.saveChatLater(this.chat.id, this.runner.snapshot())
+    this.runner.dispose()
+    this.runner = null
+  }
+
+  async #applyChat() {
     if (!this.ready || this.#disposed) return this.#changed()
-    // Register every runner before subscribing, so no new message finds its chat missing.
-    const added = []
-    for (const chat of this.watched) {
-      if (this.runners.has(chat.id)) continue
-      this.runners.set(chat.id, await this.#runner(chat))
-      added.push(chat)
+    const chat = this.chat
+    await this.adapter.watch(chat ? [chat.id] : [])
+    if (!chat || this.runner) return this.#changed()
+    this.runner = this.#createRunner(chat, await this.store.loadChat(chat.id))
+    try {
+      this.runner.prime(await this.adapter.history(chat.id, this.runner.settings.recentLimit))
+    } catch (error) {
+      this.note('warn', `读取「${chat.name}」历史失败：${error.message}`)
     }
-    await this.adapter.watch([...wanted])
-    for (const chat of added) {
-      const runner = this.runners.get(chat.id)
-      try {
-        runner.prime(await this.adapter.history(chat.id, runner.settings.recentLimit))
-      } catch (error) {
-        this.note('warn', `读取「${chat.name}」历史失败：${error.message}`)
-      }
-      this.note('info', `开始监听「${chat.name}」`)
-      this.emit('watch', chat)
-    }
+    this.note('info', `开始监听「${chat.name}」`)
+    this.emit('watch', chat)
     this.#changed()
   }
 
-  async #runner(chat) {
-    const state = await this.store.loadChat(chat.id)
+  #createRunner(chat, state) {
     const runner = new ChatRunner({
-      chat, state, persona: this.persona, commands: this.commands,
-      settings: { ...this.settings, ...this.settings.chats?.[chat.id] },
+      chat, state, persona: this.persona, commands: this.commands, settings: this.settings,
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),
@@ -219,12 +229,28 @@ export class Bot extends EventEmitter {
         whenCanSend: signal => this.#whenCanSend(signal),
       },
       emit: (type, payload) => {
-        if (type === 'log') this.emit('chat-log', chat.id, payload)
+        if (runner !== this.runner) return
+        if (type === 'log') this.emit('chat-log', payload)
         this.store.saveChatLater(chat.id, () => runner.snapshot())
         this.#changed()
       },
     })
     return runner
+  }
+
+  // Watchdog: a runner that has been thinking/sending far longer than any
+  // timeout allows is replaced by a fresh one built from its snapshot.
+  #checkStuck() {
+    const runner = this.runner
+    if (!runner || this.#disposed) return
+    const stuck = runner.stuckFor()
+    if (stuck < this.settings.stuckMs) return
+    const snapshot = runner.snapshot()
+    runner.dispose()
+    this.runner = this.#createRunner(this.chat, snapshot)
+    this.recoveries++
+    this.note('warn', `「${this.chat.name}」处理卡住 ${Math.round(stuck / 1000)} 秒，已自动重建（上下文和记忆保留）`)
+    this.#changed()
   }
 
   #whenCanSend(signal) {
@@ -240,16 +266,10 @@ export class Bot extends EventEmitter {
     })
   }
 
-  async #saveChats() {
-    for (const [id, runner] of this.runners) this.store.saveChatLater(id, runner.snapshot())
-    await this.store.flush()
-  }
-
-  setMode(chatId, mode) {
-    const runner = this.runners.get(chatId)
-    if (!runner) throw new Error(`not watching ${chatId}`)
-    runner.setMode(mode)
-    this.store.saveChatLater(chatId, () => runner.snapshot())
+  setMode(mode) {
+    if (!this.runner) throw new Error('not watching any chat')
+    this.runner.setMode(mode)
+    this.store.saveChatLater(this.chat.id, () => this.runner.snapshot())
     this.#changed()
   }
 

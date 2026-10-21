@@ -59,6 +59,12 @@ export class WeChatBotApp {
       settings: {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
+        maxTurnsPerMinute: config.guard.maxTurnsPerMinute,
+        modelTimeoutMs: config.guard.modelTimeoutSeconds * 1000,
+        maxTextChars: config.guard.maxTextChars,
+        breakerThreshold: config.guard.breakerThreshold,
+        breakerBaseMs: config.guard.breakerBaseSeconds * 1000,
+        stuckMs: config.guard.stuckMinutes * 60_000,
         aliases: config.aliases,
         stickers: config.stickers,
       },
@@ -71,7 +77,7 @@ export class WeChatBotApp {
     // Open each chat's DSH session before the UI can, so the plugin always owns it.
     this.bot.on('watch', chat => this.#mirror(chat))
     await this.bot.start()
-    for (const chat of this.bot.watched) this.#mirror(chat)
+    if (this.bot.chat) this.#mirror(this.bot.chat)
   }
 
   async dispose() {
@@ -122,8 +128,8 @@ export class WeChatBotApp {
     }
   }
 
-  chatLog(chatId) {
-    return this.bot.chatLog(chatId)
+  chatLog() {
+    return this.bot.chatLog()
   }
 
   // First-run flow, driven by `/wechat` or the agent tool from a DSH session.
@@ -143,7 +149,7 @@ export class WeChatBotApp {
       this.setup = { ...this.setup, sessionId, self: account.self, completedAt: Date.now(), openConsoleIn: sessionId }
       await this.store.updateBot({ setup: this.setup })
     }
-    return { step: 'ready', account: account.self, watched: this.bot.watched }
+    return { step: 'ready', account: account.self, chat: this.bot.chat }
   }
 
   async consoleOpened() {
@@ -160,12 +166,12 @@ export class WeChatBotApp {
     return this.bot.listChats(query)
   }
 
-  watch(chatIds) {
-    return this.bot.setWatched(chatIds)
+  watch(chatId) {
+    return this.bot.setChat(chatId)
   }
 
-  setMode(chatId, mode) {
-    return this.bot.setMode(chatId, mode)
+  setMode(mode) {
+    return this.bot.setMode(mode)
   }
 
   setWindowVisible(visible) {

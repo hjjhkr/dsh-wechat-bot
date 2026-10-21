@@ -73,7 +73,7 @@ test('a crashed adapter rejects in-flight requests instead of hanging', async t 
 
 test('an adapter that fails the handshake is ended, not leaked, before the next attempt', async t => {
   const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-leak-'))
-  t.after(() => rm(dataDir, { recursive: true, force: true }))
+  t.after(() => rm(dataDir, { recursive: true, force: true, maxRetries: 5 }))
   // Answers every request as protocol v2, which the plugin refuses.
   const script = `require('readline').createInterface({ input: process.stdin }).on('line', line => {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(line).id, result: { protocolVersion: 2 } }) + '\n')

@@ -39,7 +39,7 @@ export function scriptedModel(reply) {
   return { think, calls }
 }
 
-export const FAST = { quietMs: 40, maxWaitMs: 300, typingDelay: false, retryDelayMs: 10, idleMinutes: 0 }
+export const FAST = { quietMs: 40, maxWaitMs: 300, typingDelay: false, retryDelayMs: 10, idleMinutes: 0, maxTurnsPerMinute: 10_000 }
 
 export async function startBot(t, { reply, settings = {}, simulator: simOptions, dir, persona = '你是小鲸鱼。' } = {}) {
   const dataDir = dir ?? await mkdtemp(join(tmpdir(), 'wechat-bot-test-'))
@@ -56,7 +56,7 @@ export async function startBot(t, { reply, settings = {}, simulator: simOptions,
   })
   t.after(async () => {
     await bot.dispose()
-    if (!dir) await rm(dataDir, { recursive: true, force: true })
+    if (!dir) await rm(dataDir, { recursive: true, force: true, maxRetries: 5 })
   })
   await bot.start()
   return { bot, model, dataDir, get simulator() { return sims.at(-1) } }

@@ -3,17 +3,23 @@
 // first message, or immediately once it reaches `maxMessages` / `maxChars`.
 // While the consumer is busy, messages keep accumulating and are delivered
 // together once it calls `release()`.
+//
+// At most `maxMessages` messages ever wait: under a flood the oldest are
+// handed to `onOverflow` (they stay in the conversation as context) so the
+// bot always answers the newest messages and memory stays bounded.
 export class Batcher {
   #pending = []
   #arrived = 0
   #firstAt = 0
   #quietTimer
   #maxTimer
+  #deferTimer
   #busy = false
 
-  constructor({ quietMs = 2000, maxWaitMs = 8000, maxMessages = 20, maxChars = 6000 }, onBatch) {
+  constructor({ quietMs = 2000, maxWaitMs = 8000, maxMessages = 20, maxChars = 6000 }, onBatch, onOverflow = () => {}) {
     Object.assign(this, { quietMs, maxWaitMs, maxMessages, maxChars })
     this.onBatch = onBatch
+    this.onOverflow = onOverflow
   }
 
   get size() {
@@ -33,6 +39,7 @@ export class Batcher {
     if (!this.#pending.length) this.#firstAt = Date.now()
     this.#pending.push(message)
     this.#arrived++
+    this.#cap()
     if (this.#busy) return
     if (this.#full()) return this.#flush()
     this.#arm()
@@ -42,6 +49,7 @@ export class Batcher {
   requeue(messages) {
     if (!this.#pending.length) this.#firstAt = Date.now()
     this.#pending.unshift(...messages)
+    this.#cap()
   }
 
   // Mark the consumer busy with work that did not come from a batch (e.g. an idle check).
@@ -53,15 +61,29 @@ export class Batcher {
 
   // Called by the consumer when it can accept the next batch.
   release() {
+    clearTimeout(this.#deferTimer)
     this.#busy = false
     if (!this.#pending.length) return
     if (this.#full()) return this.#flush()
     this.#arm()
   }
 
+  // Stay busy for `ms`, then release (messages keep accumulating meanwhile).
+  defer(ms) {
+    clearTimeout(this.#deferTimer)
+    this.#busy = true
+    this.#deferTimer = setTimeout(() => this.release(), ms)
+    this.#deferTimer.unref?.()
+  }
+
   clear() {
     this.#disarm()
+    clearTimeout(this.#deferTimer)
     this.#pending = []
+  }
+
+  #cap() {
+    while (this.#pending.length > this.maxMessages) this.onOverflow(this.#pending.shift())
   }
 
   #full() {

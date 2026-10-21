@@ -9,12 +9,12 @@ import { sleep, startBot, until } from './helpers.js'
 const GROUP = 'demo@chatroom'
 const say = (env, from, text, extra = {}) => env.simulator.inject({ chatId: GROUP, from, text, ...extra })
 const sent = env => env.simulator.messages.get(GROUP).filter(m => m.fromSelf).map(m => m.text)
-const logOf = env => env.bot.chatLog(GROUP)
+const logOf = env => env.bot.chatLog()
 
 async function watching(t, options = {}) {
   const env = await startBot(t, options)
   await until(() => env.bot.ready)
-  await env.bot.setWatched([GROUP])
+  await env.bot.setChat(GROUP)
   return env
 }
 
@@ -36,7 +36,7 @@ test('/mode mention: only addressed batches reach the model; /mode free restores
   say(env, 'wxid_alice', '@小鲸鱼 你热吗', { mentions: ['wxid_bot'] })
   await until(() => env.model.calls.length === 1)
   assert.ok(env.model.calls[0].input.recent.some(m => m.text === '今天好热'), 'skipped messages stay as context')
-  assert.equal(env.bot.view().watched[0].mode, 'mention')
+  assert.equal(env.bot.view().chat.mode, 'mention')
 })
 
 test('/mute silences the bot, but /ask still gets a deliberate answer', async t => {
@@ -54,7 +54,7 @@ test('/mute silences the bot, but /ask still gets a deliberate answer', async t 
   assert.equal(env.model.calls.length, 1)
   say(env, 'wxid_carol', '/unmute')
   await until(() => sent(env).includes('我回来了'))
-  assert.equal(env.bot.runners.get(GROUP).muted, false)
+  assert.equal(env.bot.runner.muted, false)
 })
 
 test('/memory shows only your own notes and /forget removes them', async t => {
@@ -70,7 +70,7 @@ test('/memory shows only your own notes and /forget removes them', async t => {
   assert.equal(sent(env)[0], '关于你我记得：\n· 城市：住在杭州')
   say(env, 'wxid_alice', '/forget 城市')
   await until(() => sent(env).length === 2)
-  assert.deepEqual(env.bot.runners.get(GROUP).memory.recall(['wxid_alice', 'wxid_bob']), { wxid_bob: { 城市: '住在成都' } })
+  assert.deepEqual(env.bot.runner.memory.recall(['wxid_alice', 'wxid_bob']), { wxid_bob: { 城市: '住在成都' } })
 })
 
 test('/tldr forwards to the model with a summary instruction and higher priority than mode', async t => {
@@ -95,7 +95,7 @@ test('/help lists the commands; unknown commands are ordinary chat', async t => 
 
 test('custom command scripts are loaded from a directory', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-commands-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5 }))
   await writeFile(join(dir, 'roll.js'), `export default {
     name: 'roll', aliases: ['骰子'], summary: '掷骰子',
     run: ({ args }) => 'roll:' + (args[0] ?? 6),
@@ -105,7 +105,7 @@ test('custom command scripts are loaded from a directory', async t => {
   const env = await startBot(t)
   env.bot.commands = commands
   await until(() => env.bot.ready)
-  await env.bot.setWatched([GROUP])
+  await env.bot.setChat(GROUP)
   say(env, 'wxid_alice', '/骰子 20')
   await until(() => sent(env).length === 1)
   assert.equal(sent(env)[0], 'roll:20')

@@ -3,6 +3,7 @@ import { addressOf, nameMatchers } from './addressing.js'
 import { Batcher } from './batcher.js'
 import { CommandRegistry, MODES, parseCommand } from './commands.js'
 import { DecisionError, parseDecision } from './decision.js'
+import { CircuitBreaker, RateWindow, withDeadline } from './guard.js'
 import { MemoryBook } from './memory.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
@@ -22,10 +23,18 @@ export const chatDefaults = Object.freeze({
   sendRetries: 2,
   retryDelayMs: 2000,
   typingDelay: true,
+  // Guardrails
+  maxTextChars: 2000,          // longer messages are truncated before anything else sees them
+  maxTurnsPerMinute: 8,        // model calls per minute; extra batches wait (and merge) instead of spamming
+  modelTimeoutMs: 90_000,      // one model call never takes longer than this
+  breakerThreshold: 3,         // consecutive model failures before pausing model calls
+  breakerBaseMs: 30_000,       // first pause; doubles on each repeated trip
+  breakerMaxMs: 10 * 60_000,
 })
 
 const LOG_LIMIT = 300
 const SEEN_LIMIT = 1000
+const NOTICE_INTERVAL_MS = 5000
 
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
@@ -67,10 +76,26 @@ export class ChatRunner {
     this.seen = new Set(this.transcript.map(m => m.id))
     this.sentIds = new Set()
     this.status = 'idle'
+    this.busySince = 0
     this.supersedes = new WeakMap()
     this.abort = new AbortController()
-    this.batcher = new Batcher(this.settings, batch => this.#run(batch))
+    this.rate = new RateWindow(this.settings.maxTurnsPerMinute)
+    this.breaker = new CircuitBreaker({
+      threshold: this.settings.breakerThreshold, baseMs: this.settings.breakerBaseMs, maxMs: this.settings.breakerMaxMs,
+    })
+    this.counters = { received: 0, overflow: 0, deferred: 0, modelErrors: 0, sendErrors: 0, internalErrors: 0 }
+    this.notices = {}
+    this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     this.#scheduleIdle()
+  }
+
+  // What the console and the watchdog need to know.
+  health(now = Date.now()) {
+    return {
+      status: this.status, mode: this.mode, mutedUntil: this.mutedUntil,
+      backlog: this.batcher.size, busyMs: this.stuckFor(now),
+      breaker: this.breaker.view(now), turnsLastMinute: this.rate.used, counters: { ...this.counters },
+    }
   }
 
   snapshot() {
@@ -96,6 +121,11 @@ export class ChatRunner {
     clearTimeout(this.idleTimer)
   }
 
+  // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
+  stuckFor(now = Date.now()) {
+    return this.busySince ? now - this.busySince : 0
+  }
+
   setMode(mode) {
     if (!MODES[mode]) throw new Error(`unknown mode ${mode}`)
     this.modeOverride = mode
@@ -112,14 +142,28 @@ export class ChatRunner {
     return this.mutedUntil > Date.now()
   }
 
+  // Never throws: one bad message must not stop the chat.
   receive(message) {
+    try {
+      this.#receive(message)
+    } catch (error) {
+      this.counters.internalErrors++
+      this.#write('error', { message: `处理消息失败：${error.message}` })
+    }
+  }
+
+  #receive(message) {
     if (this.disposed || this.seen.has(message.id)) return
     this.#remember(message.id)
+    if (message.text.length > this.settings.maxTextChars) {
+      message = { ...message, text: message.text.slice(0, this.settings.maxTextChars) + '…（太长，已截断）' }
+    }
     if (message.fromSelf) {
       // Echo of something we sent, or someone typing on the bot account's phone.
       if (!this.sentIds.has(message.id)) this.#record(message)
       return
     }
+    this.counters.received++
     this.#record(message)
     this.#write('message', { id: message.id, from: message.sender.name, text: message.text, kind: message.kind })
     this.#scheduleIdle()
@@ -160,7 +204,23 @@ export class ChatRunner {
     this.emit('log', entry)
   }
 
+  // Writes at most one entry of `type` per few seconds (floods would drown the log otherwise).
+  #notice(type, data) {
+    const now = Date.now()
+    if (now - (this.notices[type] ?? 0) < NOTICE_INTERVAL_MS) return
+    this.notices[type] = now
+    this.#write(type, data)
+  }
+
+  #overflow() {
+    this.counters.overflow++
+    this.#notice('overflow', { total: this.counters.overflow })
+  }
+
   #setStatus(status) {
+    const busy = status === 'thinking' || status === 'sending'
+    if (!busy) this.busySince = 0
+    else if (this.status !== status || !this.busySince) this.busySince = Date.now()
     this.status = status
     this.emit('status', status)
   }
@@ -255,23 +315,41 @@ export class ChatRunner {
   }
 
   async #run(batch, event) {
+    let deferMs = 0
     try {
-      await this.#turn(batch, event)
+      deferMs = await this.#turn(batch, event) ?? 0
     } catch (error) {
       if (!this.disposed) this.#write('error', { message: error.message, code: error.code })
     } finally {
-      this.#setStatus('idle')
-      if (!this.disposed) this.batcher.release()
+      this.#setStatus(deferMs ? 'throttled' : 'idle')
+      if (!this.disposed) {
+        if (deferMs) this.batcher.defer(deferMs)
+        else this.batcher.release()
+      }
     }
+  }
+
+  // How long model calls must wait (rate limit or open breaker), in ms.
+  #gate() {
+    return Math.max(this.rate.wait(), this.breaker.wait())
   }
 
   // Thinking does not wait for the adapter to be able to send (e.g. a locked screen):
   // the reply waits in #sendOne instead, and is dropped if it goes stale meanwhile.
+  // Returns a delay in ms when the batch was put back to wait for the rate limit / breaker.
   async #turn(batch, event) {
     const started = Date.now()
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
-    if (skip) return this.#write('skipped', { reason: skip, count: batch.length })
+    if (skip) return void this.#write('skipped', { reason: skip, count: batch.length })
+    const wait = this.#gate()
+    if (wait) {
+      if (!batch.length) return
+      this.counters.deferred++
+      this.batcher.requeue(batch)
+      this.#notice('deferred', { reason: this.breaker.wait() ? 'breaker_open' : 'rate_limited', waitMs: wait })
+      return wait
+    }
     if (batch.length) {
       this.#write('batch', { count: batch.length, addressed: Object.fromEntries([...address].map(([id, a]) => [id, a.addressed])) })
       if (this.stats.date !== today()) this.stats = { date: today(), batches: 0, sent: 0 }
@@ -279,7 +357,17 @@ export class ChatRunner {
     }
     this.#setStatus('thinking')
     const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
-    const decision = await this.#decide({ batch, address, event, mustReply })
+    let decision
+    try {
+      decision = await this.#decide({ batch, address, event, mustReply })
+      this.breaker.success()
+    } catch (error) {
+      if (this.disposed) return
+      this.counters.modelErrors++
+      const coolDown = this.breaker.failure()
+      if (coolDown) this.#write('breaker_open', { coolDownMs: coolDown, reason: error.code ?? error.message })
+      throw error
+    }
     if (this.disposed) return
 
     const newer = this.batcher.arrived
@@ -320,7 +408,10 @@ export class ChatRunner {
     const effort = batch.find(m => m.command?.effort)?.command.effort
     let retries = settings.correctionRetries
     for (;;) {
-      const output = await this.think({ chat: this.chat, system, messages, readable, effort, signal: this.abort.signal })
+      this.rate.record()
+      const output = await withDeadline(
+        signal => this.think({ chat: this.chat, system, messages, readable, effort, signal }),
+        settings.modelTimeoutMs, this.abort.signal)
       let problem
       try {
         const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers })
@@ -410,6 +501,7 @@ export class ChatRunner {
           continue
         }
         // A duplicate message is worse than a missing one, so anything but a definite failure is final.
+        this.counters.sendErrors++
         this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
         return null
       }

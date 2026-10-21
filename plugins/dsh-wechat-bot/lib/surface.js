@@ -19,10 +19,7 @@ export function registerRoutes(ctx, app) {
   })
   ctx.connection.fetch.register({
     path: '/api/wechat-bot.log', methods: ['GET'], requestBody: 'buffered',
-    fetch: async request => {
-      const entries = app.chatLog(new URL(request.url).searchParams.get('chat') ?? '')
-      return json({ entries: entries.map(entry => ({ ...entry, text: formatEntry(entry) })) })
-    },
+    fetch: async () => json({ entries: app.chatLog().map(entry => ({ ...entry, text: formatEntry(entry) })) }),
   })
   ctx.connection.fetch.register({
     path: '/api/wechat-bot.action', methods: ['POST'], requestBody: 'buffered',
@@ -46,8 +43,8 @@ function runAction(app, { action, ...args }) {
   switch (action) {
     case 'login': return app.login()
     case 'listChats': return app.listChats(args.query)
-    case 'watch': return app.watch(args.chatIds)
-    case 'mode': return app.setMode(args.chatId, args.mode)
+    case 'watch': return app.watch(args.chatId ?? null)
+    case 'mode': return app.setMode(args.mode)
     case 'window': return app.setWindowVisible(args.visible === true)
     case 'windowState': return app.windowState()
     case 'simulate': return app.simulate(args)
@@ -59,6 +56,7 @@ function runAction(app, { action, ...args }) {
 // ── text summaries shared by the command and the tool ─────────────────────
 
 const CONNECTION = { connected: '已连接', degraded: '连接不稳定', disconnected: '未连接', adapter_down: '适配器未运行', starting: '启动中' }
+const STATUS = { idle: '空闲', thinking: '思考中', sending: '发送中', waiting: '等待可发送', throttled: '限速/熔断等待中', stopped: '未运行' }
 
 export function describeState(state) {
   const lines = []
@@ -67,8 +65,14 @@ export function describeState(state) {
   lines.push(`连接：${CONNECTION[state.connection.state] ?? state.connection.state}${state.connection.canSend ? '' : '，暂时不能发送'}${state.connection.reason ? `（${state.connection.reason}）` : ''}`)
   lines.push(`小号：${state.account.state === 'ready' ? state.account.self.name : '未登录'}`)
   lines.push(`模型：${state.model.provider} / ${state.model.model}，思考 ${state.model.reasoningEffort}`)
-  if (!state.watched.length) lines.push('监听：还没有选择聊天')
-  for (const chat of state.watched) lines.push(`· ${chat.name}（${chat.kind === 'group' ? '群' : '私聊'}）：${chat.mode ?? '-'}，${chat.status}`)
+  const chat = state.chat
+  if (!chat) return [...lines, '群聊：还没有选择'].join('\n')
+  lines.push(`群聊：${chat.name}，${chat.mode ?? '-'}，${STATUS[chat.status] ?? chat.status}`)
+  if (chat.counters) {
+    const c = chat.counters
+    lines.push(`健康：收到 ${c.received}，积压 ${chat.backlog}，溢出转上下文 ${c.overflow}，限速延后 ${c.deferred}，模型失败 ${c.modelErrors}，发送失败 ${c.sendErrors}，自动恢复 ${state.recoveries}`)
+    if (chat.breaker.open) lines.push(`模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`)
+  }
   return lines.join('\n')
 }
 
@@ -76,8 +80,8 @@ function describeSetup(result) {
   if (result.step === 'login') {
     return `第一步：登录微信小号。\n${result.instructions}\n登录好以后回到这里，再输入 /wechat（或告诉我"好了"）完成初始化。`
   }
-  const watching = result.watched.length ? `正在监听：${result.watched.map(c => c.name).join('、')}` : '下一步在右侧栏「微信机器人」控制台里选择要监听的聊天。'
-  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n这个工作区里会为每个监听的聊天生成「微信 · 聊天名」会话，可以随时打开看模型在想什么。`
+  const watching = result.chat ? `正在服务的群：${result.chat.name}` : '下一步在右侧栏「微信机器人」控制台里选择要服务的群。'
+  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n这个工作区里会生成「微信 · 群名」会话，可以随时打开看模型在想什么。`
 }
 
 const EFFORTS = ['off', 'low', 'high', 'max']
@@ -109,20 +113,19 @@ export function registerCommand(ctx, app) {
 
 async function findChat(app, ref) {
   const match = list => list.find(c => c.id === ref) ?? list.find(c => c.name === ref) ?? list.find(c => c.name.includes(ref))
-  return match(app.bot.watched) ?? match(app.bot.chats) ?? match(await app.listChats())
+  return match(app.bot.chats) ?? match(await app.listChats())
 }
 
 export function registerTool(ctx, app) {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'wechat_bot',
-    description: '操作微信群聊机器人插件。setup：在当前工作区初始化（用户第一次提到微信机器人、或说已登录小号时调用）；status：查看连接、监听和模式；chats：列出小号的聊天；watch：设置要监听的聊天（会替换原列表）；mode：切换某个聊天的发言模式；log：看某个聊天最近的处理日志；eval：用内置群聊场景评测模型判断"该不该说话、在跟谁说"的准确率，可比较不同思考强度。',
+    description: '操作微信群聊机器人插件（只服务一个群）。setup：在当前工作区初始化（用户第一次提到微信机器人、或说已登录小号时调用）；status：查看连接、群、模式和健康状况；chats：列出小号的聊天；watch：选择要服务的群（chat 为空表示停止）；mode：切换发言模式；log：看最近的处理日志；eval：用内置群聊场景评测模型判断"该不该说话、在跟谁说"的准确率，可比较不同思考强度。',
     parameters: {
       action: { type: 'string', required: true, enum: ['setup', 'status', 'chats', 'watch', 'mode', 'log', 'eval'] },
-      efforts: { type: 'array', items: { type: 'string', enum: EFFORTS }, description: 'eval：要比较的思考强度，默认用当前配置' },
-      chats: { type: 'array', items: { type: 'string' }, description: 'watch：聊天名称或 id 列表' },
-      chat: { type: 'string', description: 'mode / log：聊天名称或 id' },
+      chat: { type: 'string', description: 'watch：群名称或 id' },
       mode: { type: 'string', enum: Object.keys(MODES), description: 'mode：free 自由发言 / mention 只回复@和点名 / silent 不说话' },
       query: { type: 'string', description: 'chats：按名称过滤' },
+      efforts: { type: 'array', items: { type: 'string', enum: EFFORTS }, description: 'eval：要比较的思考强度，默认用当前配置' },
     },
     output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
     async execute(args, exec) {
@@ -134,26 +137,16 @@ export function registerTool(ctx, app) {
           return chats.map(c => `${c.name}（${c.kind === 'group' ? '群' : '私聊'}，id ${c.id}）`).join('\n') || '没有聊天'
         }
         case 'watch': {
-          const ids = []
-          for (const ref of args.chats ?? []) {
-            const chat = await findChat(app, ref)
-            if (!chat) return `找不到聊天「${ref}」`
-            ids.push(chat.id)
-          }
-          const watched = await app.watch(ids)
-          return watched.length ? `开始监听：${watched.map(c => c.name).join('、')}` : '已停止监听所有聊天'
+          if (!args.chat) return (await app.watch(null), '已停止服务')
+          const chat = await findChat(app, args.chat)
+          if (!chat) return `找不到聊天「${args.chat}」`
+          await app.watch(chat.id)
+          return `开始服务「${chat.name}」`
         }
-        case 'mode': {
-          const chat = args.chat && await findChat(app, args.chat)
-          if (!chat) return `找不到聊天「${args.chat ?? ''}」`
-          app.setMode(chat.id, args.mode)
-          return `「${chat.name}」已切换为 ${args.mode}：${MODES[args.mode]}`
-        }
-        case 'log': {
-          const chat = args.chat && await findChat(app, args.chat)
-          if (!chat) return `找不到聊天「${args.chat ?? ''}」`
-          return app.chatLog(chat.id).slice(-30).map(formatEntry).join('\n') || '还没有日志'
-        }
+        case 'mode':
+          app.setMode(args.mode)
+          return `已切换为 ${args.mode}：${MODES[args.mode]}`
+        case 'log': return app.chatLog().slice(-30).map(formatEntry).join('\n') || '还没有日志'
         case 'eval': return app.evaluate(efforts(args.efforts ?? []))
         default: return `未知操作 ${args.action}`
       }
@@ -176,7 +169,10 @@ export function formatEntry(entry) {
     mode: () => `模式切换为 ${entry.mode}`,
     mute: () => entry.until ? `禁言到 ${new Date(entry.until).toLocaleTimeString('zh-CN', { hour12: false })}` : '解除禁言',
     waiting: () => '等待可以发送（可能锁屏/断线）',
-    dropped: () => '回复过时，已放弃',
+    dropped: () => entry.reason === 'stale' ? '回复过时，已放弃' : '已禁言，剩下的不发了',
+    overflow: () => `消息太多，较早的只作为上下文（累计 ${entry.total} 条）`,
+    deferred: () => entry.reason === 'breaker_open' ? `模型熔断中，${Math.ceil(entry.waitMs / 1000)} 秒后再试` : `说话太频繁，${Math.ceil(entry.waitMs / 1000)} 秒后再处理`,
+    breaker_open: () => `模型连续失败，暂停 ${Math.round(entry.coolDownMs / 1000)} 秒（${entry.reason}）`,
     invalid_output: () => `模型输出不合格（${entry.code}）`,
     send_error: () => `发送失败（${entry.code}${entry.uncertain ? '，可能已送达，不重试' : ''}）`,
     error: () => `错误：${entry.message}`,

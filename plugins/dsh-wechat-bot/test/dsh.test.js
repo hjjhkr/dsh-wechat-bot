@@ -23,7 +23,7 @@ async function fixture(t) {
   let ctx
   t.after(async () => {
     await rootCtx.fiber.dispose()
-    await rm(root, { recursive: true, force: true })
+    await rm(root, { recursive: true, force: true, maxRetries: 5 })
   })
   await rootCtx.plugin(SessionStore).await()
   await rootCtx.plugin(AgentRegistry).await()

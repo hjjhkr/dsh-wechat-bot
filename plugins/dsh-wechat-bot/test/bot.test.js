@@ -6,15 +6,14 @@ import { join } from 'node:path'
 import { sleep, startBot, until } from './helpers.js'
 
 const GROUP = 'demo@chatroom'
-const DIRECT = 'wxid_wuti'
 const say = (env, from, text, extra = {}) => env.simulator.inject({ chatId: GROUP, from, text, ...extra })
 const sent = env => env.simulator.messages.get(GROUP).filter(m => m.fromSelf).map(m => m.text)
-const logTypes = (env, chat = GROUP) => env.bot.chatLog(chat).map(e => e.type)
+const logTypes = env => env.bot.chatLog().map(e => e.type)
 
 async function watching(t, options) {
   const env = await startBot(t, options)
   await until(() => env.bot.ready, { what: 'account ready' })
-  await env.bot.setWatched([GROUP])
+  await env.bot.setChat(GROUP)
   return env
 }
 
@@ -130,7 +129,7 @@ test('while sending is impossible (locked screen) the bot keeps thinking; replie
   await until(() => !env.bot.connection.canSend, { what: 'locked status' })
   say(env, 'wxid_alice', '小鲸鱼，在吗')
   await until(() => env.model.calls.length === 1, { what: 'thinking during the lock' })
-  await until(() => env.bot.runners.get(GROUP).status === 'waiting', { what: 'reply waiting to be sent' })
+  await until(() => env.bot.runner.status === 'waiting', { what: 'reply waiting to be sent' })
   assert.deepEqual(sent(env), [])
   say(env, 'wxid_bob', '它锁屏了吧')
   await env.simulator.handlers()['sim/status']({ canSend: true })
@@ -144,7 +143,7 @@ test('a reply that became stale while locked is dropped instead of sent late', a
     reply: () => ({ to: null, reply: ['一', '二'] }),
   })
   // Lock the screen right after the first part goes out.
-  env.bot.on('chat-log', (_chat, entry) => {
+  env.bot.on('chat-log', entry => {
     if (entry.type === 'sent') env.simulator.handlers()['sim/status']({ canSend: false })
   })
   say(env, 'wxid_alice', '说两句')
@@ -166,7 +165,7 @@ test('failed sends are retried, uncertain sends never are', async t => {
   await until(() => logTypes(env).includes('send_error'), { what: 'uncertain send logged' })
   await sleep(100)
   assert.deepEqual(sent(env), ['嗯'])
-  assert.equal(env.bot.chatLog(GROUP).find(e => e.type === 'send_error').uncertain, true)
+  assert.equal(env.bot.chatLog().find(e => e.type === 'send_error').uncertain, true)
 })
 
 test('a message typed on the bot account\'s phone is context, not a trigger', async t => {
@@ -181,7 +180,7 @@ test('a message typed on the bot account\'s phone is context, not a trigger', as
 
 test('memory is learned from conversation and survives a restart', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-restart-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5 }))
   const first = await watching(t, {
     dir,
     reply: input => ({ to: null, reply: [], memory: [{ who: input.new[0].from.id, topic: '宠物', note: '养了一只叫豆豆的猫', evidence: input.new[0].id }] }),
@@ -191,7 +190,7 @@ test('memory is learned from conversation and survives a restart', async t => {
   await first.bot.dispose()
 
   const second = await startBot(t, { dir })
-  await until(() => second.bot.runners.has(GROUP), { what: 'watch restored from disk' })
+  await until(() => second.bot.runner, { what: 'watch restored from disk' })
   second.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '早' })
   await until(() => second.model.calls.length === 1)
   const input = second.model.calls[0].input
@@ -199,28 +198,9 @@ test('memory is learned from conversation and survives a restart', async t => {
   assert.ok(input.recent.some(m => m.text.includes('豆豆')), 'transcript restored too')
 })
 
-test('chats are processed in parallel, each strictly in order', async t => {
-  const gate = Promise.withResolvers()
-  const env = await startBot(t, {
-    reply: async input => {
-      if (input.chat.kind === 'group') await gate.promise
-      return { to: null, reply: [`回${input.chat.name}`] }
-    },
-  })
-  await until(() => env.bot.ready)
-  await env.bot.setWatched([GROUP, DIRECT])
-  say(env, 'wxid_alice', '群里')
-  env.simulator.inject({ chatId: DIRECT, text: '私聊' })
-  await until(() => env.simulator.messages.get(DIRECT).some(m => m.fromSelf), { what: 'direct reply while group is busy' })
-  assert.deepEqual(sent(env), [])
-  assert.equal(env.model.calls.find(c => c.input.chat.kind === 'direct').input.new[0].addressed, 'you')
-  gate.resolve()
-  await until(() => sent(env).length === 1)
-})
-
-test('unwatching a chat stops processing it', async t => {
+test('stopping the bot\'s group stops processing it', async t => {
   const env = await watching(t)
-  await env.bot.setWatched([])
+  await env.bot.setChat(null)
   say(env, 'wxid_alice', '小鲸鱼？')
   await sleep(120)
   assert.equal(env.model.calls.length, 0)
@@ -242,18 +222,9 @@ test('the adapter is restarted after it crashes and watching resumes', async t =
   const crashed = env.simulator
   crashed.close()
   await until(() => env.simulator !== crashed && env.bot.ready, { timeoutMs: 5000, what: 'reconnect' })
-  await until(() => env.bot.runners.has(GROUP))
+  await until(() => env.bot.runner)
   say(env, 'wxid_alice', '还在吗')
   await until(() => env.model.calls.length === 1, { what: 'processing after reconnect' })
-})
-
-test('a long burst is processed in consecutive batches without re-asking about the backlog', async t => {
-  const env = await watching(t, { settings: { maxMessages: 3 }, reply: () => ({ reply: [] }) })
-  for (let i = 0; i < 7; i++) say(env, 'wxid_alice', `第${i}条`)
-  await until(() => new Set(env.model.calls.flatMap(c => c.input.new.map(m => m.text))).size === 7, { what: 'all seven seen' })
-  await sleep(100)
-  const batches = env.model.calls.map(c => c.input.new.map(m => m.text.slice(1, -1)).join(','))
-  assert.equal(new Set(batches).size, batches.length, `no batch is asked twice: ${batches}`)
 })
 
 test('a reply to the bot identified only by message id still counts as addressing it', async t => {
@@ -270,31 +241,31 @@ test('a reply to the bot identified only by message id still counts as addressin
 
 test('the configured mode applies until someone explicitly changes it', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-mode-'))
-  t.after(() => rm(dir, { recursive: true, force: true }))
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5 }))
   const first = await watching(t, { dir })
   say(first, 'wxid_alice', '随便聊聊')
   await until(() => first.model.calls.length === 1)
   await first.bot.dispose()
 
   const second = await startBot(t, { dir, settings: { mode: 'mention' } })
-  await until(() => second.bot.runners.has(GROUP))
-  assert.equal(second.bot.runners.get(GROUP).mode, 'mention', 'config change takes effect')
-  second.bot.setMode(GROUP, 'silent')
+  await until(() => second.bot.runner)
+  assert.equal(second.bot.runner.mode, 'mention', 'config change takes effect')
+  second.bot.setMode('silent')
   await second.bot.dispose()
 
   const third = await startBot(t, { dir, settings: { mode: 'mention' } })
-  await until(() => third.bot.runners.has(GROUP))
-  assert.equal(third.bot.runners.get(GROUP).mode, 'silent', 'an explicit choice survives restarts')
+  await until(() => third.bot.runner)
+  assert.equal(third.bot.runner.mode, 'silent', 'an explicit choice survives restarts')
 })
 
-test('unwatching a chat mid-reply stops the rest of the reply, even across a lock', async t => {
+test('stopping the group mid-reply stops the rest of the reply, even across a lock', async t => {
   const env = await watching(t, { reply: () => ({ reply: ['一', '二', '三'] }) })
-  env.bot.on('chat-log', (_chat, entry) => {
+  env.bot.on('chat-log', entry => {
     if (entry.type === 'sent') env.simulator.handlers()['sim/status']({ canSend: false })
   })
   say(env, 'wxid_alice', '说三句')
   await until(() => logTypes(env).includes('waiting'))
-  await env.bot.setWatched([])
+  await env.bot.setChat(null)
   await env.simulator.handlers()['sim/status']({ canSend: true })
   await sleep(100)
   assert.deepEqual(sent(env), ['一'])
@@ -303,7 +274,7 @@ test('unwatching a chat mid-reply stops the rest of the reply, even across a loc
 test('/mute during a multi-part reply stops the remaining parts', async t => {
   const env = await watching(t, { reply: () => ({ reply: ['一', '二'] }) })
   // Hold the second part back (as a locked screen would) while someone mutes the bot.
-  env.bot.on('chat-log', (_chat, entry) => {
+  env.bot.on('chat-log', entry => {
     if (entry.type === 'sent' && entry.part.text === '一') env.simulator.handlers()['sim/status']({ canSend: false })
   })
   say(env, 'wxid_alice', '说两句')
@@ -326,11 +297,11 @@ test('an adapter that reports it cannot send is believed after login', async t =
   assert.equal(env.bot.connection.canSend, false)
 })
 
-test('concurrent watch changes never leave a stray chat runner behind', async t => {
+test('concurrent group changes never leave a stray chat runner behind', async t => {
   const env = await startBot(t, { settings: { idleMinutes: 0.001 }, reply: () => ({ reply: ['在吗'] }) })
   await until(() => env.bot.ready)
-  await Promise.all([env.bot.setWatched([GROUP]), env.bot.setWatched([GROUP])])
-  await env.bot.setWatched([])
+  await Promise.all([env.bot.setChat(GROUP), env.bot.setChat(GROUP)])
+  await env.bot.setChat(null)
   const before = env.model.calls.length
   await sleep(200)
   assert.equal(env.model.calls.length, before, 'no idle checks from an orphaned runner')
