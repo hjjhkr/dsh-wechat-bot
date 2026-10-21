@@ -147,6 +147,7 @@ export class Batcher {
   #flush() {
     if (this.#busy) return
     if (this.#urgent.length) {
+      this.#disarm() // re-armed on release; #firstAt keeps the pending batch's max wait honest
       this.#busy = true
       return this.onBatch(this.#urgent.splice(0))
     }

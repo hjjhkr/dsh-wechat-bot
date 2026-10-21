@@ -199,3 +199,43 @@ test('a job due while the screen is locked goes out on unlock', async t => {
   await env.simulator.handlers()['sim/status']({ canSend: true })
   await until(() => sent(env).includes('锁屏时到点'))
 })
+
+test('daily jobs keep their intended time through a DST gap; 8时 is a clock time; Feb 29 rolls over safely', () => {
+  // 02:30 does not exist in New York on 2027-03-14; the job must come back to 02:30 afterwards.
+  const created = parseSchedule('每天 2:30 America/New_York 早', Date.UTC(2027, 2, 10, 12))
+  const book = new CronBook()
+  const job = book.add(created, { id: 'a', name: '阿离' })
+  for (const day of [13, 14, 15, 16]) book.takeDue(job.at + 1) // fire four times
+  assert.equal(describeTime(job.at, job.zone, job.at), '今天 02:30（America/New_York）')
+  assert.equal(local(at('8时 起床')), '10-22 08:00（东八区）')
+  assert.equal(local(at('8时30分 起床')), '10-22 08:30（东八区）')
+  assert.throws(() => parseSchedule('2-29 10:00 x', Date.UTC(2028, 2, 5)), /明年没有这一天/)
+})
+
+test('a job with a zone this runtime cannot read ends as missed instead of breaking the book', () => {
+  const book = new CronBook({ jobs: [
+    { id: 1, at: NOW - 1000, repeat: 'daily', zone: 'Mars/Olympus', text: '坏的', owner: { id: 'a', name: '阿离' } },
+    { id: 2, at: NOW - 1000, repeat: null, zone: 'UTC+8', text: '好的', owner: { id: 'a', name: '阿离' } },
+  ], nextId: 3 })
+  const { due } = book.takeDue(NOW)
+  assert.deepEqual(due.map(j => j.text), ['坏的', '好的'])
+  assert.deepEqual(book.list(), [], 'the broken daily job is not rescheduled')
+  assert.equal(describeTime(NOW, 'Mars/Olympus', NOW), '今天 10:00（东八区）', 'display falls back instead of throwing')
+})
+
+test('a failed save never stops the scheduler', async () => {
+  const sends = []
+  const link = { send: async (content, clientId) => { sends.push(content.text); return { messageId: clientId } }, canSend: () => true, whenCanSend: async () => {} }
+  const owner = { id: 'a', name: '阿离' }
+  const book = new CronBook()
+  book.add({ at: Date.now() + 100, repeat: null, zone: 'UTC+8', text: '第一个' }, owner)
+  book.add({ at: Date.now() + 400, repeat: null, zone: 'UTC+8', text: '第二个' }, owner)
+  const runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '小鲸鱼' }), link,
+    think: async () => '{}', settings: FAST_CRON, state: { cron: book.toJSON() }, persist: async () => { throw new Error('EPERM') },
+  })
+  await until(() => sends.length === 2, { timeoutMs: 3000, what: 'both jobs despite failing saves' })
+  runner.dispose()
+  assert.deepEqual(sends, ['第一个', '第二个'])
+  assert.ok(runner.log.some(e => e.type === 'error' && e.message.includes('定时保存失败')))
+})

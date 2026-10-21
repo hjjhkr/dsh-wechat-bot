@@ -30,6 +30,7 @@ export class Bot extends EventEmitter {
   #statusSeen = false
   #lastSelf
   #queue = Promise.resolve()
+  #watchFailures = 0
 
   constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry(), models }) {
     super()
@@ -48,6 +49,7 @@ export class Bot extends EventEmitter {
   async dispose() {
     this.#disposed = true
     clearTimeout(this.restartTimer)
+    clearTimeout(this.watchRetryTimer)
     clearInterval(this.watchdog)
     const runner = this.runner
     this.runner = null
@@ -150,7 +152,7 @@ export class Bot extends EventEmitter {
     if (!this.#statusSeen) this.#onStatus({ connection: 'connected', canSend: true }, { synthetic: true })
     if (!wasReady) {
       this.note('info', `小号已登录：${account.self.name}`)
-      await this.#serial(() => this.#applyChat()).catch(error => this.note('error', `恢复监听失败：${error.message}`))
+      await this.#watch().catch(() => {})
     }
   }
 
@@ -184,8 +186,27 @@ export class Bot extends EventEmitter {
       if (this.runner && this.chat?.id !== chat?.id) this.#stopRunner()
       this.chat = chat
       await this.store.updateBot({ chat })
-      await this.#applyChat()
       return chat
+    }).then(async chat => {
+      await this.#watch()
+      return chat
+    })
+  }
+
+  // Starts watching the chosen group; a failure (e.g. the adapter is slow to open its
+  // databases) is retried with backoff until it succeeds, so the bot never stays deaf.
+  #watch() {
+    clearTimeout(this.watchRetryTimer)
+    return this.#serial(() => this.#applyChat()).then(() => {
+      this.#watchFailures = 0
+    }, error => {
+      const delay = BACKOFF_MS[Math.min(this.#watchFailures++, BACKOFF_MS.length - 1)]
+      this.note('error', `监听失败，${delay / 1000} 秒后重试：${error.message}`)
+      this.watchRetryTimer = setTimeout(() => {
+        if (this.ready && !this.#disposed) this.#watch().catch(() => {})
+      }, delay)
+      this.watchRetryTimer.unref?.()
+      throw error
     })
   }
 

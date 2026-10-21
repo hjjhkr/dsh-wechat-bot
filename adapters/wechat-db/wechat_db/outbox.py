@@ -15,12 +15,18 @@ class Outbox:
         self._lock = threading.Lock()
         self._written: dict[str, str] = {}
         if self.path.exists():
-            for line in self.path.read_text(encoding="utf-8").splitlines():
+            data = self.path.read_bytes()
+            for line in data.decode("utf-8", "replace").splitlines():
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
-                    continue
-                self._written[entry["clientId"]] = entry["id"]
+                    continue  # e.g. a line torn by a crash mid-write
+                if isinstance(entry, dict) and isinstance(entry.get("clientId"), str) and isinstance(entry.get("id"), str):
+                    self._written[entry["clientId"]] = entry["id"]
+            if data and not data.endswith(b"\n"):
+                # Start the next entry on its own line instead of gluing it onto a torn one.
+                with self.path.open("ab") as stream:
+                    stream.write(b"\n")
 
     def put(self, chat: dict, client_id: str, content: dict) -> str:
         """Appends one message; the same clientId is written only once. Returns its id."""

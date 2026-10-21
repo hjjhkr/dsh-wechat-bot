@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 import zstandard
@@ -11,6 +12,17 @@ BOT = "wxid_bot"
 GROUP = "12345678@chatroom"
 MEMBERS = {"wxid_alice": "阿离", "wxid_bob": "老鲍", BOT: "小鲸鱼"}
 QUOTE_TYPE = (57 << 32) | 49
+
+
+@contextmanager
+def connect(path):
+    """Commit and close (sqlite3's own context manager leaves the file open, which Windows notices)."""
+    conn = sqlite3.connect(path)
+    try:
+        with conn:
+            yield conn
+    finally:
+        conn.close()
 
 
 def zstd(text: str) -> bytes:
@@ -33,11 +45,11 @@ class Account:
         self.shards = [self.root / "message" / f"message_{i}.db" for i in range(shards)]
         self._contacts()
         for path in self.shards:
-            with sqlite3.connect(path) as conn:
+            with connect(path) as conn:
                 conn.execute("CREATE TABLE Name2Id (user_name TEXT UNIQUE)")
 
     def _contacts(self):
-        with sqlite3.connect(self.root / "contact" / "contact.db") as conn:
+        with connect(self.root / "contact" / "contact.db") as conn:
             conn.executescript("""
                 CREATE TABLE contact (id INTEGER PRIMARY KEY, username TEXT, alias TEXT, remark TEXT, nick_name TEXT);
                 CREATE TABLE chat_room (id INTEGER PRIMARY KEY, username TEXT, owner TEXT, ext_buffer BLOB);
@@ -54,16 +66,18 @@ class Account:
                 conn.execute("INSERT INTO chatroom_member VALUES (?, ?)", (room, ids[wxid]))
 
     def add(self, chat: str, sender: str, body, *, local_type: int = 1, source=None, shard: int = 0,
-            compress: bool = False, server_id: int | None = None, prefix: bool | None = None) -> str:
+            compress: bool = False, server_id: int | None = None, prefix: bool | None = None, seq: int | None = None) -> str:
         """Appends one message row the way WeChat stores it; returns its protocol id."""
         table = "Msg_" + hashlib.md5(chat.encode()).hexdigest()
         if prefix is None:
             prefix = chat.endswith("@chatroom") and sender != BOT
         text = f"{sender}:\n{body}" if prefix and isinstance(body, str) else body
         content = zstd(text) if compress and isinstance(text, str) else text
-        self.seq += 1
-        server_id = self.server_id + self.seq if server_id is None else server_id
-        with sqlite3.connect(self.shards[shard]) as conn:
+        if seq is None:
+            self.seq += 1
+            seq = self.seq
+        server_id = self.server_id + seq + (shard * 100_000) if server_id is None else server_id
+        with connect(self.shards[shard]) as conn:
             conn.execute(f"""CREATE TABLE IF NOT EXISTS {table} (local_id INTEGER PRIMARY KEY AUTOINCREMENT,
                 server_id INTEGER, local_type INTEGER, sort_seq INTEGER, real_sender_id INTEGER, create_time INTEGER,
                 status INTEGER, source BLOB, message_content TEXT, compress_content BLOB, packed_info_data BLOB)""")
@@ -72,7 +86,7 @@ class Account:
             cursor = conn.execute(
                 f"INSERT INTO {table} (server_id, local_type, sort_seq, real_sender_id, create_time, status, source, message_content) "
                 "VALUES (?, ?, ?, ?, ?, 2, ?, ?)",
-                (server_id, local_type, self.seq, sender_row, 1_792_600_000 + self.seq, source, content))
+                (server_id, local_type, seq, sender_row, 1_792_600_000 + seq, source, content))
             local_id = cursor.lastrowid
         return str(server_id) if server_id else f"message_{shard}.db:{local_id}"
 

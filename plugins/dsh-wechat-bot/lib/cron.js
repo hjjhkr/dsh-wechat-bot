@@ -21,10 +21,11 @@ export const cronLimits = Object.freeze({
 
 export class CronError extends Error {}
 
-const UNIT_MS = { d: 86_400_000, 天: 86_400_000, h: 3_600_000, 小时: 3_600_000, 时: 3_600_000, m: 60_000, 分钟: 60_000, 分: 60_000, s: 1000, 秒: 1000 }
-const DURATION = /^(?:\d+(?:\.\d+)?(?:d|h|m|s|天|小时|时|分钟|分|秒))+$/
-const DURATION_PART = /(\d+(?:\.\d+)?)(d|h|m|s|天|小时|时|分钟|分|秒)/g
-const CLOCK = /^(\d{1,2})(?:[:：](\d{2})|点(?:(\d{1,2})分?|(半))?)$/
+const UNIT_MS = { d: 86_400_000, 天: 86_400_000, h: 3_600_000, 小时: 3_600_000, m: 60_000, 分钟: 60_000, 分: 60_000, s: 1000, 秒: 1000 }
+const DURATION = /^(?:\d+(?:\.\d+)?(?:d|h|m|s|天|小时|分钟|分|秒))+$/
+const DURATION_PART = /(\d+(?:\.\d+)?)(d|h|m|s|天|小时|分钟|分|秒)/g
+// 10:00 / 10：00 / 10点 / 10点半 / 9点15分 / 8时 / 8时30分
+const CLOCK = /^(\d{1,2})(?:[:：](\d{2})|[点时](?:(\d{1,2})分?|(半))?)$/
 const DATE = /^(?:(\d{4})[-/])?(\d{1,2})[-/](\d{1,2})$/
 const RELATIVE_DAYS = { 今天: 0, today: 0, 明天: 1, tomorrow: 1, 后天: 2 }
 const DAILY = new Set(['每天', 'daily', 'everyday'])
@@ -161,8 +162,12 @@ export function parseSchedule(input, now = Date.now(), { defaultZone = DEFAULT_Z
       at = zonedToUtc(zone, y, date.mo, date.d, clock.h, clock.mi)
       const check = fieldsIn(zone, at)
       if (check.mo !== date.mo || check.d !== date.d) throw new CronError('没有这一天')
-      // A date without a year that already passed means next year.
-      if (date.y === null && at <= now) at = zonedToUtc(zone, y + 1, date.mo, date.d, clock.h, clock.mi)
+      // A date without a year that already passed means next year (which may not have that day).
+      if (date.y === null && at <= now) {
+        at = zonedToUtc(zone, y + 1, date.mo, date.d, clock.h, clock.mi)
+        const next = fieldsIn(zone, at)
+        if (next.mo !== date.mo || next.d !== date.d) throw new CronError('明年没有这一天')
+      }
     } else {
       at = zonedToUtc(zone, today.y, today.mo, today.d + (dayOffset ?? 0), clock.h, clock.mi)
       if (dayOffset === null && at <= now) at = zonedToUtc(zone, today.y, today.mo, today.d + 1, clock.h, clock.mi)
@@ -170,21 +175,23 @@ export function parseSchedule(input, now = Date.now(), { defaultZone = DEFAULT_Z
   }
   if (at - now < limits.minDelayMs) throw new CronError(at <= now ? '这个时间已经过了' : '至少要 5 秒以后')
   if (at - now > limits.maxHorizonMs) throw new CronError('最多只能定一年以内')
-  return { at, repeat, zone: zone.name, text }
+  return { at, repeat, zone: zone.name, text, ...(clock ? { clock } : {}) }
 }
 
-// Next run of a daily job after `after`, at the same wall-clock time in its zone.
+// Next run of a daily job after `after`, at its intended wall-clock time. The intended
+// time is stored on the job: deriving it from the last run would let a DST gap shift it for good.
 export function nextDaily(job, after) {
   const zone = parseZone(job.zone)
-  const first = fieldsIn(zone, job.at)
+  if (!zone) throw new CronError(`无效的时区 ${job.zone}`)
+  const { h, mi } = job.clock ?? fieldsIn(zone, job.at)
   const day = fieldsIn(zone, after)
-  let at = zonedToUtc(zone, day.y, day.mo, day.d, first.h, first.mi)
-  if (at <= after) at = zonedToUtc(zone, day.y, day.mo, day.d + 1, first.h, first.mi)
+  let at = zonedToUtc(zone, day.y, day.mo, day.d, h, mi)
+  if (at <= after) at = zonedToUtc(zone, day.y, day.mo, day.d + 1, h, mi)
   return at
 }
 
 export function describeTime(at, zoneName, now = Date.now()) {
-  const zone = parseZone(zoneName)
+  const zone = parseZone(zoneName) ?? parseZone(DEFAULT_ZONE)
   const f = fieldsIn(zone, at)
   const today = fieldsIn(zone, now)
   const clock = `${String(f.h).padStart(2, '0')}:${String(f.mi).padStart(2, '0')}`
@@ -207,12 +214,12 @@ export class CronBook {
     return { jobs: this.jobs, nextId: this.nextId }
   }
 
-  add({ at, repeat, zone, text }, owner) {
+  add({ at, repeat, zone, text, clock }, owner) {
     if (this.jobs.length >= this.limits.total) throw new CronError(`定时已满（最多 ${this.limits.total} 个）`)
     if (this.jobs.filter(j => j.owner.id === owner.id).length >= this.limits.perMember) {
       throw new CronError(`每人最多 ${this.limits.perMember} 个定时，/cron list 看看，/cron cancel 编号 取消`)
     }
-    const job = { id: this.nextId++, at, repeat, zone, text, owner: { id: owner.id, name: owner.name }, createdAt: Date.now() }
+    const job = { id: this.nextId++, at, repeat, zone, text, ...(clock ? { clock } : {}), owner: { id: owner.id, name: owner.name }, createdAt: Date.now() }
     this.jobs.push(job)
     return job
   }
@@ -239,8 +246,16 @@ export class CronBook {
   takeDue(now = Date.now()) {
     const due = [], missed = []
     for (const job of this.jobs.filter(j => j.at <= now)) {
+      let next = null
+      if (job.repeat === 'daily') {
+        try {
+          next = nextDaily(job, now)
+        } catch {
+          next = null // e.g. a zone this runtime no longer knows: the job ends here
+        }
+      }
       ;(now - job.at <= this.limits.graceMs ? due : missed).push({ ...job })
-      if (job.repeat === 'daily') job.at = nextDaily(job, now)
+      if (next) job.at = next
       else this.jobs = this.jobs.filter(j => j !== job)
     }
     return { due, missed }

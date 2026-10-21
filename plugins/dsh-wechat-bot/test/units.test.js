@@ -120,3 +120,21 @@ test('memory evicts the oldest note when a member is full', () => {
   for (const n of [1, 2, 3]) book.apply([{ who: 'alice', topic: `t${n}`, note: `n${n}`, evidence: `m${n}` }], [msg(`m${n}`, 'x')])
   assert.deepEqual(Object.keys(book.recall(['alice']).alice), ['t2', 't3'])
 })
+
+test('an urgent batch does not leave the pending batch without its max wait', async () => {
+  const batches = []
+  let batcher
+  batcher = new Batcher({ quietMs: 100, maxWaitMs: 300 }, batch => {
+    batches.push({ at: Date.now(), ids: batch.map(m => m.id) })
+    setTimeout(() => batcher.release(), 30)
+  })
+  const start = Date.now()
+  batcher.push(msg('n1', '普通'))
+  await sleep(10)
+  batcher.pushUrgent(msg('u1', '/ask'))
+  for (let i = 0; i < 15; i++) { await sleep(60); batcher.push(msg(`c${i}`, '刷屏')) } // never quiet for 100ms
+  const normal = batches.find(b => b.ids.includes('n1'))
+  assert.ok(normal, 'the pending batch was flushed during the chatter')
+  assert.ok(normal.at - start < 500, `flushed by its max wait (${normal.at - start}ms)`)
+  batcher.clear()
+})

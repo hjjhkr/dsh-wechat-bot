@@ -125,8 +125,8 @@ class Reader:
         return max((row["sort_seq"] for _, _, row in rows), default=0)
 
     def after(self, chat_id: str, seq: int, limit: int = 200) -> list[tuple[int, dict]]:
-        """Messages with sort_seq > seq, oldest first, as (sort_seq, message)."""
-        rows = self._rows(chat_id, "WHERE sort_seq > ?", (seq,), "ORDER BY sort_seq ASC, local_id ASC", limit)
+        """Messages with sort_seq >= seq (inclusive: the caller de-duplicates the boundary), oldest first."""
+        rows = self._rows(chat_id, "WHERE sort_seq >= ?", (seq,), "ORDER BY sort_seq ASC, local_id ASC", limit)
         rows.sort(key=lambda item: (item[2]["sort_seq"], item[0], item[2]["local_id"]))
         return [(row["sort_seq"], self.parse(chat_id, label, senders, row)) for label, senders, row in rows[:limit]]
 

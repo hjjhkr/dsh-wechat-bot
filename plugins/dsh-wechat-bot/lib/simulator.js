@@ -19,7 +19,7 @@ export class Simulator {
   #watching = new Set()
   #sent = new Map()
 
-  constructor({ input, output, chats = DEMO_CHATS, loggedIn = false, loginDelayMs = 1500, self = SELF } = {}) {
+  constructor({ input, output, chats = DEMO_CHATS, loggedIn = false, loginDelayMs = 1500, self = SELF, failWatch = 0 } = {}) {
     this.self = self
     this.chats = new Map(chats.map(c => [c.id, structuredClone(c)]))
     this.messages = new Map(chats.map(c => [c.id, []]))
@@ -28,6 +28,7 @@ export class Simulator {
     this.canSend = true
     this.visible = false
     this.failNext = []
+    this.failWatch = failWatch // tests: how many watch/set calls fail first
     this.output = output
     this.peer = new JsonRpcPeer({ input, output })
     for (const [method, handler] of Object.entries(this.handlers())) this.peer.handle(method, handler)
@@ -60,6 +61,10 @@ export class Simulator {
       'chats/history': ({ chatId, limit = 20 }) => ({ messages: this.messages.get(this.#chat(chatId).id).slice(-limit) }),
       'watch/set': ({ chatIds }) => {
         this.#requireReady()
+        if (this.failWatch > 0) {
+          this.failWatch--
+          throw new ProtocolError(ErrorCode.Unavailable, 'databases still opening')
+        }
         for (const id of chatIds) this.#chat(id)
         this.#watching = new Set(chatIds)
         return { watching: [...this.#watching] }

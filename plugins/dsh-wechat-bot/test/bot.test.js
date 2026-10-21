@@ -293,3 +293,23 @@ test('concurrent group changes never leave a stray chat runner behind', async t 
   await sleep(200)
   assert.equal(env.model.calls.length, before, 'no idle checks from an orphaned runner')
 })
+
+test('if watching fails at first (adapter still opening its databases), it is retried until it works', async t => {
+  // The first two watch/set calls fail: the one at startup and the one for the chosen group.
+  const env = await startBot(t, { simulator: { failWatch: 2 } })
+  await until(() => env.bot.ready)
+  await assert.rejects(env.bot.setChat(GROUP))
+  await until(() => env.bot.runner, { timeoutMs: 3000, what: 'retried watch' })
+  say(env, 'wxid_alice', '还在吗')
+  await until(() => env.model.calls.length === 1)
+})
+
+test('a long reply echoed back under a different id is recognised before truncation', async t => {
+  const long = '这是一段很长的回复'.repeat(5)
+  const env = await watching(t, { settings: { maxTextChars: 20 }, reply: () => ({ reply: [long] }) })
+  say(env, 'wxid_alice', '说点长的')
+  await until(() => sent(env).includes(long))
+  env.simulator.inject({ chatId: GROUP, from: 'wxid_bot', text: long }) // the "real" message, new id
+  await sleep(100)
+  assert.equal(env.bot.runner.transcript.filter(m => m.fromSelf).length, 1)
+})

@@ -203,3 +203,34 @@ test('custom command scripts are loaded from a directory', async t => {
   await sleep(50)
   assert.equal(env.model.calls.length, 0)
 })
+
+test('an interrupt holds even when the model ignores the abort signal', async t => {
+  const env = await watching(t, {
+    reply: async input => {
+      if (input.new.some(m => m.text === '慢慢想')) await sleep(300) // never looks at the signal
+      return { reply: ['旧回答'] }
+    },
+  })
+  say(env, 'wxid_alice', '慢慢想')
+  await until(() => env.model.calls.length === 1)
+  say(env, 'wxid_carol', '/mode silent')
+  await until(() => logOf(env).some(e => e.type === 'interrupted'))
+  await sleep(400)
+  assert.ok(!sent(env).includes('旧回答'))
+})
+
+test('a command reply waiting for an unlock does not disturb the status of the turn', async t => {
+  const gate = Promise.withResolvers()
+  const env = await watching(t, { reply: async () => { await gate.promise; return { reply: [] } } })
+  await env.simulator.handlers()['sim/status']({ canSend: false })
+  await until(() => !env.bot.connection.canSend)
+  say(env, 'wxid_alice', '想一想')
+  await until(() => env.bot.runner.status === 'thinking')
+  say(env, 'wxid_bob', '/help') // its reply has to wait for the unlock
+  await sleep(50)
+  gate.resolve()
+  await until(() => env.bot.runner.status === 'idle')
+  await sleep(50)
+  assert.equal(env.bot.runner.status, 'idle', 'not restored to a stale "thinking"')
+  assert.equal(env.bot.runner.stuckFor(), 0, 'nothing for the watchdog to mistake as stuck')
+})

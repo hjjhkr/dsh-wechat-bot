@@ -185,13 +185,13 @@ export class ChatRunner {
   #receive(message) {
     if (this.disposed || this.seen.has(message.id)) return
     this.#remember(message.id)
+    // Our own reply coming back (by id, or by text when the adapter only queued it).
+    if (message.fromSelf && (this.sentIds.has(message.id) || this.#isEcho(message))) return
     if (message.text.length > this.settings.maxTextChars) {
       message = { ...message, text: message.text.slice(0, this.settings.maxTextChars) + '…（太长，已截断）' }
     }
     if (message.fromSelf) {
-      // Our own reply coming back (by id, or by text when the adapter only queued it),
-      // or someone typing on the bot account's phone.
-      if (this.sentIds.has(message.id) || this.#isEcho(message)) return
+      // Someone typing on the bot account's phone: context only.
       this.#record(message)
       return
     }
@@ -450,6 +450,7 @@ export class ChatRunner {
     try {
       decision = await this.#decide({ batch, address, event, mustReply, signal: AbortSignal.any([this.abort.signal, turn.controller.signal]) })
       this.breaker.success()
+      if (turn.interrupted) return this.#reconsider(batch, turn.interrupted)
     } catch (error) {
       if (this.disposed) return
       if (turn.interrupted) return this.#reconsider(batch, turn.interrupted)
@@ -539,7 +540,7 @@ export class ChatRunner {
       const content = part.kind === 'sticker'
         ? { kind: 'sticker', path: this.settings.stickers[part.name] }
         : { kind: 'text', text: part.text }
-      const result = await this.#sendOne(content, `${turnId}:${index}`, { started, blocked })
+      const result = await this.#sendOne(content, `${turnId}:${index}`, { started, blocked, ownsStatus: true })
       if (!result) return
       this.#sent(result.messageId, part)
     }
@@ -570,20 +571,19 @@ export class ChatRunner {
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
   // it is stale, retries definite failures, and never repeats an uncertain send.
   // `blocked()` may return a reason to give up (checked again after every wait).
-  async #sendNow(content, clientId, { started, blocked = () => null }) {
+  async #sendNow(content, clientId, { started, blocked = () => null, ownsStatus = false }) {
     let failures = 0
     for (;;) {
       if (this.disposed) return null
       if (!this.link.canSend()) {
-        const previous = this.status
-        this.#setStatus('waiting')
+        if (ownsStatus) this.#setStatus('waiting')
         this.#write('waiting', { reason: 'adapter_cannot_send' })
         try {
           await this.link.whenCanSend(this.abort.signal)
         } catch {
           return null
         }
-        this.#setStatus(previous)
+        if (ownsStatus && this.status === 'waiting') this.#setStatus('sending')
         if (this.disposed) return null
       }
       const reason = Date.now() - started > this.settings.staleMs ? 'stale' : blocked()
@@ -627,13 +627,23 @@ export class ChatRunner {
   // lose one scheduled message but can never send it twice.
   async #cronTick() {
     if (this.disposed) return
-    const { due, missed } = this.cron.takeDue()
-    if (due.length || missed.length) {
-      await this.persist()
-      for (const job of missed) this.#write('cron_missed', { id: job.id, text: job.text, at: job.at })
-      this.emit('change')
+    let taken
+    try {
+      taken = this.cron.takeDue()
+    } finally {
+      this.#armCron()
     }
-    this.#armCron()
+    const { due, missed } = taken
+    if (!due.length && !missed.length) return
+    try {
+      await this.persist()
+    } catch (error) {
+      // Sending anyway: the book in memory is already advanced, so this run cannot repeat
+      // while the process lives; a crash before the next successful save could repeat it once.
+      this.#write('error', { message: `定时保存失败：${error.message}` })
+    }
+    for (const job of missed) this.#write('cron_missed', { id: job.id, text: job.text, at: job.at })
+    this.emit('change')
     for (const job of due) {
       this.#write('cron_fire', { id: job.id, text: job.text })
       // Plain text, never executed as a command; explicit, so mute/silent do not apply.

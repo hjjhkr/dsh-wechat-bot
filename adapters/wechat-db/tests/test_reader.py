@@ -55,7 +55,7 @@ def test_messages_across_shards_are_ordered_and_each_shard_maps_its_own_senders(
     assert [m["sender"]["id"] for _, m in messages] == ["wxid_bob", "wxid_alice", "wxid_bob"]
     seqs = [seq for seq, _ in messages]
     assert seqs == sorted(seqs)
-    assert reader.after(GROUP, seqs[1]) == messages[2:]
+    assert reader.after(GROUP, seqs[1]) == messages[1:], "inclusive: the caller de-duplicates the boundary"
     assert reader.latest_seq(GROUP) == seqs[-1]
 
 

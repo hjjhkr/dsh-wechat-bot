@@ -113,11 +113,15 @@ export class TimeoutError extends Error {
 // Runs `call(signal)` with a deadline. The signal is aborted on timeout and the
 // returned promise rejects even if `call` ignores the signal and never settles.
 export async function withDeadline(call, ms, parent) {
+  parent?.throwIfAborted()
   const controller = new AbortController()
-  const abort = () => controller.abort(parent.reason)
-  parent?.addEventListener('abort', abort, { once: true })
-  let timer
+  let timer, abort
   const deadline = new Promise((_, reject) => {
+    abort = () => {
+      controller.abort(parent.reason)
+      reject(parent.reason)
+    }
+    parent?.addEventListener('abort', abort, { once: true })
     timer = setTimeout(() => {
       const error = new TimeoutError(ms)
       controller.abort(error)

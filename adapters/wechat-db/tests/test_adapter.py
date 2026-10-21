@@ -137,3 +137,72 @@ def test_unreadable_databases_report_login_required_and_recover(tmp_path):
         assert client.next_event("event/account", timeout=10)["state"] == "ready"
     finally:
         client.close()
+
+
+def test_rows_sharing_a_sort_seq_across_shards_are_each_delivered_once(world):
+    account, client, _, _ = world
+    client.call("watch/set", {"chatIds": [GROUP]})
+    seq = account.seq + 1
+    first = account.add(GROUP, "wxid_alice", "分片0", shard=0, seq=seq)
+    assert client.next_event("event/message")["message"]["id"] == first
+    time.sleep(0.2)  # a poll has run with the cursor at this sort_seq
+    late = account.add(GROUP, "wxid_bob", "分片1，同一个 sort_seq，晚到", shard=1, seq=seq)
+    assert client.next_event("event/message")["message"]["id"] == late
+    with pytest.raises(AssertionError):
+        client.next_event("event/message", timeout=0.3)
+
+
+def _client(account, tmp_path):
+    client = Client("--plain", str(account.root), "--self", BOT, "--poll-ms", "50", "--outbox", str(tmp_path / "outbox.jsonl"))
+    client.call("initialize", {"protocolVersion": 1, "dataDir": str(tmp_path)})
+    return client
+
+
+def test_a_restart_resumes_where_it_left_off(tmp_path):
+    account = Account(tmp_path / "db_storage")
+    client = _client(account, tmp_path)
+    client.call("watch/set", {"chatIds": [GROUP]})
+    account.add(GROUP, "wxid_alice", "重启前")
+    client.next_event("event/message")
+    client.close()
+    missed = account.add(GROUP, "wxid_bob", "适配器重启期间发的")
+    client = _client(account, tmp_path)
+    try:
+        client.call("watch/set", {"chatIds": [GROUP]})
+        assert client.next_event("event/message")["message"]["id"] == missed
+    finally:
+        client.close()
+
+
+def test_a_long_outage_starts_from_now_instead_of_replaying(tmp_path):
+    account = Account(tmp_path / "db_storage")
+    account.add(GROUP, "wxid_alice", "很久以前")
+    cursors = tmp_path / "wechat-db" / "cursors.json"
+    cursors.parent.mkdir(parents=True)
+    cursors.write_text(json.dumps({GROUP: {"seq": 0, "ids": [], "at": time.time() - 3600}}), encoding="utf-8")
+    client = _client(account, tmp_path)
+    try:
+        client.call("watch/set", {"chatIds": [GROUP]})
+        with pytest.raises(AssertionError):
+            client.next_event("event/message", timeout=0.4)
+    finally:
+        client.close()
+
+
+def test_outbox_survives_bad_and_torn_lines(tmp_path):
+    from wechat_db.outbox import Outbox
+    path = tmp_path / "outbox.jsonl"
+    path.write_text('{"id": "out:a", "clientId": "a"}\n{"note": "no ids"}\n[1, 2]\nnot json\n{"id": "out:b", "clientId": "b", "cont', encoding="utf-8")
+    outbox = Outbox(path)
+    assert outbox.put({"id": GROUP}, "a", {"kind": "text", "text": "x"}) == "out:a", "existing entries still dedupe"
+    assert outbox.put({"id": GROUP}, "c", {"kind": "text", "text": "新的"}) == "out:c"
+    last = path.read_text(encoding="utf-8").splitlines()[-1]
+    assert json.loads(last)["clientId"] == "c", "the new entry is on its own line"
+
+
+def test_sending_does_not_depend_on_reading_contact_names(world):
+    account, client, _, tmp_path = world
+    client.call("watch/set", {"chatIds": [GROUP]})
+    (account.root / "contact" / "contact.db").rename(account.root / "contact" / "gone.db")
+    result = client.call("message/send", {"chatId": GROUP, "clientId": "n1", "content": {"kind": "text", "text": "照样发"}})
+    assert result == {"messageId": "out:n1"}
