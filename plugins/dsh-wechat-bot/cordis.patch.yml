@@ -1,5 +1,4 @@
 - insert:
-    - id: wechat-bridge
-      name: dsh-wechat-bridge
-      config:
-        configPath: ""
+    - id: wechat-bot
+      name: dsh-wechat-bot
+      config: {}

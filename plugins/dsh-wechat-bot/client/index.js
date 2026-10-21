@@ -1,0 +1,239 @@
+// Console for the WeChat bot: a right-sidebar tab in DSH. Plain JS, React from
+// the host module table, styled only with host theme tokens.
+window.__ModuleLoader__.load({
+  id: 'dsh-wechat-bot',
+  factory(require) {
+    const React = require('react')
+    const { useCallback, useEffect, useMemo, useState } = React
+    const h = React.createElement
+    const KIND = 'wechat-bot'
+    const ID = 'dsh-wechat-bot'
+
+    const api = {
+      async get(path) {
+        const response = await fetch(path, { cache: 'no-store' })
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return response.json()
+      },
+      async act(action, args = {}) {
+        const response = await fetch('/api/wechat-bot.action', {
+          method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action, ...args }),
+        })
+        const body = await response.json()
+        if (!body.ok) throw new Error(body.error)
+        return body.result
+      },
+    }
+
+    function usePoll(path, ms, enabled = true) {
+      const [data, setData] = useState(null)
+      const [error, setError] = useState(null)
+      const [tick, setTick] = useState(0)
+      useEffect(() => {
+        if (!enabled || !path) return
+        let alive = true
+        const load = () => api.get(path).then(d => { if (alive) { setData(d); setError(null) } }, e => alive && setError(e.message))
+        load()
+        const timer = setInterval(() => document.visibilityState === 'visible' && load(), ms)
+        return () => { alive = false; clearInterval(timer) }
+      }, [path, ms, enabled, tick])
+      return [data, error, () => setTick(t => t + 1)]
+    }
+
+    const CSS = `
+.wxb{display:flex;flex-direction:column;gap:12px;padding:12px 14px;height:100%;overflow:auto;box-sizing:border-box;color:var(--dsw-alias-label-primary);font-size:13px}
+.wxb h3{margin:0;font-size:13px;font-weight:600;color:var(--dsw-alias-label-secondary)}
+.wxb-card{border:1px solid var(--dsw-alias-border-l3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;background:var(--dsw-alias-bg-layer-1)}
+.wxb-row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.wxb-muted{color:var(--dsw-alias-label-tertiary)}
+.wxb-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--dsw-alias-label-tertiary)}
+.wxb-dot.ok{background:var(--dsw-alias-state-success-primary)}.wxb-dot.warn{background:var(--dsw-alias-state-warn-primary)}.wxb-dot.err{background:var(--dsw-alias-state-error-primary)}
+.wxb button{font:inherit;border:1px solid var(--dsw-alias-border-l3);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);border-radius:8px;padding:4px 10px;cursor:pointer}
+.wxb button:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.wxb button.primary{background:var(--dsw-alias-button-primary-fill);color:var(--dsw-alias-label-primary-foreground);border-color:transparent}
+.wxb button[aria-pressed=true]{border-color:var(--dsw-alias-brand-primary);color:var(--dsw-alias-brand-primary)}
+.wxb button:disabled{opacity:.5;cursor:default}
+.wxb input[type=text]{font:inherit;flex:1;min-width:0;border:1px solid var(--dsw-alias-border-l3);border-radius:8px;padding:4px 8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-primary)}
+.wxb-list{display:flex;flex-direction:column;max-height:220px;overflow:auto}
+.wxb-list label{display:flex;gap:8px;align-items:center;padding:4px 2px;border-radius:6px;cursor:pointer}
+.wxb-list label:hover{background:var(--dsw-alias-interactive-bg-hover)}
+.wxb-log{display:flex;flex-direction:column;gap:2px;font-size:12px;max-height:420px;overflow:auto}
+.wxb-log>div{padding:2px 0;border-bottom:1px solid var(--dsw-alias-border-l1);white-space:pre-wrap;word-break:break-word}
+.wxb-log .error,.wxb-log .send_error,.wxb-log .invalid_output{color:var(--dsw-alias-state-error-primary)}
+.wxb-log .sent{color:var(--dsw-alias-state-business-primary)}
+.wxb-log details{color:var(--dsw-alias-label-tertiary)}
+.wxb-switch{position:relative;width:34px;height:20px;border-radius:10px;border:none!important;padding:0!important;background:var(--dsw-alias-border-l4)!important}
+.wxb-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)!important}
+.wxb-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+.wxb-switch[aria-checked=true]::after{left:16px}
+.wxb-error{color:var(--dsw-alias-state-error-primary)}
+`
+
+    const MODES = [['free', '自由发言'], ['mention', '只回@'], ['silent', '静音']]
+    const CONNECTION = { connected: ['ok', '已连接'], degraded: ['warn', '不稳定'], disconnected: ['err', '未连接'], adapter_down: ['err', '适配器未运行'], starting: ['warn', '启动中'] }
+
+    function Status({ state }) {
+      const [tone, label] = CONNECTION[state.connection.state] ?? ['warn', state.connection.state]
+      const cannotSend = state.connection.state === 'connected' && !state.connection.canSend
+      return h('div', { className: 'wxb-card' },
+        h('div', { className: 'wxb-row' },
+          h('span', { className: `wxb-dot ${cannotSend ? 'warn' : tone}` }),
+          h('strong', null, state.account.state === 'ready' ? state.account.self.name : '小号未登录'),
+          h('span', { className: 'wxb-muted' }, cannotSend ? `${label}，暂不能发送${state.connection.reason ? `（${state.connection.reason}）` : ''}` : label)),
+        h('div', { className: 'wxb-muted' },
+          `适配器 ${state.adapter ? `${state.adapter.name} ${state.adapter.version}` : '—'}${state.capabilities?.simulator ? '（模拟器）' : ''} · 模型 ${state.model.model} · 思考 ${state.model.reasoningEffort}`))
+    }
+
+    function Login({ refresh }) {
+      const [result, setResult] = useState(null)
+      const [busy, setBusy] = useState(false)
+      const login = async () => {
+        setBusy(true)
+        try { setResult(await api.act('login')) } catch (e) { setResult({ instructions: e.message }) } finally { setBusy(false); refresh() }
+      }
+      return h('div', { className: 'wxb-card' },
+        h('h3', null, '登录微信小号'),
+        h('div', { className: 'wxb-row' }, h('button', { className: 'primary', disabled: busy, onClick: login }, '开始登录')),
+        result?.instructions && h('div', null, result.instructions),
+        result?.qrCode && h('img', { src: result.qrCode, alt: '登录二维码', style: { width: 180, alignSelf: 'center' } }))
+    }
+
+    function WindowToggle() {
+      const [visible, setVisible] = useState(null)
+      const [error, setError] = useState(null)
+      useEffect(() => { api.act('windowState').then(s => setVisible(s.visible), e => setError(e.message)) }, [])
+      const toggle = async () => {
+        try { setVisible((await api.act('window', { visible: !visible })).visible) } catch (e) { setError(e.message) }
+      }
+      return h('div', { className: 'wxb-row' },
+        h('span', null, '小号聊天窗口'),
+        h('button', { className: 'wxb-switch', role: 'switch', 'aria-checked': visible === true, disabled: visible === null, onClick: toggle, title: visible ? '隐藏' : '显示' }),
+        h('span', { className: 'wxb-muted' }, visible === null ? '' : visible ? '显示中' : '后台运行'),
+        error && h('span', { className: 'wxb-error' }, error))
+    }
+
+    function ChatPicker({ watched, onSaved }) {
+      const [chats, setChats] = useState(null)
+      const [query, setQuery] = useState('')
+      const [selected, setSelected] = useState(() => new Set(watched.map(c => c.id)))
+      const [error, setError] = useState(null)
+      useEffect(() => { api.act('listChats').then(setChats, e => setError(e.message)) }, [])
+      const shown = useMemo(() => (chats ?? []).filter(c => !query || c.name.includes(query)), [chats, query])
+      const toggle = id => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
+      const save = async () => {
+        try { await api.act('watch', { chatIds: [...selected] }); onSaved() } catch (e) { setError(e.message) }
+      }
+      return h('div', { className: 'wxb-card' },
+        h('div', { className: 'wxb-row' },
+          h('input', { type: 'text', placeholder: '搜索聊天', value: query, onChange: e => setQuery(e.target.value) }),
+          h('button', { className: 'primary', onClick: save }, `监听 ${selected.size} 个`)),
+        error && h('div', { className: 'wxb-error' }, error),
+        !chats ? h('div', { className: 'wxb-muted' }, '加载中…') : h('div', { className: 'wxb-list' },
+          shown.map(c => h('label', { key: c.id },
+            h('input', { type: 'checkbox', checked: selected.has(c.id), onChange: () => toggle(c.id) }),
+            h('span', null, c.name),
+            h('span', { className: 'wxb-muted' }, c.kind === 'group' ? `群${c.memberCount ? ` · ${c.memberCount}人` : ''}` : '私聊')))))
+    }
+
+    function Simulate({ chat }) {
+      const [from, setFrom] = useState('阿离')
+      const [text, setText] = useState('')
+      const [at, setAt] = useState(false)
+      const send = async () => {
+        if (!text.trim()) return
+        await api.act('simulate', { chatId: chat.id, from, text, mentions: at ? ['wxid_bot'] : [] })
+        setText('')
+      }
+      return h('div', { className: 'wxb-row' },
+        h('input', { type: 'text', value: from, onChange: e => setFrom(e.target.value), style: { flex: '0 0 64px' }, title: '发送者' }),
+        h('input', { type: 'text', value: text, placeholder: '模拟一条群消息', onChange: e => setText(e.target.value), onKeyDown: e => e.key === 'Enter' && send() }),
+        h('label', { className: 'wxb-row' }, h('input', { type: 'checkbox', checked: at, onChange: () => setAt(!at) }), '@它'),
+        h('button', { onClick: send }, '发送'))
+    }
+
+    function ChatLog({ chat, simulator, refresh }) {
+      const [log] = usePoll(`/api/wechat-bot.log?chat=${encodeURIComponent(chat.id)}`, 1500)
+      const setMode = async mode => { await api.act('mode', { chatId: chat.id, mode }); refresh() }
+      const entries = log?.entries ?? []
+      return h('div', { className: 'wxb-card' },
+        h('div', { className: 'wxb-row' },
+          h('strong', null, chat.name),
+          h('span', { className: 'wxb-muted' }, chat.status),
+          h('span', { style: { flex: 1 } }),
+          MODES.map(([mode, label]) => h('button', { key: mode, 'aria-pressed': chat.mode === mode, onClick: () => setMode(mode) }, label))),
+        simulator && h(Simulate, { chat }),
+        h('div', { className: 'wxb-log' }, entries.length ? [...entries].reverse().map((e, i) => h('div', { key: `${e.time}-${i}`, className: e.type },
+          e.text,
+          e.type === 'decision' && e.raw ? h('details', null, h('summary', null, '模型原始输出'), e.raw) : null))
+          : h('div', { className: 'wxb-muted' }, '还没有消息')))
+    }
+
+    function Console({ sessionId }) {
+      const [state, error, refresh] = usePoll(`/api/wechat-bot.state?session=${encodeURIComponent(sessionId ?? '')}`, 2000)
+      const [picking, setPicking] = useState(false)
+      const [active, setActive] = useState(null)
+      if (error) return h('div', { className: 'wxb' }, h('div', { className: 'wxb-error' }, `无法连接插件：${error}`))
+      if (!state) return h('div', { className: 'wxb wxb-muted' }, '加载中…')
+      if (!state.setup?.completedAt) {
+        return h('div', { className: 'wxb' }, h('div', { className: 'wxb-card' },
+          h('h3', null, '微信机器人还没有初始化'),
+          h('div', null, '在要放置控制台的工作区里打开一个会话，输入 /wechat 开始。')))
+      }
+      if (state.here?.workspace && state.here.workspace !== state.setup.workspace) {
+        return h('div', { className: 'wxb' }, h('div', { className: 'wxb-card wxb-muted' }, `微信机器人的控制台在工作区 ${state.setup.workspace}。`))
+      }
+      const current = state.watched.find(c => c.id === active) ?? state.watched[0]
+      return h('div', { className: 'wxb' },
+        h(Status, { state }),
+        state.account.state !== 'ready' && h(Login, { refresh }),
+        state.capabilities?.window && h('div', { className: 'wxb-card' }, h(WindowToggle)),
+        h('div', { className: 'wxb-row' },
+          h('h3', { style: { flex: 1 } }, '监听的聊天'),
+          state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : '选择聊天')),
+        picking && h(ChatPicker, { watched: state.watched, onSaved: () => { setPicking(false); refresh() } }),
+        state.watched.length > 1 && h('div', { className: 'wxb-row' }, state.watched.map(c =>
+          h('button', { key: c.id, 'aria-pressed': c.id === current.id, onClick: () => setActive(c.id) }, c.name))),
+        current ? h(ChatLog, { key: current.id, chat: current, simulator: state.capabilities?.simulator, refresh })
+          : h('div', { className: 'wxb-card wxb-muted' }, '还没有监听任何聊天，点「选择聊天」。'),
+        h('details', null, h('summary', { className: 'wxb-muted' }, '连接日志'),
+          h('div', { className: 'wxb-log' }, [...state.log].reverse().map((e, i) =>
+            h('div', { key: i, className: e.level === 'error' ? 'error' : '' }, `${new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false })} ${e.message}`)))))
+    }
+
+    function Body(props) {
+      const { tab } = props.useTabInfo()
+      return h(React.Fragment, null, h('style', null, CSS), tab.visible === false ? null : h(Console, props))
+    }
+
+    return {
+      inject: ['slots', 'sidebarRightTabs', 'sidebarRight'],
+      apply(ctx) {
+        ctx.effect(() => ctx.sidebarRightTabs.register({
+          id: ID, kind: KIND, priority: 'extension', keepMounted: false,
+          title: () => '微信机器人',
+          guide: [{ id: 'open', order: 60, title: () => '微信机器人', description: () => '连接状态、监听的聊天和处理日志' }],
+        }), 'wechat-bot: tab type')
+        ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register({
+          name: 'sidebar.right.pane.tab', key: ID,
+          inject: sessionId => ({ sessionId }),
+        }, Body)), 'wechat-bot: tab body')
+
+        // Open the console in the session where `/wechat` just completed setup.
+        ctx.effect(() => {
+          const timer = setInterval(async () => {
+            if (document.visibilityState !== 'visible') return
+            try {
+              const state = await api.get('/api/wechat-bot.state')
+              const target = state.setup?.openConsoleIn
+              if (target && ctx.sidebarRight.mounted.getSnapshot() === target) {
+                ctx.sidebarRight.openTab(KIND)
+                await api.act('consoleOpened')
+              }
+            } catch {}
+          }, 2500)
+          return () => clearInterval(timer)
+        }, 'wechat-bot: open console after setup')
+      },
+    }
+  },
+})
