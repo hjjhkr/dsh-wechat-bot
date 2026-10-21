@@ -18,7 +18,7 @@
 | 帧格式 | [JSON-RPC 2.0](https://www.jsonrpc.org/specification)：插件 → 适配器是**请求**（带 `id`），适配器 → 插件是**通知**（不带 `id`） |
 | stderr | 随便写日志，插件逐行收集到控制台"连接日志"（debug 级），不参与协议 |
 | stdout 纪律 | stdout 上只能写协议帧。Python 记得 `print(..., flush=True)` 或关掉缓冲；不要让第三方库往 stdout 打印 |
-| 退出 | stdout 关闭 = 连接断开。插件会以 1s/2s/5s/10s/30s 退避**自动重启**适配器，并重新走握手、登录状态检查、`watch/set` |
+| 退出 | stdout 关闭 = 连接断开。插件会结束该进程（1 秒宽限），再以 1s/2s/5s/10s/30s 退避**自动重启**适配器，并重新走握手、登录状态检查、`watch/set`。握手失败（如协议版本不符）同样会先结束进程再重试 |
 
 请求示例：
 
@@ -97,7 +97,7 @@ params: {}
 result: Account
 type Account = {
   state: "offline" | "login_required" | "ready",
-  self?: { id: string, name: string },   // ready 时必填：小号的微信 id（wxid）和昵称
+  self?: { id: string, name: string },   // ready 时必填（缺了插件会拒绝）：小号的微信 id（wxid）和昵称
   instructions?: string,                 // 给用户看的一句话提示
   qrCode?: string                        // 可选：登录二维码 data URL，控制台会直接显示
 }
@@ -213,8 +213,9 @@ type Message = {
   fromSelf?: boolean,       // 小号自己发的（含插件发的回显、主人用手机登录小号发的）
   mentions?: string[],      // 这条消息 @ 了谁（wxid 列表），@所有人 用 "all"。
                             // 请从消息元数据（如 msgsource 的 atuserlist）取，不要从正文猜
-  quote?: {                 // 引用 / 回复了哪条消息
-    messageId?: string, senderId?: string, senderName?: string, text?: string
+  quote?: {                 // 引用 / 回复了哪条消息。尽量给 senderId；只给 messageId 时插件会在
+    messageId?: string,     // 本地上下文里查发送者，查不到就不当作"在跟别人说"
+    senderId?: string, senderName?: string, text?: string
   },
   media?: { mime?: string, description?: string }   // 非文字消息：description 会原样给模型看，
                                                     // 适配器可以在这里放 OCR / 图片描述 / 表情包含义
@@ -244,6 +245,7 @@ params: {
 ```
 
 状态变化时发（不用定时发）。`canSend: false` 时插件**照常收消息、照常思考**，回复排队等待；变回 `true` 后发送，过时的丢弃。
+从不发 `event/status` 的适配器，登录后被视为 `connected, canSend: true`；发过的以适配器说的为准。
 
 ### `event/account`
 
