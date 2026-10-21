@@ -1,8 +1,8 @@
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 
 export class ModelError extends Error {
-  constructor(code) {
-    super(code)
+  constructor(code, detail) {
+    super(detail ? `${code}: ${detail}` : code)
     this.name = 'ModelError'
     this.code = code
   }
@@ -22,7 +22,10 @@ async function streamText(llm, request, onChunk) {
     if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') text += chunk.text
     if (chunk?.type === 'finish') finish = chunk.reason
   }
-  if (finish?.kind !== 'stop') throw new ModelError(`model_finish_${finish?.kind ?? 'missing'}`)
+  if (finish?.kind !== 'stop') {
+    const failure = finish?.failure
+    throw new ModelError(`model_${finish?.kind ?? 'unfinished'}`, failure && [failure.code, failure.message].filter(Boolean).join(' '))
+  }
   return text
 }
 
@@ -30,7 +33,7 @@ async function streamText(llm, request, onChunk) {
 // JSON the model received, or just the correction on a retry.
 function shownFor(readable, messages) {
   if (messages.length > 1) return messages.at(-1).text
-  return `${readable}\n\n\`\`\`json\n${messages[0].text}\n\`\`\``
+  return `${readable}\n\n模型收到的输入：\n${messages[0].text}`
 }
 
 /**

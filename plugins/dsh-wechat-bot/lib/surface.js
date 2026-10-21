@@ -80,6 +80,12 @@ function describeSetup(result) {
   return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n这个工作区里会为每个监听的聊天生成「微信 · 聊天名」会话，可以随时打开看模型在想什么。`
 }
 
+const EFFORTS = ['off', 'low', 'high', 'max']
+const efforts = list => {
+  const chosen = list.filter(e => EFFORTS.includes(e))
+  return chosen.length ? chosen : undefined
+}
+
 const where = agent => ({ workspace: agent?.session?.header?.cwd, sessionId: agent?.id })
 
 export function registerCommand(ctx, app) {
@@ -87,12 +93,12 @@ export function registerCommand(ctx, app) {
     definitionId: CommandDefinitionId('dsh-wechat-bot'),
     name: 'wechat',
     description: '微信机器人：首次初始化，之后查看状态',
-    input: { hint: '[status]' },
+    input: { hint: '[status | eval [off|low|high|max ...]]' },
     handler: async invocation => {
+      const [sub, ...rest] = invocation.rawInput.trim().split(/\s+/)
       try {
-        if (invocation.rawInput.trim() === 'status' && app.setup?.completedAt) {
-          return { kind: 'success', text: describeState(app.state()) }
-        }
+        if (sub === 'status' && app.setup?.completedAt) return { kind: 'success', text: describeState(app.state()) }
+        if (sub === 'eval') return { kind: 'success', text: await app.evaluate(efforts(rest)) }
         return { kind: 'success', text: describeSetup(await app.setupFrom(where(invocation.agent))) }
       } catch (error) {
         return { kind: 'error', text: `微信机器人：${error.message}` }
@@ -109,9 +115,10 @@ async function findChat(app, ref) {
 export function registerTool(ctx, app) {
   ctx.effect(() => ctx.tools.register(defineTool({
     name: 'wechat_bot',
-    description: '操作微信群聊机器人插件。setup：在当前工作区初始化（用户第一次提到微信机器人、或说已登录小号时调用）；status：查看连接、监听和模式；chats：列出小号的聊天；watch：设置要监听的聊天（会替换原列表）；mode：切换某个聊天的发言模式；log：看某个聊天最近的处理日志。',
+    description: '操作微信群聊机器人插件。setup：在当前工作区初始化（用户第一次提到微信机器人、或说已登录小号时调用）；status：查看连接、监听和模式；chats：列出小号的聊天；watch：设置要监听的聊天（会替换原列表）；mode：切换某个聊天的发言模式；log：看某个聊天最近的处理日志；eval：用内置群聊场景评测模型判断"该不该说话、在跟谁说"的准确率，可比较不同思考强度。',
     parameters: {
-      action: { type: 'string', required: true, enum: ['setup', 'status', 'chats', 'watch', 'mode', 'log'] },
+      action: { type: 'string', required: true, enum: ['setup', 'status', 'chats', 'watch', 'mode', 'log', 'eval'] },
+      efforts: { type: 'array', items: { type: 'string', enum: EFFORTS }, description: 'eval：要比较的思考强度，默认用当前配置' },
       chats: { type: 'array', items: { type: 'string' }, description: 'watch：聊天名称或 id 列表' },
       chat: { type: 'string', description: 'mode / log：聊天名称或 id' },
       mode: { type: 'string', enum: Object.keys(MODES), description: 'mode：free 自由发言 / mention 只回复@和点名 / silent 不说话' },
@@ -147,6 +154,7 @@ export function registerTool(ctx, app) {
           if (!chat) return `找不到聊天「${args.chat ?? ''}」`
           return app.chatLog(chat.id).slice(-30).map(formatEntry).join('\n') || '还没有日志'
         }
+        case 'eval': return app.evaluate(efforts(args.efforts ?? []))
         default: return `未知操作 ${args.action}`
       }
     },

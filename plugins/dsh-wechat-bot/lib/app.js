@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { AdapterClient, spawnAdapter } from './adapter.js'
 import { Bot } from './bot.js'
 import { CommandRegistry } from './commands.js'
+import { formatEval, runEval } from './eval.js'
 import { createThink } from './model.js'
 import { ChatSession, chatSessionId } from './session.js'
 import { Simulator } from './simulator.js'
@@ -52,6 +53,7 @@ export class WeChatBotApp {
     if (config.commandsDir) await commands.load(config.commandsDir)
     this.setup = (await this.store.loadBot()).setup ?? null
     const { adapter } = config
+    this.persona = persona
     this.bot = new Bot({
       dataDir: this.dataDir, store: this.store, persona, commands,
       settings: {
@@ -167,6 +169,13 @@ export class WeChatBotApp {
 
   setWindowVisible(visible) {
     return this.bot.setWindowVisible(visible)
+  }
+
+  // Runs the built-in decision suite against the real model, once per effort level.
+  async evaluate(efforts = [this.config.model.reasoningEffort]) {
+    const think = createThink({ llm: this.ctx.llm, route: () => this.route() })
+    const settings = { ...this.bot.settings, typingDelay: false }
+    return formatEval(await runEval({ think, persona: this.persona, settings, efforts }))
   }
 
   windowState() {

@@ -78,7 +78,7 @@ test('each model call becomes a visible, persisted turn in the chat session', as
 
   const events = session.session.snapshotEvents()
   const shown = events.find(e => e.type === 'user/message').data.content[0].text
-  assert.match(shown, /^测试群（1 条新消息）\n\n```json\n\{"new":\[\]\}\n```$/)
+  assert.equal(shown, '测试群（1 条新消息）\n\n模型收到的输入：\n{"new":[]}')
   assert.equal(events.filter(e => e.type === 'assistant/message').length, 1)
   assert.equal(events.findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
   assert.throws(() => session.followup({}), /只展示微信机器人/)

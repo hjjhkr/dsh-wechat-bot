@@ -102,9 +102,12 @@ export class Bot extends EventEmitter {
   }
 
   #onStatus(status) {
+    const previous = this.connection
     this.connection = { state: status.connection, canSend: status.canSend, reason: status.reason, detail: status.detail }
     if (status.canSend) for (const waiter of this.#canSendWaiters) waiter.resolve()
-    this.#write('info', `连接状态：${status.connection}${status.canSend ? '' : '（暂不能发送）'}${status.reason ? ` ${status.reason}` : ''}`)
+    if (previous.state !== status.connection || previous.canSend !== status.canSend || previous.reason !== status.reason) {
+      this.#write('info', `连接状态：${status.connection}${status.canSend ? '' : '（暂不能发送）'}${status.reason ? ` ${status.reason}` : ''}`)
+    }
     this.#changed()
   }
 

@@ -229,6 +229,13 @@ export class ChatRunner {
     return this.memory.recall(ids)
   }
 
+  // Asks the model about `batch` without sending or remembering anything (dry runs, evaluation).
+  decide(batch, event) {
+    const address = this.#addresses(batch)
+    const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
+    return this.#decide({ batch, address, event, mustReply })
+  }
+
   // Why this batch should not reach the model at all, if it shouldn't.
   #skipReason(batch, address) {
     if (batch.some(m => m.command)) return null

@@ -144,7 +144,7 @@ export class ChatSession {
           this.session.append('step/end', { turn, step })
           this.session.append('turn/end', { turn, reason: controller.signal.aborted
             ? { kind: 'aborted', reason: controller.signal.reason ?? { kind: 'user' } }
-            : failure ? { kind: 'error', error: { code: 'WECHAT_MODEL_ERROR', message: failure.code ?? failure.message } }
+            : failure ? { kind: 'error', error: { code: 'WECHAT_MODEL_ERROR', message: failure.message ?? failure.code } }
               : { kind: 'completed' } })
           await this.owner.sessions.flush(this.session)
         }
