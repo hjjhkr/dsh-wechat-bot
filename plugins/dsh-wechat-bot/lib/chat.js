@@ -39,7 +39,7 @@ export class ChatRunner {
    * @param {object} o
    * @param {{id,name,kind}} o.chat
    * @param {object} [o.state]      snapshot() of a previous run
-   * @param {object} o.settings     chatDefaults overrides plus aliases/owner/admins/stickers
+   * @param {object} o.settings     chatDefaults overrides plus aliases/stickers
    * @param {string} o.persona
    * @param {() => {id,name}} o.account
    * @param {{send(content, clientId), canSend(): boolean, whenCanSend(signal): Promise}} o.link
@@ -112,15 +112,11 @@ export class ChatRunner {
     return this.mutedUntil > Date.now()
   }
 
-  isOwner(id) {
-    return id === this.settings.owner?.id || (this.settings.admins ?? []).includes(id)
-  }
-
   receive(message) {
     if (this.disposed || this.seen.has(message.id)) return
     this.#remember(message.id)
     if (message.fromSelf) {
-      // Echo of something we sent, or the account owner typing from their phone.
+      // Echo of something we sent, or someone typing on the bot account's phone.
       if (!this.sentIds.has(message.id)) this.#record(message)
       return
     }
@@ -172,13 +168,11 @@ export class ChatRunner {
   // ── commands ────────────────────────────────────────────────────────────
 
   async #command(message, command, parsed) {
-    const isOwner = this.isOwner(message.sender.id)
     this.#write('command', { name: command.name, from: message.sender.name, text: parsed.text })
-    if (command.access === 'owner' && !isOwner) return this.#say(`/${command.name} 只有主人能用`)
     let result
     try {
       result = await command.run({
-        ...parsed, sender: message.sender, chat: this.chat, isOwner, message,
+        ...parsed, sender: message.sender, chat: this.chat, message,
         mode: this.mode,
         setMode: mode => this.setMode(mode),
         mute: ms => this.mute(ms),
@@ -318,7 +312,7 @@ export class ChatRunner {
     const stickers = Object.keys(settings.stickers ?? {})
     const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers })
     const input = turnInput({
-      chat: this.chat, self: this.account(), aliases: settings.aliases ?? [], owner: settings.owner,
+      chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],
       recent: this.#recent(batch), batch, address, memory: this.#memoryFor(batch), event,
     })
     const messages = [{ role: 'user', text: input }]

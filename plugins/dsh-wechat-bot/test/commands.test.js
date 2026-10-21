@@ -7,13 +7,12 @@ import { CommandRegistry, parseCommand } from '../lib/commands.js'
 import { sleep, startBot, until } from './helpers.js'
 
 const GROUP = 'demo@chatroom'
-const OWNER = { id: 'wxid_owner', name: '主人' }
 const say = (env, from, text, extra = {}) => env.simulator.inject({ chatId: GROUP, from, text, ...extra })
 const sent = env => env.simulator.messages.get(GROUP).filter(m => m.fromSelf).map(m => m.text)
 const logOf = env => env.bot.chatLog(GROUP)
 
 async function watching(t, options = {}) {
-  const env = await startBot(t, { ...options, settings: { owner: OWNER, ...options.settings } })
+  const env = await startBot(t, options)
   await until(() => env.bot.ready)
   await env.bot.setWatched([GROUP])
   return env
@@ -29,7 +28,7 @@ test('command syntax: leading @-mentions, full-width slash and Chinese names are
 
 test('/mode mention: only addressed batches reach the model; /mode free restores', async t => {
   const env = await watching(t, { reply: () => ({ reply: ['嗯'] }) })
-  say(env, OWNER.id, '/mode mention')
+  say(env, 'wxid_carol', '/mode mention')
   await until(() => sent(env).some(s => s.includes('已切换为 mention')))
   say(env, 'wxid_alice', '今天好热')
   await until(() => logOf(env).some(e => e.type === 'skipped' && e.reason === 'mention_only'))
@@ -40,17 +39,9 @@ test('/mode mention: only addressed batches reach the model; /mode free restores
   assert.equal(env.bot.view().watched[0].mode, 'mention')
 })
 
-test('owner-only commands are refused for other members', async t => {
-  const env = await watching(t)
-  say(env, 'wxid_alice', '/mode silent')
-  await until(() => sent(env).length === 1)
-  assert.match(sent(env)[0], /只有主人能用/)
-  assert.equal(env.bot.runners.get(GROUP).mode, 'free')
-})
-
 test('/mute silences the bot, but /ask still gets a deliberate answer', async t => {
   const env = await watching(t, { reply: input => ({ reply: [input.new.some(m => m.command) ? '认真回答' : '闲聊'] }) })
-  say(env, OWNER.id, '/mute 5')
+  say(env, 'wxid_carol', '/mute 5')
   await until(() => sent(env).includes('好，安静 5 分钟'))
   say(env, 'wxid_alice', '小鲸鱼 在吗')
   await until(() => logOf(env).some(e => e.reason === 'muted'))
@@ -61,7 +52,7 @@ test('/mute silences the bot, but /ask still gets a deliberate answer', async t 
   assert.equal(call.input.new.at(-1).addressed, 'you')
   assert.match(call.input.new.at(-1).command.instruction, /认真提问/)
   assert.equal(env.model.calls.length, 1)
-  say(env, OWNER.id, '/unmute')
+  say(env, 'wxid_carol', '/unmute')
   await until(() => sent(env).includes('我回来了'))
   assert.equal(env.bot.runners.get(GROUP).muted, false)
 })
@@ -84,19 +75,19 @@ test('/memory shows only your own notes and /forget removes them', async t => {
 
 test('/tldr forwards to the model with a summary instruction and higher priority than mode', async t => {
   const env = await watching(t, { reply: () => ({ reply: ['在聊火锅'] }) })
-  say(env, OWNER.id, '/mode silent')
+  say(env, 'wxid_carol', '/mode silent')
   await until(() => sent(env).length === 1)
   say(env, 'wxid_alice', '/tldr')
   await until(() => sent(env).includes('在聊火锅'))
   assert.equal(env.model.calls[0].input.new[0].command.name, 'tldr')
 })
 
-test('/help lists what the sender may use; unknown commands are ordinary chat', async t => {
+test('/help lists the commands; unknown commands are ordinary chat', async t => {
   const env = await watching(t)
   say(env, 'wxid_alice', '/help')
   await until(() => sent(env).length === 1)
   assert.match(sent(env)[0], /\/ask/)
-  assert.doesNotMatch(sent(env)[0], /\/mode/)
+  assert.match(sent(env)[0], /\/mode/)
   say(env, 'wxid_alice', '/摸鱼')
   await until(() => env.model.calls.length === 1)
   assert.equal(env.model.calls[0].input.new[0].text, '/摸鱼')
@@ -111,7 +102,7 @@ test('custom command scripts are loaded from a directory', async t => {
   }`)
   const commands = new CommandRegistry()
   assert.deepEqual(await commands.load(dir), ['roll'])
-  const env = await startBot(t, { settings: { owner: OWNER } })
+  const env = await startBot(t)
   env.bot.commands = commands
   await until(() => env.bot.ready)
   await env.bot.setWatched([GROUP])

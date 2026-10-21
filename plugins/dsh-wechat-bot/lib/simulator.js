@@ -6,7 +6,7 @@ const SELF = { id: 'wxid_bot', name: '小鲸鱼' }
 
 export const DEMO_CHATS = [
   { id: 'demo@chatroom', name: '测试群', kind: 'group', members: [
-    { id: 'wxid_owner', name: '主人' }, { id: 'wxid_alice', name: '阿离' }, { id: 'wxid_bob', name: '老鲍' }, SELF,
+    { id: 'wxid_carol', name: '小卡' }, { id: 'wxid_alice', name: '阿离' }, { id: 'wxid_bob', name: '老鲍' }, SELF,
   ] },
   { id: 'wxid_wuti', name: '无题', kind: 'direct', members: [{ id: 'wxid_wuti', name: '无题' }, SELF] },
 ]

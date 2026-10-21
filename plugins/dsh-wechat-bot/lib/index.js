@@ -21,11 +21,6 @@ export const Config = z.object({
     reasoningEffort: z.union(['off', 'low', 'high', 'max']).default('off'),
     maxTokens: z.natural().min(64).default(600),
   }).default({}),
-  owner: z.object({
-    id: z.string().default('').description('WeChat id of the owner; only the id counts, never the nickname.'),
-    name: z.string().default(''),
-  }).default({}),
-  admins: z.array(z.string()).default([]).description('WeChat ids allowed to use owner commands.'),
   aliases: z.array(z.string()).default(['小鲸鱼', 'DeepSeek']).description('Names people call the bot besides its WeChat name.'),
   stickers: z.dict(z.string()).default({}).description('Sticker name → image path the model may send.'),
   behavior: z.object({

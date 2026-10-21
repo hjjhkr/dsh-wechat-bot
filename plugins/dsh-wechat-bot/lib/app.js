@@ -60,8 +60,6 @@ export class WeChatBotApp {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
         aliases: config.aliases,
-        owner: config.owner.id ? config.owner : undefined,
-        admins: config.admins,
         stickers: config.stickers,
       },
       think: createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) }),

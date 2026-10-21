@@ -38,7 +38,7 @@ test('addressing facts are attached to every message the model sees', async t =>
   await until(() => env.model.calls.length === 1, { what: 'first call' })
   say(env, 'wxid_alice', '@老鲍 你没事吧', { mentions: ['wxid_bob'] })
   say(env, 'wxid_alice', '哈哈哈', { quote: { messageId: first.id } })
-  say(env, 'wxid_owner', '小鲸鱼，你怎么看')
+  say(env, 'wxid_carol', '小鲸鱼，你怎么看')
   say(env, 'wxid_bob', '今天好热')
   await until(() => env.model.calls.length >= 2, { what: 'second call' })
   const input = env.model.calls[1].input
@@ -91,7 +91,7 @@ test('messages arriving while the model thinks supersede the stale answer', asyn
   say(env, 'wxid_alice', '有人玩游戏吗')
   await until(() => env.model.calls.length === 1, { what: 'thinking' })
   say(env, 'wxid_bob', '我')
-  say(env, 'wxid_owner', '我也')
+  say(env, 'wxid_carol', '我也')
   await sleep(80)
   gate.resolve()
   await until(() => sent(env).length === 1, { what: 'reply' })
@@ -169,7 +169,7 @@ test('failed sends are retried, uncertain sends never are', async t => {
   assert.equal(env.bot.chatLog(GROUP).find(e => e.type === 'send_error').uncertain, true)
 })
 
-test('the account owner typing from the bot account is context, not a trigger', async t => {
+test('a message typed on the bot account\'s phone is context, not a trigger', async t => {
   const env = await watching(t)
   say(env, 'wxid_bot', '我是本人，在手机上发的')
   await sleep(120)
@@ -301,14 +301,14 @@ test('unwatching a chat mid-reply stops the rest of the reply, even across a loc
 })
 
 test('/mute during a multi-part reply stops the remaining parts', async t => {
-  const env = await watching(t, { settings: { owner: { id: 'wxid_owner', name: '主人' } }, reply: () => ({ reply: ['一', '二'] }) })
-  // Hold the second part back (as a locked screen would) while the owner mutes the bot.
+  const env = await watching(t, { reply: () => ({ reply: ['一', '二'] }) })
+  // Hold the second part back (as a locked screen would) while someone mutes the bot.
   env.bot.on('chat-log', (_chat, entry) => {
     if (entry.type === 'sent' && entry.part.text === '一') env.simulator.handlers()['sim/status']({ canSend: false })
   })
   say(env, 'wxid_alice', '说两句')
   await until(() => logTypes(env).includes('waiting'))
-  say(env, 'wxid_owner', '/mute 10')
+  say(env, 'wxid_carol', '/mute 10')
   await until(() => logTypes(env).includes('mute'))
   await env.simulator.handlers()['sim/status']({ canSend: true })
   await until(() => sent(env).includes('好，安静 10 分钟'))

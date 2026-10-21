@@ -210,7 +210,7 @@ type Message = {
   kind: "text" | "image" | "sticker" | "voice" | "video" | "file" | "link" | "system" | "other",
   text?: string,            // text 必填；其他类型可放简短描述或占位（如"[图片]"）
   sender: { id: string, name: string },  // 必填。id 是真实 wxid——身份判断只认它；name 用群昵称优先
-  fromSelf?: boolean,       // 小号自己发的（含插件发的回显、主人用手机登录小号发的）
+  fromSelf?: boolean,       // 小号自己发的（含插件发的回显、有人在小号的手机上发的）
   mentions?: string[],      // 这条消息 @ 了谁（wxid 列表），@所有人 用 "all"。
                             // 请从消息元数据（如 msgsource 的 atuserlist）取，不要从正文猜
   quote?: {                 // 引用 / 回复了哪条消息。尽量给 senderId；只给 messageId 时插件会在
@@ -229,7 +229,7 @@ type Message = {
 | `mentions` 含小号 id | 判定"在跟机器人说话"（最强信号） |
 | `quote.senderId` 是小号 | 判定"在回机器人的话" |
 | `quote.senderId` 是别人 / `mentions` 是别人 | 判定"在跟别人说话"，模型默认不插嘴 |
-| `sender.id` | 长期记忆归属、主人身份识别（**昵称无效**） |
+| `sender.id` | 长期记忆归属、成员身份（**昵称无效**） |
 | `fromSelf` | 不触发回复，只作为上下文 |
 | `kind` / `media.description` | 非文字消息转成 `[图片: …]`、`[表情: …]` 给模型 |
 
@@ -282,7 +282,7 @@ params: { level: "debug" | "info" | "warn" | "error", message: string }
 
 ## 6. 锁屏要求
 
-插件这一侧完全不依赖桌面：收消息、合批、调模型、写记忆都在锁屏时照常进行。能不能**在锁屏时发出去**完全取决于适配器：
+收消息建议直接读微信本地数据库（不依赖界面和桌面状态）。插件这一侧也完全不依赖桌面：收消息、合批、调模型、写记忆都在锁屏时照常进行。能不能**在锁屏时发出去**完全取决于适配器：
 
 - 能发：保持 `canSend: true`，正常处理 `message/send`。
 - 暂时不能：发 `event/status { canSend: false, reason: "screen_locked" }`，在 `message/send` 里返回 `unavailable`；解锁后发 `canSend: true`。

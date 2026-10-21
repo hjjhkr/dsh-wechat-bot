@@ -35,8 +35,7 @@ export const builtinCommands = [
     name: 'help',
     aliases: ['帮助'],
     summary: '列出可用命令',
-    run: ({ commands, isOwner }) => commands
-      .filter(c => isOwner || c.access !== 'owner')
+    run: ({ commands }) => commands
       .map(c => `${c.usage ?? '/' + c.name}  ${c.summary}`)
       .join('\n'),
   },
@@ -45,7 +44,6 @@ export const builtinCommands = [
     aliases: ['模式'],
     usage: '/mode [free|mention|silent]',
     summary: '查看或切换发言模式',
-    access: 'owner',
     run: ({ args, mode, setMode }) => {
       if (!args.length) return `当前模式：${mode}（${MODES[mode]}）\n可选：${Object.keys(MODES).join(' / ')}`
       const next = { at: 'mention', 'at-only': 'mention', quiet: 'silent', off: 'silent' }[args[0]] ?? args[0]
@@ -59,7 +57,6 @@ export const builtinCommands = [
     aliases: ['闭嘴'],
     usage: '/mute [分钟]',
     summary: '临时禁言，默认 30 分钟',
-    access: 'owner',
     run: ({ args, mute }) => {
       const value = Number(args[0] ?? 30)
       if (!Number.isFinite(value) || value <= 0 || value > 24 * 60) return '分钟数要在 1 到 1440 之间'
@@ -70,7 +67,6 @@ export const builtinCommands = [
   {
     name: 'unmute',
     summary: '解除临时禁言',
-    access: 'owner',
     run: ({ mute }) => {
       mute(0)
       return '我回来了'
@@ -80,7 +76,6 @@ export const builtinCommands = [
     name: 'status',
     aliases: ['状态'],
     summary: '运行状态',
-    access: 'owner',
     run: ({ status }) => {
       const s = status()
       const muted = s.mutedUntil > Date.now() ? `，禁言中还剩 ${minutes(s.mutedUntil - Date.now())} 分钟` : ''
@@ -111,7 +106,6 @@ export const builtinCommands = [
   {
     name: 'reset',
     summary: '清空这个聊天的短期上下文（不影响长期记忆）',
-    access: 'owner',
     run: ({ resetContext }) => {
       resetContext()
       return '上下文清空了'
@@ -146,7 +140,7 @@ export class CommandRegistry {
 
   define(command) {
     if (!command?.name || typeof command.run !== 'function') throw new TypeError('a command needs a name and run()')
-    const entry = { access: 'everyone', summary: '', ...command, name: command.name.toLowerCase() }
+    const entry = { summary: '', ...command, name: command.name.toLowerCase() }
     for (const name of [entry.name, ...(entry.aliases ?? [])]) this.#byName.set(name.toLowerCase(), entry)
     return entry
   }
