@@ -3,7 +3,7 @@
 插件本身不碰微信。所有"读消息、发消息、登录、窗口显隐"都通过一个**适配器进程**完成，插件和适配器之间只说这份协议。
 只要实现了这份协议，任何东西都可以当适配器：Windows 微信 4.x 的 UI 自动化、数据库读取、iPad 协议、Hook、甚至别的 IM。
 
-- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（一个协议完整的假微信）
+- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（协议完整的假微信）；[`adapters/wechat-db`](../adapters/wechat-db)（读微信本地数据库收消息、发消息写发件箱 JSON）
 - 插件侧客户端：[`lib/adapter.js`](../plugins/dsh-wechat-bot/lib/adapter.js)，数据校验：[`lib/protocol.js`](../plugins/dsh-wechat-bot/lib/protocol.js)
 - 一致性检查工具：`node bin/check-adapter.js -- <你的适配器命令>`
 
@@ -167,7 +167,9 @@ result: { messageId: string }            // 这条消息在微信里的 id，用
    - `send_failed`：**确定没发出去**（例如找不到输入框、草稿没写进去）。插件会退避重试最多 2 次。
    - `send_uncertain`：**不确定**（例如点了发送但没在数据库里看到回显）。插件**永不重试**，只记日志。
    - `unavailable`：**现在发不了，什么都没做**（例如锁屏期间无法操作 UI）。插件等待 `event/status canSend:true` 后再试；回复超过 10 分钟（可配）就丢弃，不会把过时回复补发出去。
-3. **回显**：发出去的消息之后也应作为 `event/message`（`fromSelf: true`，`id` 等于返回的 `messageId`）推送一次；插件靠 `messageId` 去重。没有回显也能工作。
+3. **回显**：发出去的消息之后也应作为 `event/message`（`fromSelf: true`）推送一次。`id` 等于返回的 `messageId` 时按 id 去重；不相等时（例如适配器只是把内容排进了队列，真正发出后数据库里是另一个 id），插件在 2 分钟内按正文匹配去重。没有回显也能工作。
+
+   现有的 `adapters/wechat-db` 就是"排队"式：`message/send` 把内容 JSON 写进发件箱文件并返回 `out:<clientId>`，真正输入微信由发件箱的消费者完成（**消费者尚未实现**）。
 4. 命令的直接回复可能与普通回复**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
 
 ### `media/fetch`（能力 `mediaFetch`，预留给图片/表情包识别）

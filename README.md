@@ -1,189 +1,143 @@
 # dsh-wechat-bot
 
-让一个微信小号像普通群友一样在群里聊天的 [DeepSeek Harness（DSH）](https://github.com/anywhere-labs/deepseek-harness-desktop) 插件。
+让一个微信小号像普通群友一样在**一个群**里聊天的 [DeepSeek Harness（DSH）](https://github.com/anywhere-labs/deepseek-harness-desktop) 插件。
 
-- **自然地聊**：一阵连发的消息合并成一批，一次交给模型；模型自己判断要不要接话、在回谁，可以一次发几条短消息。
-- **知道别人在跟谁说话**：@、引用、叫名字、私聊、"刚聊完接着说"这些信号由程序算好，作为事实交给模型（见[对象判断](#说话对象判断)）。
-- **记得住人**：从日常聊天里主动积累每个成员的背景和偏好，只按微信 id 归属，改昵称不会串人。
-- **聊天命令**：`/mode`、`/mute`、`/ask`、`/tldr`、`/memory`… 也能自己写命令脚本（[docs/commands.md](docs/commands.md)）。
-- **在 DSH 里看得见**：右侧栏控制台显示连接状态、所服务的群、处理日志和健康指标；工作区里有一个"微信 · 群名"会话，实时显示模型收到了什么、输出了什么。
-- **扛得住刷屏、坏了能自愈**：积压有上限（太旧的只当上下文）、模型调用限速、超时、连续失败熔断后自动重试；适配器崩溃自动重连，处理流程卡住由看门狗重建。全部有压力测试（见[护栏与自愈](#护栏与自愈)）。
-- **锁屏也工作**：插件侧不依赖桌面，锁屏时照常收消息、思考；发不出去就排队，解锁后发，过时的回复自动丢弃。
-- **和微信解耦**：插件只说一份 [JSON-RPC 适配器协议](docs/protocol.md)。微信怎么读、怎么发由适配器负责，可以替换。自带一个协议完整的**模拟器**，不连微信也能完整体验和测试。
+> **当前状态（诚实版）**
+> - ✅ 插件逻辑（合批、说话对象判断、三种发言模式、命令、定时、记忆、护栏与自愈）、DSH 集成、协议、测试：完成。
+> - ✅ 收消息：读微信本地数据库的适配器已实现，在与微信 4.x 同结构的测试库上全链路验证通过。
+> - ⏳ **还没在真实账号的加密库上跑过**（需要小号在这台电脑上登录后验证）。
+> - ⏳ 发消息：插件只输出**内容 JSON**（写入发件箱文件）。**把 JSON 输入到微信里这一步没做**，交给后续实现。
+> - ⏳ 小号窗口显隐切换：**没做**（协议里留了接口，控制台有开关，但没有适配器实现它）。
+> - ⏳ 图片/表情包的内容识别和发送：协议和数据字段已留，**识别与发送没做**。
 
-> 当前状态：插件逻辑、DSH 集成、协议、模拟器、测试均已完成；**真实微信适配器尚未按新协议实现**（交接说明见 [docs/handoff.md](docs/handoff.md)）。
+## 能做什么
+
+- **合并连发的消息**：2 秒内连发的几条合成一批，以 JSON 数组一次交给模型；模型思考时又来了新消息，会连同新消息重新考虑。
+- **判断在跟谁说话**：程序先根据 **@、引用、叫名字、刚聊完接着说** 算出每条消息的 `addressed`（you / maybe / other / none）和依据，再交给模型判断；有人直接找它却不回，会纠正一次。
+- **三种发言模式**（可用命令随时切换）：`free` 每批都给模型自由接话；`infer`（默认）像是在跟它说话才给模型；`at` 只回 @ 和引用；另有 `silent` 静音。
+- **命令即时执行、插队**：`/` 命令在插件运行时里直接执行，不经过模型；回复插到所有排队消息前面立即发出；改变状态的命令（切模式、禁言、忘记、清上下文、`/ask`）会打断正在思考的旧回答，旧批次按新状态重新处理。
+- **定时消息**：`/cron 10m 内容`、`/cron 10:00 内容`、`/cron 每天 22:00 UTC-5 内容`……本地定时库，重启不丢。
+- **记得住人**：从聊天里主动积累每个成员的背景和偏好，按微信 id 归属，`/memory` 查看、`/forget` 删除。
+- **扛得住、能自愈**：积压上限、限速、模型超时、连续失败熔断、看门狗、适配器崩溃自动重启；有压力与混沌测试。
+- **锁屏也工作**：插件不依赖桌面；发不出去就排队，过时丢弃。
+- **在 DSH 里看得见**：右侧栏控制台（连接、群、模式、日志、健康指标）；工作区里的「微信 · 群名」会话实时显示模型收到了什么、输出了什么；`/wechat eval` 用真实模型评测"该不该说话、在跟谁说"。
+
+完整命令见 [docs/commands.md](docs/commands.md)。和最初版本的对比见 [docs/handoff.md](docs/handoff.md)。
 
 ## 目录
 
 ```
 plugins/dsh-wechat-bot/        DSH 插件（安装的就是这个目录）
   lib/
-    index.js                   插件入口与配置 schema
-    app.js                     WeChatBotApp：控制台、/wechat、agent 工具共用的一组操作
-    surface.js                 DSH 接口层：HTTP 路由、/wechat 命令、wechat_bot 工具
-    session.js                 群对应的原生 DSH 会话，镜像模型调用
-    model.js                   通过 DSH llm 服务调用模型
-    bot.js                     适配器连接、自动重连、聊天监听管理
-    chat.js                    单个聊天的流水线：合批 → 判断 → 回复 → 发送
-    batcher.js addressing.js prompt.js decision.js memory.js commands.js eval.js store.js
-    protocol.js rpc.js adapter.js   协议定义、JSON-RPC 传输、插件侧客户端
-    simulator.js               模拟器适配器
-  client/index.js              右侧栏控制台（React，DSH 主题变量）
-  bin/simulator.js             模拟器的 stdio 入口
-  bin/check-adapter.js         适配器一致性检查工具
-  personas/                    默认人设（MIT，来源见 source.json）
-  test/                        node:test 测试
-adapters/wechat-windows/       旧版 Windows 微信读写代码（未改动，等待按新协议重写）
-docs/                          协议、命令、交接文档
+    index.js                   插件入口、配置 schema
+    app.js  surface.js         DSH 集成：控制台 API、/wechat 命令、wechat_bot 工具
+    session.js  model.js       「微信 · 群名」会话镜像、模型调用
+    bot.js                     适配器连接与自动重启、所服务的群、看门狗
+    chat.js                    一个群的流水线：命令 → 合批 → 模式 → 对象判断 → 模型 → 记忆 → 发送
+    batcher.js addressing.js prompt.js decision.js memory.js
+    commands.js cron.js        命令（含 /cron）
+    guard.js                   限速、熔断、超时、发送优先通道
+    protocol.js rpc.js adapter.js simulator.js   适配器协议、传输、模拟器
+    store.js eval.js
+  client/index.js              右侧栏控制台
+  bin/simulator.js  bin/check-adapter.js
+  personas/  test/
+adapters/wechat-db/            微信数据库适配器（Python）：读库收消息，发消息写发件箱 JSON
+docs/                          protocol.md 协议 · commands.md 命令 · handoff.md 交接与对比
 ```
 
-## 安装到 DSH Desktop
+## 安装
 
-需要 DSH Desktop ≥ 2.0（DSH 运行时 0.2.1-rc.2）。
+1. 克隆仓库。DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）。
+2. DSH **设置 → 插件 → 添加插件**，填 `…\dsh-wechat-bot\plugins\dsh-wechat-bot`（或 `dsh plugin --profile desktop add link:<该目录>`），重启 DSH。
+3. 在想放控制台的工作区开一个会话，输入 **`/wechat`**；按提示登录小号后再输入一次，完成初始化，右侧栏出现「微信机器人」控制台。
+4. 控制台里 **选择群**。
 
-1. 克隆仓库。
-2. 在 DSH 里打开 **设置 → 插件 → 添加插件**，填入插件目录的绝对路径，例如
-   `C:\path\to\dsh-wechat-bot\plugins\dsh-wechat-bot`。
-   命令行也可以：`dsh plugin --profile desktop add link:C:/path/to/dsh-wechat-bot/plugins/dsh-wechat-bot`
-3. 重启 DSH Desktop。
-
-### 第一次使用
-
-1. 在你想放控制台的工作区里开一个会话，输入 **`/wechat`**（或者跟 DSH 说"帮我初始化微信机器人"，它会调用 `wechat_bot` 工具）。
-2. 插件绑定这个工作区，并让适配器准备小号登录，告诉你该做什么（真实适配器：在手机上确认小号登录；模拟器：自动完成）。
-3. 登录好后再输入一次 `/wechat`（或告诉 DSH"好了"），初始化完成，右侧栏会自动打开 **微信机器人** 控制台。
-4. 在控制台点 **选择群**，选中要服务的那一个群（只服务一个群）。
-5. 之后在这个工作区的 **微信 · 聊天名** 会话里随时看模型在想什么。
-
-`/wechat status` 查看状态；`/wechat eval off high` 用真实模型跑内置评测，对比思考强度。
-
-### 配置
-
-在 DSH 的插件设置里改，或写进 `~/.dsh/profiles/desktop/cordis.patch.yml`：
+不配置适配器时插件连接内置**模拟器**（假群聊，控制台里可以模拟群友发言），可以完整试用。接真实微信：
 
 ```yaml
+# ~/.dsh/profiles/desktop/cordis.patch.yml
 - id: wechat-bot
   config:
     adapter:
-      command: C:/Python312/python.exe        # 空 = 内置模拟器
-      args: [-u, C:/path/to/adapters/wechat-windows/adapter.py]
-    aliases: [小鲸鱼, DeepSeek]                # 除微信昵称外，大家怎么叫它
-    model:
-      provider: ''                             # 空 = DSH 默认模型
-      model: ''
-      reasoningEffort: 'off'                   # off | low | high | max
-      maxTokens: 600
-    behavior:
-      mode: free                               # free | mention | silent
-      quietMs: 2000                            # 2 秒没有新消息就合批
-      maxWaitMs: 8000                          # 一批最多等 8 秒
-      maxParts: 3                              # 一次最多发几条
-      idleMinutes: 0                           # 群冷场多少分钟后可以主动说话，0 = 不主动
-      staleMinutes: 10                         # 发不出去的回复多久后丢弃
-    stickers: {}                               # 表情包：名字 → 图片路径，模型可以发
-    commandsDir: ''                            # 自定义命令脚本目录
-    personaPath: ''                            # 空 = 自带人设
+      command: C:/Python313/python.exe
+      args: [-u, C:/path/to/dsh-wechat-bot/adapters/wechat-db/main.py, --account, wxid_xxx_c53e]
 ```
 
-完整 schema 见 [`lib/index.js`](plugins/dsh-wechat-bot/lib/index.js)。状态存放在 `~/.dsh/wechat-bot/`。
+适配器的参数和发件箱格式见 [adapters/wechat-db/README.md](adapters/wechat-db/README.md)。
+
+## 配置
+
+| 键 | 默认 | 说明 |
+| --- | --- | --- |
+| `adapter.command` / `args` / `cwd` / `env` | 空 = 模拟器 | 适配器进程 |
+| `model.provider` / `model` | 空 = DSH 默认模型 | |
+| `model.reasoningEffort` | `off` | 思考强度 off/low/high/max；`/ask` 临时用 high |
+| `model.maxTokens` | 600 | |
+| `aliases` | `[小鲸鱼, DeepSeek]` | 除微信昵称外大家怎么叫它（用于"叫名字"判断） |
+| `behavior.mode` | `infer` | free / infer / at / silent |
+| `behavior.quietMs` / `maxWaitMs` | 2000 / 8000 | 合批：静默多久 / 最多等多久 |
+| `behavior.maxMessages` | 20 | 一批最多几条；排队超过的更早消息转为上下文 |
+| `behavior.maxParts` | 3 | 一次最多发几条 |
+| `behavior.idleMinutes` | 0 | 冷场多久后可以主动说话（仅 free 模式），0 = 不主动 |
+| `behavior.staleMinutes` | 10 | 发不出去的回复多久后丢弃 |
+| `behavior.cronZone` | `+08:00` | `/cron` 默认时区 |
+| `guard.maxTurnsPerMinute` | 8 | 每分钟最多几次模型调用 |
+| `guard.commandsPerMinute` | 6 | 每人每分钟最多几条命令 |
+| `guard.modelTimeoutSeconds` | 90 | 单次模型调用超时 |
+| `guard.maxTextChars` | 2000 | 超长消息截断 |
+| `guard.breakerThreshold` / `breakerBaseSeconds` | 3 / 30 | 连续几次失败熔断 / 首次暂停多久（之后翻倍，最长 10 分钟） |
+| `guard.stuckMinutes` | 5 | 处理卡住多久由看门狗重建 |
+| `stickers` | `{}` | 表情包名 → 图片路径，模型可输出 `{"sticker":"名字"}` |
+| `commandsDir` | 空 | 自定义命令脚本目录 |
+| `personaPath` | 自带人设 | |
+| `dataDir` | `~/.dsh/wechat-bot` | 状态目录 |
 
 ## 工作原理
 
 ```
-微信 ──(适配器进程)── JSON-RPC over stdio ──┐
-                                            ▼
-                     Bot ── 服务的那个群的 ChatRunner（看门狗：卡住就重建）
-                                │
-         消息 ─▶ / 命令？──是──▶ 命令运行时（直接回复，或带指令转给模型）
-                  │否
-                  ▼
-           Batcher：2 秒静默 / 8 秒上限，把连发的消息合成一批
-                  │
-           模式 / 禁言过滤（mention 模式没人找它就不调模型）
-                  │
-           addressing：给每条消息算出 addressed = you / maybe / other / none
-                  │
-           prompt：人设 + 平台规则 + JSON 输入（recent 上下文 / new 新消息 / memory）
-                  │
-           DSH llm ──（同时镜像到 "微信 · 聊天名" 会话）
-                  │
-           decision：{"to": 消息id, "reply": ["短句", …], "memory": [...]}
-                  │      输出不合法 → 带原因纠正一次；有人直接找它却沉默 → 提醒一次
-                  │      思考期间又来了新消息 → 丢掉旧回答，连同新消息重新考虑（有上限）
-                  ▼
-           记忆写入（证据必须来自本批、且属于该发送者）→ 逐条发送（模拟打字间隔）
+微信本地数据库 ── adapters/wechat-db（轮询、解析）── JSON-RPC over stdio ──┐
+                                                                             ▼
+                                         Bot（适配器自动重启 · 看门狗）── ChatRunner（所服务的群）
+   消息 → 以 / 开头？ ─是→ 命令运行时：立即执行 → 回复走优先通道插队发出
+            │                         ├ 改状态的命令：打断正在思考的旧回答，旧批次按新状态重算
+            │否                       ├ /ask /tldr：先回"收到"，插队交给模型（不受限速）
+            ▼                         └ /cron：写入本地定时库，到点按原文发送
+   合批（2s 静默 / 8s 上限 / 最多 20 条，溢出转上下文）
+            ▼
+   对象判断 addressed + 依据 → 模式过滤（free / infer / at / silent）
+            ▼
+   限速 · 熔断 → 模型（硬超时；同时镜像到「微信 · 群名」会话）
+            ▼
+   {"to": 消息id, "reply": ["短句", …], "memory": [...]}
+     不合格→纠正一次；有人找它却沉默→提醒一次；思考中来了新消息→合并重想
+            ▼
+   记忆写入（证据须来自本批且属于该成员）→ 发送通道（打字节奏；锁屏等待；过时丢弃）
+            ▼
+   adapter.message/send ── wechat-db：写一行内容 JSON 到发件箱 ──（输入微信：未实现）
 ```
 
-### 消息合并
-
-同一个聊天里，消息先进 `Batcher`：2 秒内没有新消息、或从第一条起满 8 秒、或攒够 20 条 / 6000 字，就合成一批，**一次**交给模型。模型收到的 `new` 是这一批的数组，之前处理过的进 `recent`。模型思考期间来的消息会让这次回答作废并和新消息一起重新考虑，避免"答非所问"。
-
-### 说话对象判断
-
-只靠模型"读空气"很不稳定，所以程序先算出确定的事实，模型再做最终判断：
-
-| addressed | 依据 |
-| --- | --- |
-| `you` | 私聊；`@` 了小号；引用了小号的话；用名字/别名称呼它（"小鲸鱼，…"、"…你说呢 小鲸鱼"）；用 `/ask` 等命令点名 |
-| `other` | `@` 了别人；引用了别人的话 |
-| `maybe` | 句中顺口提到它的名字；刚被它回复过的人 3 分钟内接着说 |
-| `none` | 普通群聊 |
-
-有 `you` 时模型必须回复（沉默会被纠正一次）；`other` 默认不插嘴；`mention` 模式下没有 `you` 根本不调用模型。模型还要输出 `to`（回应哪条消息），控制台日志和评测会检查它。
-
-**思考强度能不能解决？** 不能代替上面这些信号——"谁 @ 了谁、引用了谁"是元数据，模型猜得再认真也不如直接告诉它。思考强度能改善"该不该接一般闲聊"这类主观判断，代价是延迟。现在的做法：默认 `off`（快、像真人），`/ask` 时临时用 `high`；`/wechat eval off high` 会用内置的 12 个场景实测两种强度的通过率和平均耗时，你可以按结果调 `model.reasoningEffort`。
-
-## 护栏与自愈
-
-只服务一个群。高并发、模型或适配器出故障时的行为：
-
-| 情况 | 处理 | 配置（`guard` / `behavior`） |
-| --- | --- | --- |
-| 刷屏 | 最多 `maxMessages`（20）条在排队，更早的只进上下文不逐条回应；一批一次模型调用 | `behavior.maxMessages` |
-| 超长消息 | 截断 | `guard.maxTextChars`（2000） |
-| 说话太频繁 | 每分钟最多 N 次模型调用，多出来的批次**等待并与新消息合并**，不丢、不刷屏 | `guard.maxTurnsPerMinute`（8） |
-| 模型卡死 | 单次调用硬超时（即使下游不理会取消也会放弃） | `guard.modelTimeoutSeconds`（90） |
-| 模型连续失败 | 连续 3 次失败熔断，暂停 30 秒，再失败翻倍（最长 10 分钟），之后自动试一次，成功即恢复 | `guard.breakerThreshold`、`breakerBaseSeconds` |
-| 发送失败 | 确定失败才重试；不确定绝不重发；锁屏等待、过时丢弃 | `behavior.staleMinutes` |
-| 适配器崩溃 | 结束旧进程，1s/2s/5s/10s/30s 退避重启，自动重新登录检查和监听 | — |
-| 处理流程卡住 | 看门狗发现思考/发送超过上限，丢弃旧流程，用快照（上下文、记忆、模式）重建 | `guard.stuckMinutes`（5） |
-| 单条消息处理异常 | 只记日志，不影响后续 | — |
-
-控制台和 `/wechat status` 显示健康指标：收到、积压、溢出转上下文、限速延后、模型失败、发送失败、自动恢复次数，以及熔断状态。
-
-压力测试（`test/stress.test.js`，`STRESS_SCALE=3` 可放大负载）：
-
-| 场景 | 内容 | 检查 |
-| --- | --- | --- |
-| 洪峰 | 50 人 3000 条消息、5% @机器人 | 积压有上限、限速峰值不超、回复数 ≤ 模型调用数、结束后正常回复 |
-| 混乱模型 | 报错、永久卡死、乱输出随机混合 | 熔断触发并自动恢复、期间仍有回复、结束后正常回复 |
-| 适配器崩溃风暴 | 流量中反复杀掉适配器 | 每次自动重连、仍服务同一个群、结束后正常回复 |
-| 发送故障 + 锁屏抖动 | 30% 发送失败/不确定/不可用，锁屏每 60ms 切换 | 没有任何一条消息被发两次、结束后正常回复 |
-| 看门狗 | 发送永远不返回 | 自动重建、上下文保留、结束后正常回复 |
-| 长时间运行 | 持续聊天并不断写记忆 | 内存结构和状态文件有上限 |
-
-所有场景都断言没有未处理的异常/拒绝、内存结构有上限。
-
-## 开发
+## 测试
 
 ```bash
 cd plugins/dsh-wechat-bot
-# 测试依赖 DSH 自带的 @deepseek-ai/* 包：把 node_modules 指向 DSH Desktop 的模块目录（只用于开发，已 gitignore）
-mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"
-node --test test/*.test.js          # 用 DSH 自带的 Node 24 也可以
-node bin/simulator.js --logged-in   # 单独运行模拟器（stdio）
-node bin/check-adapter.js -- node bin/simulator.js --logged-in
+mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"   # 开发用，指向 DSH 自带模块
+node --test test/*.test.js                  # 72 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
+STRESS_SCALE=3 node --test test/stress.test.js
+cd ../../adapters/wechat-db && python -m pytest tests     # 12 项
 ```
 
-测试覆盖：协议与 stdio 传输、合批、对象判断、输出解析、记忆归属、命令、模式、锁屏等待与过时丢弃、发送重试语义、断线重连、重启恢复、压力与混沌场景，以及用真实 DSH 会话服务验证的会话镜像（流式、失败、取消、崩溃恢复）。
-
-## 路线图
-
-- 按协议实现 Windows 微信 4.x 适配器（[交接说明](docs/handoff.md)）
-- 窗口显隐（协议已定义 `window/get|set`，控制台开关已做好）
-- 图片 / 表情包识别：协议已定义 `kind`、`media.description`、`media/fetch`；下一步把图片交给多模态模型
-- 表情包发送：已支持 `stickers` 配置，模型可以输出 `{"sticker":"名字"}`；适配器需要实现 `sticker` 发送
+| 测试文件 | 覆盖 |
+| --- | --- |
+| `units` `protocol` | 合批、对象判断、输出解析、记忆归属、协议与 stdio 传输、崩溃与进程回收 |
+| `bot` | 合批到模型、纠正、插话/沉默、思考中重想、多条回复、锁屏、发送失败语义、重启恢复 |
+| `commands` | 四种模式各自放行哪些消息、命令插队、打断旧回答、`/ask` 越过限速、刷命令限流 |
+| `cron` | 时间解析（相对、钟点、日期、每天、时区、DST）、非法输入、定时库限额与只取一次、到点发送、重启补发/错过、不执行命令、锁屏 |
+| `stress` | 50 人刷屏、混乱模型、适配器崩溃风暴、发送故障+锁屏抖动、看门狗、长时间运行 |
+| `dsh` | 用 DSH 真实会话服务验证「微信 · 群名」会话的流式、失败、取消、崩溃恢复 |
+| `wechat-db` | 数据库新消息 → 适配器 → 插件 → 模型 → 发件箱 JSON |
+| `adapters/wechat-db/tests` | 解析（分片、发送者映射、zstd、@、引用、表情、图片、系统消息）、子进程协议、发件箱幂等、读不到库时的恢复 |
 
 ## 许可
 
-MIT。人设文件改编自 [mtshang/make-your-qq-ai-group-member](https://github.com/mtshang/make-your-qq-ai-group-member)（MIT）。`adapters/wechat-windows/vendor/` 下的第三方代码保留其原许可证。
+MIT。人设改编自 [mtshang/make-your-qq-ai-group-member](https://github.com/mtshang/make-your-qq-ai-group-member)（MIT）。`adapters/wechat-db/vendor/` 下的第三方代码保留原许可证。
