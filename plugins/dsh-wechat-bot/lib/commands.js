@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { CronError, describeTime } from './cron.js'
+import { EFFORTS, ModelError } from './models.js'
 
 // Chat commands: a WeChat message that starts with "/" (or a full-width "／",
 // optionally after @-mentions) is routed here before it can reach the model.
@@ -54,6 +55,19 @@ const CRON_USAGE = [
   '/cron list　　　　　　　看所有定时',
   '/cron cancel 编号　　　 取消自己设的定时',
 ].join('\n')
+
+const describeModel = m => `${m.provider}/${m.model}，思考 ${m.reasoningEffort}${m.overridden ? '' : '（配置默认）'}`
+
+// Runs a model-control action and turns validation failures into a reply.
+async function modelAction(models, action) {
+  if (!models) return '这里不能切换模型'
+  try {
+    return await action()
+  } catch (error) {
+    if (!(error instanceof ModelError)) throw error
+    return `没改成：${error.message}`
+  }
+}
 
 const shortText = text => (text.length > 30 ? text.slice(0, 30) + '…' : text).replace(/\s+/g, ' ')
 
@@ -147,6 +161,33 @@ export const builtinCommands = [
       resetContext()
       return '已执行：上下文清空了'
     },
+  },
+  {
+    name: 'model',
+    aliases: ['模型'],
+    usage: '/model [模型名 | provider/模型名 | reset]',
+    summary: '查看或切换模型（只影响之后的回复）',
+    run: ({ text, models }) => modelAction(models, async () => {
+      if (!text) {
+        const catalog = await models.catalog()
+        const now = models.current()
+        return `当前：${describeModel(now)}\n可用：${catalog.map(m => m.id === now.model ? `[${m.id}]` : m.id).join('、') || '（没有）'}`
+      }
+      if (['reset', '默认', '恢复'].includes(text.toLowerCase())) return `已执行：恢复配置默认 ${describeModel(await models.reset())}`
+      const next = await models.useModel(text)
+      return `已执行：切换为 ${describeModel(next)}${next.adjusted ? `（新模型不支持思考 ${next.adjusted}，已调整）` : ''}`
+    }),
+  },
+  {
+    name: 'think',
+    aliases: ['思考'],
+    usage: '/think [off|low|high|max|on]',
+    summary: '查看或调整思考强度（off 不思考，on = high）',
+    run: ({ args, models }) => modelAction(models, async () => {
+      if (!args.length) return `当前：${describeModel(models.current())}\n可选：${EFFORTS.join(' / ')}`
+      const effort = { on: 'high', 开: 'high', 关: 'off', 不思考: 'off' }[args[0].toLowerCase()] ?? args[0].toLowerCase()
+      return `已执行：思考强度 ${(await models.setEffort(effort)).reasoningEffort}`
+    }),
   },
   {
     name: 'cron',

@@ -41,12 +41,12 @@ export function scriptedModel(reply) {
 
 export const FAST = { mode: 'free', quietMs: 40, maxWaitMs: 300, typingDelay: false, retryDelayMs: 10, idleMinutes: 0, maxTurnsPerMinute: 10_000 }
 
-export async function startBot(t, { reply, settings = {}, simulator: simOptions, dir, persona = '你是小鲸鱼。' } = {}) {
+export async function startBot(t, { reply, settings = {}, simulator: simOptions, dir, persona = '你是小鲸鱼。', models } = {}) {
   const dataDir = dir ?? await mkdtemp(join(tmpdir(), 'wechat-bot-test-'))
   const sims = []
   const model = scriptedModel(reply ?? (() => ({ to: null, reply: [], memory: [] })))
   const bot = new Bot({
-    dataDir, persona, store: new Store(dataDir, { delayMs: 5 }), think: model.think,
+    dataDir, persona, store: new Store(dataDir, { delayMs: 5 }), think: model.think, models,
     settings: { ...FAST, aliases: ['小鲸鱼', 'DeepSeek'], ...settings },
     createAdapter: () => {
       const pair = linkedSimulator(simOptions)

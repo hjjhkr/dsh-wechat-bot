@@ -16,6 +16,7 @@
 - **判断在跟谁说话**：程序先根据 **@、引用、叫名字、刚聊完接着说** 算出每条消息的 `addressed`（you / maybe / other / none）和依据，再交给模型判断；有人直接找它却不回，会纠正一次。
 - **三种发言模式**（可用命令随时切换）：`free` 每批都给模型自由接话；`infer`（默认）像是在跟它说话才给模型；`at` 只回 @ 和引用；另有 `silent` 静音。
 - **命令即时执行、插队**：`/` 命令在插件运行时里直接执行，不经过模型；回复插到所有排队消息前面立即发出；改变状态的命令（切模式、禁言、忘记、清上下文、`/ask`）会打断正在思考的旧回答，旧批次按新状态重新处理。
+- **模型与思考强度可调**：`/model` 切换模型、`/think off|low|high|max` 调思考强度，切换前按 DSH 的模型目录校验，重启后保持。
 - **定时消息**：`/cron 10m 内容`、`/cron 10:00 内容`、`/cron 每天 22:00 UTC-5 内容`……本地定时库，重启不丢。
 - **记得住人**：从聊天里主动积累每个成员的背景和偏好，按微信 id 归属，`/memory` 查看、`/forget` 删除。
 - **扛得住、能自愈**：积压上限、限速、模型超时、连续失败熔断、看门狗、适配器崩溃自动重启；有压力与混沌测试。
@@ -36,6 +37,7 @@ plugins/dsh-wechat-bot/        DSH 插件（安装的就是这个目录）
     chat.js                    一个群的流水线：命令 → 合批 → 模式 → 对象判断 → 模型 → 记忆 → 发送
     batcher.js addressing.js prompt.js decision.js memory.js
     commands.js cron.js        命令（含 /cron）
+    models.js                  /model /think：模型与思考强度切换（按 DSH 模型目录校验）
     guard.js                   限速、熔断、超时、发送优先通道
     protocol.js rpc.js adapter.js simulator.js   适配器协议、传输、模拟器
     store.js eval.js
@@ -72,7 +74,7 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
 | --- | --- | --- |
 | `adapter.command` / `args` / `cwd` / `env` | 空 = 模拟器 | 适配器进程 |
 | `model.provider` / `model` | 空 = DSH 默认模型 | |
-| `model.reasoningEffort` | `off` | 思考强度 off/low/high/max；`/ask` 临时用 high |
+| `model.reasoningEffort` | `off` | 思考强度 off/low/high/max；`/ask` 临时用 high；运行中可用 `/model` `/think` 覆盖 |
 | `model.maxTokens` | 600 | |
 | `aliases` | `[小鲸鱼, DeepSeek]` | 除微信昵称外大家怎么叫它（用于"叫名字"判断） |
 | `behavior.mode` | `infer` | free / infer / at / silent |
@@ -122,7 +124,7 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
 ```bash
 cd plugins/dsh-wechat-bot
 mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"   # 开发用，指向 DSH 自带模块
-node --test test/*.test.js                  # 71 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
+node --test test/*.test.js                  # 74 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
 STRESS_SCALE=3 node --test test/stress.test.js
 cd ../../adapters/wechat-db && python -m pytest tests     # 12 项
 ```
@@ -132,6 +134,7 @@ cd ../../adapters/wechat-db && python -m pytest tests     # 12 项
 | `units` `protocol` | 合批、对象判断、输出解析、记忆归属、协议与 stdio 传输、崩溃与进程回收 |
 | `bot` | 合批到模型、纠正、插话/沉默、思考中新消息进下一批、多条回复、锁屏、发送失败语义、重启恢复 |
 | `commands` | 四种模式各自放行哪些消息、命令插队、打断旧回答、`/ask` 越过限速、刷命令限流 |
+| `models` | 模型/思考强度切换的校验、持久化、`/ask` 降级、聊天里的 `/model` `/think` |
 | `cron` | 时间解析（相对、钟点、日期、每天、时区、DST）、非法输入、定时库限额与只取一次、到点发送、重启补发/错过、不执行命令、锁屏 |
 | `stress` | 50 人刷屏、混乱模型、适配器崩溃风暴、发送故障+锁屏抖动、看门狗、长时间运行 |
 | `dsh` | 用 DSH 真实会话服务验证「微信 · 群名」会话的流式、失败、取消、崩溃恢复 |

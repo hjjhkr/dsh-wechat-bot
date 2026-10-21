@@ -8,6 +8,7 @@ import { Bot } from './bot.js'
 import { CommandRegistry } from './commands.js'
 import { formatEval, runEval } from './eval.js'
 import { createThink } from './model.js'
+import { ModelControl } from './models.js'
 import { ChatSession, chatSessionId } from './session.js'
 import { Simulator } from './simulator.js'
 import { Store } from './store.js'
@@ -51,11 +52,16 @@ export class WeChatBotApp {
     const persona = await readFile(config.personaPath || DEFAULT_PERSONA, 'utf8')
     const commands = new CommandRegistry()
     if (config.commandsDir) await commands.load(config.commandsDir)
-    this.setup = (await this.store.loadBot()).setup ?? null
+    const saved = await this.store.loadBot()
+    this.setup = saved.setup ?? null
+    this.models = new ModelControl({
+      llm: this.ctx.llm, base: () => this.#configuredRoute(), override: saved.modelOverride,
+      save: modelOverride => this.store.updateBot({ modelOverride }),
+    })
     const { adapter } = config
     this.persona = persona
     this.bot = new Bot({
-      dataDir: this.dataDir, store: this.store, persona, commands,
+      dataDir: this.dataDir, store: this.store, persona, commands, models: this.models,
       settings: {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
@@ -69,7 +75,7 @@ export class WeChatBotApp {
         aliases: config.aliases,
         stickers: config.stickers,
       },
-      think: createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) }),
+      think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) })),
       createAdapter: () => adapter.command
         ? spawnAdapter({ command: adapter.command, args: adapter.args, cwd: adapter.cwd || undefined, env: adapter.env })
         // Like a real client, the simulated account stays logged in once set up.
@@ -86,15 +92,25 @@ export class WeChatBotApp {
     await Promise.allSettled([...this.sessions.values()].map(s => s.then(session => session?.dispose())))
   }
 
-  route() {
+  // A per-call effort (e.g. /ask's "high") falls back to the current one if the model lacks it.
+  #thinkWithSupportedEffort(think) {
+    return async args => think(args.effort && !(await this.models.supports(args.effort)) ? { ...args, effort: undefined } : args)
+  }
+
+  // What the configuration (or DSH's default model) says, before any /model or /think change.
+  #configuredRoute() {
     const { model } = this.config
     const fallback = !model.provider && this.ctx.get?.('agentDefaultModel')?.currentSelection()
     return {
       provider: model.provider || fallback?.provider || 'deepseek-account',
       model: model.model || fallback?.model || 'deepseek-flash',
       reasoningEffort: model.reasoningEffort,
-      maxTokens: model.maxTokens,
     }
+  }
+
+  route() {
+    const { provider, model, reasoningEffort } = this.models.current()
+    return { provider, model, reasoningEffort, maxTokens: this.config.model.maxTokens }
   }
 
   // The DSH session mirroring `chat`, in the workspace where setup ran.

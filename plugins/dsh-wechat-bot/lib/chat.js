@@ -74,8 +74,9 @@ export class ChatRunner {
    * @param {CommandRegistry} [o.commands]
    * @param {(type: 'log'|'status'|'change', payload?) => void} [o.emit]
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
+   * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit, persist }) {
+  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit, persist, models }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona
@@ -85,6 +86,7 @@ export class ChatRunner {
     this.commands = commands ?? new CommandRegistry()
     this.emit = emit ?? (() => {})
     this.persist = persist ?? (async () => {})
+    this.models = models
     this.transcript = state.transcript ?? []
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
@@ -312,6 +314,7 @@ export class ChatRunner {
           context: this.transcript.length, members: Object.keys(this.memory.members).length,
         }),
         commands: this.commands.list(),
+        models: this.models,
         cron: {
           add: text => {
             const job = this.cron.add(parseSchedule(text, Date.now(), { defaultZone: this.settings.cronZone, limits: this.cronLimits }), message.sender)
