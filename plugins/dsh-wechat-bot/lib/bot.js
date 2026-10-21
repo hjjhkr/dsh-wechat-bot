@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { ChatRunner } from './chat.js'
+import { CommandRegistry } from './commands.js'
 
 const LOG_LIMIT = 300
 const BACKOFF_MS = [1000, 2000, 5000, 10_000, 30_000]
@@ -19,9 +20,9 @@ export class Bot extends EventEmitter {
   #disposed = false
   #canSendWaiters = new Set()
 
-  constructor({ createAdapter, store, persona, settings = {}, think, dataDir }) {
+  constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry() }) {
     super()
-    Object.assign(this, { createAdapter, store, persona, settings, think, dataDir })
+    Object.assign(this, { createAdapter, store, persona, settings, think, dataDir, commands })
     store.onError = error => this.#write('error', `保存状态失败：${error.message}`)
   }
 
@@ -46,7 +47,10 @@ export class Bot extends EventEmitter {
       capabilities: this.adapter?.capabilities ?? null,
       connection: this.connection,
       account: this.account,
-      watched: this.watched.map(chat => ({ ...chat, status: this.runners.get(chat.id)?.status ?? 'stopped' })),
+      watched: this.watched.map(chat => {
+        const runner = this.runners.get(chat.id)
+        return { ...chat, status: runner?.status ?? 'stopped', mode: runner?.mode, mutedUntil: runner?.mutedUntil }
+      }),
     }
   }
 
@@ -176,7 +180,7 @@ export class Bot extends EventEmitter {
   async #runner(chat) {
     const state = await this.store.loadChat(chat.id)
     const runner = new ChatRunner({
-      chat, state, persona: this.persona,
+      chat, state, persona: this.persona, commands: this.commands,
       settings: { ...this.settings, ...this.settings.chats?.[chat.id] },
       account: () => this.account.self,
       think: args => this.think(args),
@@ -209,6 +213,14 @@ export class Bot extends EventEmitter {
   async #saveChats() {
     for (const [id, runner] of this.runners) this.store.saveChatLater(id, runner.snapshot())
     await this.store.flush()
+  }
+
+  setMode(chatId, mode) {
+    const runner = this.runners.get(chatId)
+    if (!runner) throw new Error(`not watching ${chatId}`)
+    runner.setMode(mode)
+    this.store.saveChatLater(chatId, () => runner.snapshot())
+    this.#changed()
   }
 
   setWindowVisible(visible) {

@@ -1,12 +1,14 @@
 import { createHash } from 'node:crypto'
 import { addressOf, nameMatchers } from './addressing.js'
 import { Batcher } from './batcher.js'
+import { CommandRegistry, MODES, parseCommand } from './commands.js'
 import { DecisionError, parseDecision } from './decision.js'
 import { MemoryBook } from './memory.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
 
 export const chatDefaults = Object.freeze({
+  mode: 'free',
   quietMs: 2000,
   maxWaitMs: 8000,
   maxMessages: 20,
@@ -28,22 +30,39 @@ const SEEN_LIMIT = 1000
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+const today = () => new Date().toLocaleDateString('sv')
 
 // One watched chat. Messages are processed strictly in order: collect a batch,
 // ask the model once, deliver the reply, then take the next batch.
 export class ChatRunner {
-  constructor({ chat, state = {}, settings, persona, account, link, think, emit }) {
+  /**
+   * @param {object} o
+   * @param {{id,name,kind}} o.chat
+   * @param {object} [o.state]      snapshot() of a previous run
+   * @param {object} o.settings     chatDefaults overrides plus aliases/owner/admins/stickers
+   * @param {string} o.persona
+   * @param {() => {id,name}} o.account
+   * @param {{send(content, clientId), canSend(): boolean, whenCanSend(signal): Promise}} o.link
+   * @param {({chat, system, messages, readable, effort, signal}) => Promise<string>} o.think
+   * @param {CommandRegistry} [o.commands]
+   * @param {(type: 'log'|'status'|'change', payload?) => void} [o.emit]
+   */
+  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona
-    this.account = account // () => { id, name }
-    this.link = link // { send(content, clientId), canSend(), whenCanSend() }
-    this.think = think // ({ chat, system, messages, readable, signal }) => Promise<string>
+    this.account = account
+    this.link = link
+    this.think = think
+    this.commands = commands ?? new CommandRegistry()
     this.emit = emit ?? (() => {})
     this.transcript = state.transcript ?? []
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
     this.lastBotTurn = state.lastBotTurn
+    this.mode = MODES[state.mode] ? state.mode : this.settings.mode
+    this.mutedUntil = state.mutedUntil ?? 0
+    this.stats = state.stats?.date === today() ? state.stats : { date: today(), batches: 0, sent: 0 }
     this.seen = new Set(this.transcript.map(m => m.id))
     this.sentIds = new Set()
     this.status = 'idle'
@@ -59,6 +78,9 @@ export class ChatRunner {
       memory: this.memory.toJSON(),
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurn: this.lastBotTurn,
+      mode: this.mode,
+      mutedUntil: this.mutedUntil,
+      stats: this.stats,
     }
   }
 
@@ -67,6 +89,26 @@ export class ChatRunner {
     this.abort.abort()
     this.batcher.clear()
     clearTimeout(this.idleTimer)
+  }
+
+  setMode(mode) {
+    if (!MODES[mode]) throw new Error(`unknown mode ${mode}`)
+    this.mode = mode
+    this.#write('mode', { mode })
+    this.#scheduleIdle()
+  }
+
+  mute(ms) {
+    this.mutedUntil = ms > 0 ? Date.now() + ms : 0
+    this.#write('mute', { until: this.mutedUntil })
+  }
+
+  get muted() {
+    return this.mutedUntil > Date.now()
+  }
+
+  isOwner(id) {
+    return id === this.settings.owner?.id || (this.settings.admins ?? []).includes(id)
   }
 
   receive(message) {
@@ -80,6 +122,9 @@ export class ChatRunner {
     this.#record(message)
     this.#write('message', { id: message.id, from: message.sender.name, text: message.text, kind: message.kind })
     this.#scheduleIdle()
+    const parsed = message.kind === 'text' ? parseCommand(message.text) : null
+    const command = parsed && this.commands.get(parsed.name)
+    if (command) return void this.#command(message, command, parsed)
     this.batcher.push(message)
   }
 
@@ -116,14 +161,61 @@ export class ChatRunner {
     this.emit('status', status)
   }
 
+  // ── commands ────────────────────────────────────────────────────────────
+
+  async #command(message, command, parsed) {
+    const isOwner = this.isOwner(message.sender.id)
+    this.#write('command', { name: command.name, from: message.sender.name, text: parsed.text })
+    if (command.access === 'owner' && !isOwner) return this.#say(`/${command.name} 只有主人能用`)
+    let result
+    try {
+      result = await command.run({
+        ...parsed, sender: message.sender, chat: this.chat, isOwner, message,
+        mode: this.mode,
+        setMode: mode => this.setMode(mode),
+        mute: ms => this.mute(ms),
+        memory: {
+          recall: id => this.memory.recall([id])[id] ?? {},
+          forget: (id, topic) => this.memory.forget(id, topic),
+        },
+        resetContext: () => {
+          this.transcript = []
+          this.lastBotTurn = undefined
+        },
+        status: () => ({
+          mode: this.mode, mutedUntil: this.mutedUntil, today: this.stats,
+          context: this.transcript.length, members: Object.keys(this.memory.members).length,
+        }),
+        commands: this.commands.list(),
+      })
+    } catch (error) {
+      this.#write('error', { message: `/${command.name}: ${error.message}` })
+      return this.#say(`/${command.name} 出错了`)
+    }
+    if (typeof result === 'string') return this.#say(result)
+    if (result?.reply) return this.#say(result.reply)
+    if (result?.forward) {
+      const { text = parsed.text, instruction, effort } = result.forward
+      this.batcher.push({ ...message, text, command: { name: command.name, instruction, effort } })
+    }
+  }
+
+  // Direct, model-free reply (command output). Queued behind nothing: it is short and immediate.
+  async #say(text) {
+    const clientId = createHash('sha256').update(`${this.chat.id}\0say\0${Date.now()}\0${text}`).digest('hex').slice(0, 16)
+    const result = await this.#sendOne({ kind: 'text', text }, clientId, Date.now())
+    if (result) this.#sent(result.messageId, { kind: 'text', text })
+  }
+
+  // ── model turns ─────────────────────────────────────────────────────────
+
   #names() {
-    const self = this.account()
-    return nameMatchers([self.name, ...(this.settings.aliases ?? [])])
+    return nameMatchers([this.account().name, ...(this.settings.aliases ?? [])])
   }
 
   #addresses(batch) {
     const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(), lastBotTurn: this.lastBotTurn }
-    return new Map(batch.map(m => [m.id, addressOf(m, context)]))
+    return new Map(batch.map(m => [m.id, m.command ? { addressed: 'you', reasons: ['command'] } : addressOf(m, context)]))
   }
 
   #recent(excluding) {
@@ -135,6 +227,15 @@ export class ChatRunner {
     const ids = new Set(batch.map(m => m.sender.id))
     for (const m of this.transcript.slice(-10)) if (!m.fromSelf) ids.add(m.sender.id)
     return this.memory.recall(ids)
+  }
+
+  // Why this batch should not reach the model at all, if it shouldn't.
+  #skipReason(batch, address) {
+    if (batch.some(m => m.command)) return null
+    if (this.muted) return 'muted'
+    if (this.mode === 'silent') return 'silent_mode'
+    if (this.mode === 'mention' && !batch.some(m => address.get(m.id).addressed === 'you')) return 'mention_only'
+    return null
   }
 
   async #run(batch, event) {
@@ -149,17 +250,21 @@ export class ChatRunner {
   }
 
   async #turn(batch, event) {
+    const address = this.#addresses(batch)
+    const skip = event ? null : this.#skipReason(batch, address)
+    if (skip) return this.#write('skipped', { reason: skip, count: batch.length })
     if (!this.link.canSend()) {
       this.#setStatus('waiting')
       this.#write('waiting', { reason: 'adapter_cannot_send' })
       await this.link.whenCanSend(this.abort.signal)
     }
-    const address = this.#addresses(batch)
-    const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
     if (batch.length) {
       this.#write('batch', { count: batch.length, addressed: Object.fromEntries([...address].map(([id, a]) => [id, a.addressed])) })
+      if (this.stats.date !== today()) this.stats = { date: today(), batches: 0, sent: 0 }
+      this.stats.batches++
     }
     this.#setStatus('thinking')
+    const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
     const decision = await this.#decide({ batch, address, event, mustReply })
     if (this.disposed) return
 
@@ -171,8 +276,7 @@ export class ChatRunner {
         this.supersedes.set(batch[0], superseded + 1)
         this.batcher.requeue(batch)
       }
-      this.#write('superseded', { newer, discarded: decision.reply.length })
-      return
+      return this.#write('superseded', { newer, discarded: decision.reply.length })
     }
 
     if (batch.length) {
@@ -181,27 +285,26 @@ export class ChatRunner {
     }
     if (!decision.reply.length) {
       this.#write('silent', {})
-      this.emit('change')
-      return
+      return this.emit('change')
     }
     const target = batch.find(m => m.id === decision.to)
     await this.#deliver(decision.reply, { batch, target, event })
   }
 
   async #decide({ batch, address, event, mustReply }) {
-    const self = this.account()
     const settings = this.settings
     const stickers = Object.keys(settings.stickers ?? {})
     const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers })
     const input = turnInput({
-      chat: this.chat, self, aliases: settings.aliases ?? [], owner: settings.owner,
+      chat: this.chat, self: this.account(), aliases: settings.aliases ?? [], owner: settings.owner,
       recent: this.#recent(batch), batch, address, memory: this.#memoryFor(batch), event,
     })
     const messages = [{ role: 'user', text: input }]
-    const readable = event ? `${this.chat.name}：冷场 ${event.minutes} 分钟，检查要不要主动说话` : readableBatch(this.chat, batch, address)
+    const readable = event ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address)
+    const effort = batch.find(m => m.command?.effort)?.command.effort
     let retries = settings.correctionRetries
     for (;;) {
-      const output = await this.think({ chat: this.chat, system, messages, readable, signal: this.abort.signal })
+      const output = await this.think({ chat: this.chat, system, messages, readable, effort, signal: this.abort.signal })
       let problem
       try {
         const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers })
@@ -224,6 +327,8 @@ export class ChatRunner {
     }
   }
 
+  // ── delivery ────────────────────────────────────────────────────────────
+
   async #deliver(parts, { batch, target, event }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
@@ -236,18 +341,23 @@ export class ChatRunner {
         : { kind: 'text', text: part.text }
       const result = await this.#sendOne(content, `${turnId}:${index}`, started)
       if (!result) return
-      this.sentIds.add(result.messageId)
-      // The adapter's echo of this message may already have arrived and been recorded.
-      if (!this.seen.has(result.messageId)) {
-        this.#remember(result.messageId)
-        this.#record({
-          id: result.messageId, chatId: this.chat.id, time: Date.now(), kind: part.kind, fromSelf: true,
-          text: part.kind === 'sticker' ? part.name : part.text, sender: this.account(), mentions: [],
-        })
-      }
-      this.#write('sent', { part, messageId: result.messageId })
+      this.#sent(result.messageId, part)
     }
     this.lastBotTurn = { time: Date.now(), toSenderId: target?.sender.id }
+  }
+
+  #sent(messageId, part) {
+    this.sentIds.add(messageId)
+    this.stats.sent++
+    // The adapter's echo of this message may already have arrived and been recorded.
+    if (!this.seen.has(messageId)) {
+      this.#remember(messageId)
+      this.#record({
+        id: messageId, chatId: this.chat.id, time: Date.now(), kind: part.kind, fromSelf: true,
+        text: part.kind === 'sticker' ? part.name : part.text, sender: this.account(), mentions: [],
+      })
+    }
+    this.#write('sent', { part, messageId })
   }
 
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
@@ -282,16 +392,18 @@ export class ChatRunner {
     }
   }
 
+  // ── idle checks ─────────────────────────────────────────────────────────
+
   #scheduleIdle() {
     clearTimeout(this.idleTimer)
     const minutes = this.settings.idleMinutes
-    if (!minutes || this.chat.kind !== 'group' || this.disposed) return
+    if (!minutes || this.chat.kind !== 'group' || this.mode !== 'free' || this.disposed) return
     this.idleTimer = setTimeout(() => this.#idle(minutes), minutes * 60_000)
     this.idleTimer.unref?.()
   }
 
   #idle(minutes) {
-    if (this.batcher.busy || this.batcher.size) return this.#scheduleIdle()
+    if (this.batcher.busy || this.batcher.size || this.muted) return this.#scheduleIdle()
     this.batcher.hold()
     this.#run([], { kind: 'idle', minutes, at: Date.now() }).finally(() => this.#scheduleIdle())
   }

@@ -26,6 +26,15 @@ export class MemoryBook {
     return result
   }
 
+  // Removes one topic, or every note when `topic` is undefined. Returns the count removed.
+  forget(memberId, topic) {
+    const member = this.members[memberId]
+    if (!member) return 0
+    const before = member.notes.length
+    member.notes = topic === undefined ? [] : member.notes.filter(n => n.topic !== topic)
+    return before - member.notes.length
+  }
+
   // Validates and applies model-proposed updates. Returns { applied, rejected }.
   // `batch` is the list of new messages the updates may cite as evidence.
   apply(updates, batch, now = Date.now()) {

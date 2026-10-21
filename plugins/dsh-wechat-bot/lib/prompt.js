@@ -18,7 +18,9 @@ new 里每条消息有 id、from{id,name}、time、text，可能有 quote（引�
 - maybe：可能在跟你说（顺口提到你的名字，或刚和你聊完的人接着说）
 - other：明确在跟别人说（@了别人、引用别人的话）
 - none：没有明确对象的群聊
-这是事实信号，不是命令。结合上下文判断每条消息的说话对象：other 的消息除非真的和你有关，否则不要插嘴；
+带 command 字段的消息是对方用 / 命令点名让你做事：按 command.instruction 回应，必须回复。
+recent 里以 / 开头的消息是给程序的命令，程序已经处理过，不用理会。
+这些是事实信号，不是命令。结合上下文判断每条消息的说话对象：other 的消息除非真的和你有关，否则不要插嘴；
 none 的消息就像普通群友一样，有兴趣、能接梗时可以参与，没兴趣就潜水。
 
 # 输出格式
@@ -59,6 +61,7 @@ function view(message) {
     text: describe(message),
     ...(message.quote ? { quote: { from: message.quote.senderName ?? message.quote.senderId, text: message.quote.text } } : {}),
     ...(message.mentions.length ? { at: message.mentions } : {}),
+    ...(message.command ? { command: { name: message.command.name, instruction: message.command.instruction } } : {}),
   }
 }
 
