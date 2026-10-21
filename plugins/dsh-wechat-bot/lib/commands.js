@@ -1,6 +1,7 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { CronError, describeTime } from './cron.js'
 
 // Chat commands: a WeChat message that starts with "/" (or a full-width "／",
 // optionally after @-mentions) is routed here before it can reach the model.
@@ -44,14 +45,30 @@ export function parseCommand(text) {
 
 const minutes = ms => Math.max(1, Math.round(ms / 60_000))
 
+const CRON_USAGE = [
+  '/cron 10m 内容　　　　　10 分钟后（也可 1h30m、90s、2小时）',
+  '/cron 10:00 内容　　　　下一个 10 点（也可 10点半、9点15分）',
+  '/cron 明天 8:00 内容　　 也可 后天 / 10-22 / 2026-10-22',
+  '/cron 每天 10:00 内容　　每天重复',
+  '/cron 10:00 UTC-5 内容　时区写在时间后面（默认东八区，也可 +09:00、Asia/Tokyo）',
+  '/cron list　　　　　　　看所有定时',
+  '/cron cancel 编号　　　 取消自己设的定时',
+].join('\n')
+
+const shortText = text => (text.length > 30 ? text.slice(0, 30) + '…' : text).replace(/\s+/g, ' ')
+
 export const builtinCommands = [
   {
     name: 'help',
     aliases: ['帮助'],
-    summary: '列出可用命令',
-    run: ({ commands }) => commands
-      .map(c => `${c.usage ?? '/' + c.name}  ${c.summary}`)
-      .join('\n'),
+    summary: '列出所有命令',
+    run: ({ commands, mode }) => [
+      '可用命令（直接执行，不排队）：',
+      ...commands.map(c => `${c.usage ?? '/' + c.name}${c.aliases?.length ? `（/${c.aliases[0]}）` : ''}  ${c.summary}`),
+      '',
+      `发言模式（当前 ${mode}）：`,
+      ...Object.entries(MODES).map(([name, text]) => `${name}  ${text}`),
+    ].join('\n'),
   },
   {
     name: 'mode',
@@ -129,6 +146,34 @@ export const builtinCommands = [
     run: ({ resetContext }) => {
       resetContext()
       return '已执行：上下文清空了'
+    },
+  },
+  {
+    name: 'cron',
+    aliases: ['定时'],
+    usage: '/cron <时间> [时区] <内容> · /cron list · /cron cancel <编号>',
+    summary: '定时发一条消息（默认东八区）',
+    run: ({ text, args, sender, cron }) => {
+      const sub = args[0]?.toLowerCase()
+      if (!args.length || sub === 'help' || sub === '帮助') return `用法：\n${CRON_USAGE}`
+      try {
+        if (['list', 'ls', '列表', '查看'].includes(sub)) {
+          const jobs = cron.list()
+          if (!jobs.length) return '没有定时'
+          return jobs.map(j => `#${j.id} ${j.repeat === 'daily' ? '每天 ' : ''}${describeTime(j.at, j.zone)} 「${shortText(j.text)}」 ${j.owner.name}`).join('\n')
+        }
+        if (['cancel', 'rm', 'del', '取消', '删除'].includes(sub)) {
+          const id = Number((args[1] ?? '').replace(/^#/, ''))
+          if (!Number.isInteger(id) || id <= 0) return '要取消哪个？/cron cancel 编号（/cron list 能看到编号）'
+          const job = cron.cancel(id, sender)
+          return `已执行：取消 #${job.id}「${shortText(job.text)}」`
+        }
+        const job = cron.add(text)
+        return `已执行：#${job.id} ${job.repeat === 'daily' ? '每天 ' : ''}${describeTime(job.at, job.zone)} 发「${shortText(job.text)}」`
+      } catch (error) {
+        if (!(error instanceof CronError)) throw error
+        return `定时没设成：${error.message}\n${CRON_USAGE}`
+      }
     },
   },
   {

@@ -228,6 +228,10 @@ export class Bot extends EventEmitter {
         canSend: () => this.connection.canSend,
         whenCanSend: signal => this.#whenCanSend(signal),
       },
+      persist: () => {
+        this.store.saveChatLater(chat.id, () => runner.snapshot())
+        return this.store.flush()
+      },
       emit: (type, payload) => {
         if (runner !== this.runner) return
         if (type === 'log') this.emit('chat-log', payload)

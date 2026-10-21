@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { addressOf, nameMatchers } from './addressing.js'
 import { Batcher } from './batcher.js'
 import { CommandRegistry, MODES, parseCommand } from './commands.js'
+import { CronBook, cronLimits, parseSchedule } from './cron.js'
 import { DecisionError, parseDecision } from './decision.js'
 import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
 import { MemoryBook } from './memory.js'
@@ -33,12 +34,15 @@ export const chatDefaults = Object.freeze({
   breakerMaxMs: 10 * 60_000,
   commandsPerMinute: 6,        // per member, so commands cannot be used to spam the group
   echoWindowMs: 2 * 60_000,    // how long a sent text may take to come back from the adapter
+  cronZone: '+08:00',          // time zone of /cron times without an explicit zone
 })
 
 const LOG_LIMIT = 300
 const SEEN_LIMIT = 1000
 const NOTICE_INTERVAL_MS = 5000
 const COMMAND_SENDERS_LIMIT = 500
+// Scheduled messages are checked at least this often, so long delays, sleep and clock changes are safe.
+const CRON_TICK_MS = 60_000
 // Signals that count as "@" for the `at` mode.
 const AT_REASONS = new Set(['at_you', 'quotes_you', 'direct_chat'])
 
@@ -70,8 +74,9 @@ export class ChatRunner {
    * @param {({chat, system, messages, readable, effort, signal}) => Promise<string>} o.think
    * @param {CommandRegistry} [o.commands]
    * @param {(type: 'log'|'status'|'change', payload?) => void} [o.emit]
+   * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    */
-  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit }) {
+  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit, persist }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona
@@ -80,6 +85,7 @@ export class ChatRunner {
     this.think = think
     this.commands = commands ?? new CommandRegistry()
     this.emit = emit ?? (() => {})
+    this.persist = persist ?? (async () => {})
     this.transcript = state.transcript ?? []
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
@@ -105,7 +111,10 @@ export class ChatRunner {
     this.counters = { received: 0, overflow: 0, deferred: 0, interrupted: 0, modelErrors: 0, sendErrors: 0, internalErrors: 0 }
     this.notices = {}
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
+    this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
+    this.cron = new CronBook(state.cron, this.cronLimits)
     this.#scheduleIdle()
+    this.#armCron(0)
   }
 
   // What the console and the watchdog need to know.
@@ -126,6 +135,7 @@ export class ChatRunner {
       mode: this.modeOverride,
       mutedUntil: this.mutedUntil,
       stats: this.stats,
+      cron: this.cron.toJSON(),
     }
   }
 
@@ -138,6 +148,7 @@ export class ChatRunner {
     this.abort.abort()
     this.batcher.clear()
     clearTimeout(this.idleTimer)
+    clearTimeout(this.cronTimer)
   }
 
   // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
@@ -303,6 +314,22 @@ export class ChatRunner {
           context: this.transcript.length, members: Object.keys(this.memory.members).length,
         }),
         commands: this.commands.list(),
+        cron: {
+          add: text => {
+            const job = this.cron.add(parseSchedule(text, Date.now(), { defaultZone: this.settings.cronZone, limits: this.cronLimits }), message.sender)
+            this.#write('cron_set', { id: job.id, at: job.at, text: job.text, from: message.sender.name })
+            this.#armCron(0)
+            this.emit('change')
+            return job
+          },
+          list: () => this.cron.list(),
+          cancel: id => {
+            const job = this.cron.cancel(id, message.sender)
+            this.#armCron(0)
+            this.emit('change')
+            return job
+          },
+        },
       })
     } catch (error) {
       this.#write('error', { message: `/${command.name}: ${error.message}` })
@@ -589,6 +616,36 @@ export class ChatRunner {
         this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
         return null
       }
+    }
+  }
+
+  // ── scheduled messages (/cron) ──────────────────────────────────────────
+
+  #armCron(delay) {
+    clearTimeout(this.cronTimer)
+    if (this.disposed) return
+    const next = this.cron.nextAt()
+    if (next === Infinity) return
+    const wait = delay ?? Math.min(Math.max(0, next - Date.now()), CRON_TICK_MS)
+    this.cronTimer = setTimeout(() => this.#cronTick().catch(error => this.#write('error', { message: `定时：${error.message}` })), Math.min(wait, CRON_TICK_MS))
+    this.cronTimer.unref?.()
+  }
+
+  // Jobs are taken off the book and the book is saved *before* sending: a crash can
+  // lose one scheduled message but can never send it twice.
+  async #cronTick() {
+    if (this.disposed) return
+    const { due, missed } = this.cron.takeDue()
+    if (due.length || missed.length) {
+      await this.persist()
+      for (const job of missed) this.#write('cron_missed', { id: job.id, text: job.text, at: job.at })
+      this.emit('change')
+    }
+    this.#armCron()
+    for (const job of due) {
+      this.#write('cron_fire', { id: job.id, text: job.text })
+      // Plain text, never executed as a command; explicit, so mute/silent do not apply.
+      await this.#say(job.text)
     }
   }
 

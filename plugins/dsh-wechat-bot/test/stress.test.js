@@ -114,11 +114,12 @@ test('chaotic model: errors, hangs and garbage trip the breaker, and the bot rec
     settings: { quietMs: 10, maxWaitMs: 50, modelTimeoutMs: 150, breakerThreshold: 3, breakerBaseMs: 200, breakerMaxMs: 800, correctionRetries: 0 },
     reply: async (input, _call, n) => {
       if (chaos) {
-        // The first calls always fail so the breaker must trip; after that it is random chaos.
-        const roll = n <= 3 ? 0 : Math.random()
-        if (roll < 0.25) throw new Error('model exploded')
-        if (roll < 0.35) return new Promise(() => {}) // hangs forever and ignores the abort signal
-        if (roll < 0.45) return '这不是 JSON'
+        // The first calls fail so the breaker must trip; then a fixed cycle of
+        // failures and successes (deterministic, so the test cannot flake).
+        const fault = n <= 3 ? 'throw' : ['throw', null, 'hang', null, 'garbage'][n % 5]
+        if (fault === 'throw') throw new Error('model exploded')
+        if (fault === 'hang') return new Promise(() => {}) // hangs forever and ignores the abort signal
+        if (fault === 'garbage') return '这不是 JSON'
       }
       await sleep(between(5, 30))
       return echoReply(input)

@@ -33,6 +33,7 @@ export const Config = z.object({
     idleMinutes: z.natural().default(0).description('Quiet minutes before the bot may speak first in a group; 0 = never.'),
     staleMinutes: z.natural().min(1).default(10),
     typingDelay: z.boolean().default(true),
+    cronZone: z.string().default('+08:00').description('Default time zone of /cron, e.g. +08:00, UTC-5 or Asia/Tokyo.'),
   }).default({}),
   guard: z.object({
     maxTurnsPerMinute: z.natural().min(1).default(8).description('Model calls per minute; extra batches wait and merge.'),
