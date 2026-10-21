@@ -26,6 +26,7 @@ export const chatDefaults = Object.freeze({
   // Guardrails
   maxTextChars: 2000,          // longer messages are truncated before anything else sees them
   maxTurnsPerMinute: 8,        // model calls per minute; extra batches wait (and merge) instead of spamming
+  rateWindowMs: 60_000,
   modelTimeoutMs: 90_000,      // one model call never takes longer than this
   breakerThreshold: 3,         // consecutive model failures before pausing model calls
   breakerBaseMs: 30_000,       // first pause; doubles on each repeated trip
@@ -79,7 +80,7 @@ export class ChatRunner {
     this.busySince = 0
     this.supersedes = new WeakMap()
     this.abort = new AbortController()
-    this.rate = new RateWindow(this.settings.maxTurnsPerMinute)
+    this.rate = new RateWindow(this.settings.maxTurnsPerMinute, this.settings.rateWindowMs)
     this.breaker = new CircuitBreaker({
       threshold: this.settings.breakerThreshold, baseMs: this.settings.breakerBaseMs, maxMs: this.settings.breakerMaxMs,
     })

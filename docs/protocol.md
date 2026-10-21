@@ -58,7 +58,7 @@
 运行中：
   ← event/message   新消息
   ← event/status    连接 / 能否发送 变化（锁屏、断网、微信崩了…）
-  → message/send    发消息（可能并发来自多个聊天，适配器自己排队）
+  → message/send    发消息（插件只服务一个群，同一时间最多一条发送请求在途；命令回复可能与之并发）
   → window/get|set  控制台切换小号窗口显隐（可选能力）
 插件关闭：
   → shutdown        适配器清理后退出进程
@@ -140,7 +140,7 @@ result: { messages: Message[] }          // 按时间升序，最多 limit 条�
 ### `watch/set`
 
 ```ts
-params: { chatIds: string[] }            // 完整列表，替换之前的；[] 表示全部停止
+params: { chatIds: string[] }            // 完整列表，替换之前的；[] 表示全部停止。当前插件只服务一个群，所以最多一个
 result: { watching: string[] }
 ```
 
@@ -168,7 +168,7 @@ result: { messageId: string }            // 这条消息在微信里的 id，用
    - `send_uncertain`：**不确定**（例如点了发送但没在数据库里看到回显）。插件**永不重试**，只记日志。
    - `unavailable`：**现在发不了，什么都没做**（例如锁屏期间无法操作 UI）。插件等待 `event/status canSend:true` 后再试；回复超过 10 分钟（可配）就丢弃，不会把过时回复补发出去。
 3. **回显**：发出去的消息之后也应作为 `event/message`（`fromSelf: true`，`id` 等于返回的 `messageId`）推送一次；插件靠 `messageId` 去重。没有回显也能工作。
-4. 多个聊天可能**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
+4. 命令的直接回复可能与普通回复**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
 
 ### `media/fetch`（能力 `mediaFetch`，预留给图片/表情包识别）
 
