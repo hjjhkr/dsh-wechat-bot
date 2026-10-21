@@ -1,0 +1,2 @@
+cryptography>=45
+zstandard>=0.25
