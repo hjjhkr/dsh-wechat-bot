@@ -246,6 +246,7 @@ export class Bot extends EventEmitter {
       think: args => this.think(args),
       link: {
         send: (content, clientId) => this.adapter.send(chat.id, clientId, content),
+        members: () => this.adapter.members(chat.id),
         canSend: () => this.connection.canSend,
         whenCanSend: signal => this.#whenCanSend(signal),
       },

@@ -158,6 +158,7 @@ window.__ModuleLoader__.load({
       const items = [['收到', c.received], ['积压', chat.backlog], ['溢出转上下文', c.overflow], ['限速延后', c.deferred],
         ['模型失败', c.modelErrors], ['发送失败', c.sendErrors], ['自动恢复', recoveries], ['近 1 分钟调用', chat.turnsLastMinute]]
       return h('div', { className: 'wxb-row wxb-muted', style: { fontSize: 12 } },
+        chat.engagement && h('span', null, `正在${chat.engagement.style === 'attack' ? '嘲讽' : '安慰'} ${chat.engagement.target.name}`),
         chat.breaker.open && h('span', { className: 'wxb-error' }, `模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`),
         items.map(([label, value]) => h('span', { key: label }, `${label} ${value}`)))
     }

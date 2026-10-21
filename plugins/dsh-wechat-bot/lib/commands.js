@@ -2,6 +2,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { CronError, describeTime } from './cron.js'
+import { EngagementError, STYLES, openingInstruction, resolveMember } from './engagement.js'
 import { EFFORTS, ModelError } from './models.js'
 
 // Chat commands: a WeChat message that starts with "/" (or a full-width "／",
@@ -68,6 +69,46 @@ async function modelAction(models, action) {
     return `没改成：${error.message}`
   }
 }
+
+// /attack and /comfort: start keeping on at one member (resolved by @ or nickname, never by the model).
+const engageCommand = (style, aliases) => ({
+  name: style,
+  aliases,
+  usage: `/${style} <昵称或 @TA>`,
+  summary: `持续${STYLES[style]}某人：TA 说一句我回一句，不理其他人，/un${style} 停止`,
+  interrupts: true,
+  run: async ({ text, message, members, selfId, engagement }) => {
+    let target
+    try {
+      target = resolveMember(text, { mentions: message.mentions, members: await members(), selfId })
+    } catch (error) {
+      if (!(error instanceof EngagementError)) throw error
+      return `没开始：${error.message}`
+    }
+    const previous = engagement.start(style, target)
+    const replaced = previous && (previous.target.id !== target.id || previous.style !== style)
+      ? `（原来的${STYLES[previous.style]} ${previous.target.name} 已结束）` : ''
+    return { forward: {
+      text: `${STYLES[style]} ${target.name}`,
+      instruction: openingInstruction(style, target),
+      ack: `已执行：开始${STYLES[style]} ${target.name}${replaced}。TA 说一句我回一句，/un${style} 停止`,
+    } }
+  },
+})
+
+const disengageCommand = (style, aliases) => ({
+  name: `un${style}`,
+  aliases,
+  summary: `停止${STYLES[style]}`,
+  interrupts: true,
+  run: ({ engagement }) => {
+    const current = engagement.current()
+    if (!current) return `现在没有在${STYLES[style]}谁`
+    if (current.style !== style) return `现在是在${STYLES[current.style]} ${current.target.name}，用 /un${current.style} 停止`
+    engagement.stop()
+    return `已执行：停止${STYLES[style]} ${current.target.name}`
+  },
+})
 
 const shortText = text => (text.length > 30 ? text.slice(0, 30) + '…' : text).replace(/\s+/g, ' ')
 
@@ -162,6 +203,10 @@ export const builtinCommands = [
       return '已执行：上下文清空了'
     },
   },
+  engageCommand('attack', ['嘲讽', '怼']),
+  disengageCommand('attack', ['停止嘲讽']),
+  engageCommand('comfort', ['安慰']),
+  disengageCommand('comfort', ['停止安慰']),
   {
     name: 'model',
     aliases: ['模型'],

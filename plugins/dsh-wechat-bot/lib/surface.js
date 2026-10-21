@@ -1,6 +1,7 @@
 import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { MODES } from './commands.js'
+import { STYLES } from './engagement.js'
 
 // The DSH-facing surface of WeChatBotApp: console HTTP routes, the `/wechat`
 // command and the `wechat_bot` agent tool. Each is a thin adapter over the
@@ -71,6 +72,7 @@ export function describeState(state) {
   if (chat.counters) {
     const c = chat.counters
     lines.push(`健康：收到 ${c.received}，积压 ${chat.backlog}，溢出转上下文 ${c.overflow}，限速延后 ${c.deferred}，模型失败 ${c.modelErrors}，发送失败 ${c.sendErrors}，自动恢复 ${state.recoveries}`)
+    if (chat.engagement) lines.push(`正在${STYLES[chat.engagement.style]} ${chat.engagement.target.name}：只回 TA，/un${chat.engagement.style} 停止`)
     if (chat.breaker.open) lines.push(`模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`)
   }
   return lines.join('\n')
@@ -162,7 +164,9 @@ export function formatEntry(entry) {
     decision: () => entry.reply.length ? `决定回复：${entry.reply.map(p => p.text ?? `[${p.name}]`).join(' / ')}` : '决定不说话',
     sent: () => `已发送：${entry.part.text ?? `[${entry.part.name}]`}`,
     silent: () => '保持沉默',
-    skipped: () => `跳过（${entry.reason}）`,
+    skipped: () => entry.reason === 'engaged' ? `跳过 ${entry.count} 条（正在专门回应某人）` : `跳过（${entry.reason}）`,
+    engagement_start: () => `开始${STYLES[entry.style]} ${entry.target}`,
+    engagement_end: () => `结束${STYLES[entry.style]} ${entry.target}${entry.reason === 'idle' ? '（TA 太久没说话）' : ''}`,
     idle_dropped: () => '有人开始说话了，主动发言作废',
     interrupted: () => `被 ${entry.reason} 打断，按新状态重新处理`,
     memory: () => `记忆：+${entry.applied.length}${entry.rejected.length ? `，拒绝 ${entry.rejected.length}` : ''}`,

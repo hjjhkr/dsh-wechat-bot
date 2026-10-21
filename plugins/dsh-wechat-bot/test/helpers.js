@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { AdapterClient } from '../lib/adapter.js'
 import { Bot } from '../lib/bot.js'
+import { flattenInput } from '../lib/prompt.js'
 import { Simulator } from '../lib/simulator.js'
 import { Store } from '../lib/store.js'
 
@@ -26,12 +27,23 @@ export function linkedSimulator(options = {}) {
   return { simulator, client }
 }
 
-// A fake model. `reply(input, call)` receives the parsed turn input and returns
-// the raw model output (a string, or an object that is JSON-encoded).
+// The model input in a flat, chronological shape that is easy to assert on:
+// `new` = this turn's messages (each with `from`), `recent` = earlier ones, `memory` = all members'.
+export function testView(raw) {
+  const flat = flattenInput(raw)
+  const memory = {}
+  for (const member of [...raw.recent.members, ...raw.new.members]) if (member.memory) memory[member.id] = member.memory
+  return { ...raw, new: flat.messages, recent: flat.recent, memory }
+}
+
+// A fake model. `reply(input, call)` receives the turn input (see testView; the exact
+// JSON the model got is `call.raw`) and returns the raw model output (a string, or an
+// object that is JSON-encoded).
 export function scriptedModel(reply) {
   const calls = []
   const think = async ({ system, messages, signal }) => {
-    const call = { system, messages, input: JSON.parse(messages[0].text), signal }
+    const raw = JSON.parse(messages[0].text)
+    const call = { system, messages, raw, input: testView(raw), signal }
     calls.push(call)
     const output = await reply(call.input, call, calls.length)
     return typeof output === 'string' ? output : JSON.stringify(output)

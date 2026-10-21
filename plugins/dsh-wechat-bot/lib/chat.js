@@ -4,6 +4,7 @@ import { Batcher } from './batcher.js'
 import { CommandRegistry, MODES, parseCommand } from './commands.js'
 import { CronBook, cronLimits, parseSchedule } from './cron.js'
 import { DecisionError, parseDecision } from './decision.js'
+import { ENGAGEMENT_IDLE_MS, STYLES } from './engagement.js'
 import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
 import { MemoryBook } from './memory.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
@@ -34,6 +35,7 @@ export const chatDefaults = Object.freeze({
   commandsPerMinute: 6,        // per member, so commands cannot be used to spam the group
   echoWindowMs: 2 * 60_000,    // how long a sent text may take to come back from the adapter
   cronZone: '+08:00',          // time zone of /cron times without an explicit zone
+  engagementIdleMs: ENGAGEMENT_IDLE_MS, // /attack, /comfort end after the target is silent this long
 })
 
 const LOG_LIMIT = 300
@@ -113,6 +115,7 @@ export class ChatRunner {
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
+    this.engagement = state.engagement ?? null // { style, target: {id, name}, since, lastTargetAt }
     this.#scheduleIdle()
     this.#armCron(0)
   }
@@ -123,6 +126,8 @@ export class ChatRunner {
       status: this.status, mode: this.mode, mutedUntil: this.mutedUntil,
       backlog: this.batcher.size, busyMs: this.stuckFor(now),
       breaker: this.breaker.view(now), turnsLastMinute: this.rate.used, counters: { ...this.counters },
+      engagement: this.engagement && now - this.engagement.lastTargetAt <= this.settings.engagementIdleMs
+        ? { style: this.engagement.style, target: this.engagement.target } : null,
     }
   }
 
@@ -136,6 +141,7 @@ export class ChatRunner {
       mutedUntil: this.mutedUntil,
       stats: this.stats,
       cron: this.cron.toJSON(),
+      engagement: this.engagement,
     }
   }
 
@@ -196,6 +202,8 @@ export class ChatRunner {
       return
     }
     this.counters.received++
+    // Expire first: the target coming back after a long silence does not revive an engagement.
+    if (this.#activeEngagement()?.target.id === message.sender.id) this.engagement.lastTargetAt = Date.now()
     this.#record(message)
     this.#write('message', { id: message.id, from: message.sender.name, text: message.text, kind: message.kind })
     this.#scheduleIdle()
@@ -315,6 +323,25 @@ export class ChatRunner {
         }),
         commands: this.commands.list(),
         models: this.models,
+        selfId: this.account().id,
+        members: () => this.#members(),
+        engagement: {
+          current: () => this.#activeEngagement(),
+          start: (style, target) => {
+            const previous = this.#activeEngagement()
+            this.engagement = { style, target: { id: target.id, name: target.name }, since: Date.now(), lastTargetAt: Date.now() }
+            this.#write('engagement_start', { style, target: target.name })
+            this.emit('change')
+            return previous
+          },
+          stop: () => {
+            const ended = this.engagement
+            this.engagement = null
+            if (ended) this.#write('engagement_end', { style: ended.style, target: ended.target.name, reason: 'command' })
+            this.emit('change')
+            return ended
+          },
+        },
         cron: {
           add: text => {
             const job = this.cron.add(parseSchedule(text, Date.now(), { defaultZone: this.settings.cronZone, limits: this.cronLimits }), message.sender)
@@ -340,7 +367,8 @@ export class ChatRunner {
     if (result?.reply) return this.#say(result.reply)
     if (result?.forward) {
       const { text = parsed.text, instruction, effort } = result.forward
-      const ack = command.ack && this.#say(command.ack)
+      const ackText = result.forward.ack ?? command.ack
+      const ack = ackText && this.#say(ackText)
       this.batcher.pushUrgent({ ...message, text, command: { name: command.name, instruction, effort } })
       await ack
     }
@@ -350,6 +378,33 @@ export class ChatRunner {
   async #say(text) {
     const result = await this.#sendOne({ kind: 'text', text }, `say:${randomUUID()}`, { started: Date.now(), urgent: true })
     if (result) this.#sent(result.messageId, { kind: 'text', text })
+  }
+
+  // ── targeted engagement (/attack, /comfort) ─────────────────────────────
+
+  // The engagement still in force, ending it if the target has been silent too long.
+  #activeEngagement() {
+    const engagement = this.engagement
+    if (!engagement) return null
+    if (Date.now() - engagement.lastTargetAt > this.settings.engagementIdleMs) {
+      this.engagement = null
+      this.#write('engagement_end', { style: engagement.style, target: engagement.target.name, reason: 'idle' })
+      this.emit('change')
+      return null
+    }
+    return engagement
+  }
+
+  // Everyone the bot knows in this chat: the adapter's member list, plus whoever spoke recently.
+  async #members() {
+    const known = new Map()
+    for (const m of this.transcript) if (!m.fromSelf) known.set(m.sender.id, { id: m.sender.id, name: m.sender.name })
+    try {
+      for (const m of (await this.link.members?.()) ?? []) known.set(m.id, { id: m.id, name: m.name })
+    } catch {
+      // the transcript alone still covers everyone who has been talking
+    }
+    return [...known.values()]
   }
 
   // ── model turns ─────────────────────────────────────────────────────────
@@ -422,6 +477,15 @@ export class ChatRunner {
   async #turn(batch, event) {
     const started = Date.now()
     const urgent = batch.some(m => m.command)
+    // Engaged with one member: the script decides — only their messages trigger a reply, one per batch.
+    const engagement = !urgent && !event ? this.#activeEngagement() : null
+    if (engagement) {
+      const fromTarget = batch.filter(m => m.sender.id === engagement.target.id)
+      if (!fromTarget.length) return void this.#write('skipped', { reason: 'engaged', count: batch.length })
+      if (this.muted || this.mode === 'silent') return void this.#write('skipped', { reason: 'muted', count: batch.length })
+      batch = fromTarget
+      event = { kind: 'engagement', style: engagement.style, target: engagement.target }
+    }
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
     if (skip) return void this.#write('skipped', { reason: skip, count: batch.length })
@@ -444,7 +508,7 @@ export class ChatRunner {
       this.stats.batches++
     }
     this.#setStatus('thinking')
-    const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
+    const mustReply = event?.kind === 'engagement' || batch.some(m => address.get(m.id).addressed === 'you')
     const turn = this.turn = { controller: new AbortController(), interrupted: null }
     let decision
     try {
@@ -465,7 +529,7 @@ export class ChatRunner {
 
     // A reply answers what had arrived when thinking started; later messages form the next batch.
     // Only an unprompted idle remark is dropped if people started talking meanwhile.
-    if (event && this.batcher.arrived) return void this.#write('idle_dropped', { newer: this.batcher.arrived })
+    if (event?.kind === 'idle' && this.batcher.arrived) return void this.#write('idle_dropped', { newer: this.batcher.arrived })
 
     if (batch.length) {
       const { applied, rejected } = this.memory.apply(decision.memory, batch)
@@ -475,7 +539,8 @@ export class ChatRunner {
       this.#write('silent', {})
       return void this.emit('change')
     }
-    const target = batch.find(m => m.id === decision.to)
+    // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
+    const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
     await this.#deliver(decision.reply, { batch, target, event, started })
   }
 
@@ -497,7 +562,7 @@ export class ChatRunner {
       recent: this.#recent(batch), batch, address, memory: this.#memoryFor(batch), event,
     })
     const messages = [{ role: 'user', text: input }]
-    const readable = event ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address)
+    const readable = event?.kind === 'idle' ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address, event)
     const effort = batch.find(m => m.command?.effort)?.command.effort
     let retries = settings.correctionRetries
     for (;;) {
@@ -509,7 +574,9 @@ export class ChatRunner {
       try {
         const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers })
         if (mustReply && !decision.reply.length) {
-          problem = new DecisionError('must_reply', 'new 里有 addressed=you 的消息，有人在直接找你，reply 不能为空')
+          problem = new DecisionError('must_reply', event?.kind === 'engagement'
+            ? `你正在按命令回应 ${event.target.name}，TA 刚说了话，reply 不能为空`
+            : 'new 里有 addressed=you 的消息，有人在直接找你，reply 不能为空')
         } else {
           this.#write('decision', { to: decision.to, reply: decision.reply, raw: output })
           return decision
@@ -662,7 +729,7 @@ export class ChatRunner {
   }
 
   #idle(minutes) {
-    if (this.batcher.busy || this.batcher.size || this.muted) return this.#scheduleIdle()
+    if (this.batcher.busy || this.batcher.size || this.muted || this.#activeEngagement()) return this.#scheduleIdle()
     this.batcher.hold()
     this.#run([], { kind: 'idle', minutes, at: Date.now() }).finally(() => this.#scheduleIdle())
   }

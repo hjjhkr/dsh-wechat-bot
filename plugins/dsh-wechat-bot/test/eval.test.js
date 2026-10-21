@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { SCENARIOS, formatEval, runEval } from '../lib/eval.js'
+import { testView } from './helpers.js'
 
-const inputOf = messages => JSON.parse(messages[0].text)
+const inputOf = messages => testView(JSON.parse(messages[0].text))
 
 // Answers exactly what the deterministic addressing signals suggest.
 const oracle = async ({ messages }) => {
