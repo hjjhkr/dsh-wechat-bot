@@ -41,7 +41,7 @@ export class Batcher {
     return this.#urgent.length
   }
 
-  // Messages pushed since the consumer last took a batch (excludes leftover backlog).
+  // Messages pushed since the consumer last took a batch or was held (excludes leftover backlog).
   get arrived() {
     return this.#arrived
   }
@@ -64,7 +64,7 @@ export class Batcher {
     if (!this.#busy) this.#flush()
   }
 
-  // Put an unprocessed batch back in front (e.g. superseded by newer messages).
+  // Put an unprocessed batch back in front (e.g. it has to wait for the rate limit).
   requeue(messages) {
     if (!this.#pending.length) this.#firstAt = Date.now()
     this.#pending.unshift(...messages)

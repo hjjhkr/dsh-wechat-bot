@@ -17,7 +17,6 @@ export const chatDefaults = Object.freeze({
   maxChars: 6000,
   recentLimit: 30,
   maxParts: 3,
-  maxSupersede: 1,
   correctionRetries: 1,
   staleMs: 10 * 60_000,
   idleMinutes: 0,
@@ -100,7 +99,6 @@ export class ChatRunner {
     this.status = 'idle'
     this.busySince = 0
     this.turn = null
-    this.supersedes = new WeakMap()
     this.abort = new AbortController()
     this.lane = new SendLane()
     this.rate = new RateWindow(this.settings.maxTurnsPerMinute, this.settings.rateWindowMs)
@@ -461,18 +459,9 @@ export class ChatRunner {
     }
     if (this.disposed) return
 
-    const newer = this.batcher.arrived
-    const superseded = this.supersedes.get(batch[0]) ?? 0
-    // Re-asking only helps if the newer messages can join this batch.
-    const canGrow = batch.length < this.settings.maxMessages
-    if (!urgent && newer && (event || (canGrow && superseded < this.settings.maxSupersede))) {
-      // People kept talking while we were thinking; answer the whole conversation instead.
-      if (batch.length) {
-        this.supersedes.set(batch[0], superseded + 1)
-        this.batcher.requeue(batch)
-      }
-      return void this.#write('superseded', { newer, discarded: decision.reply.length })
-    }
+    // A reply answers what had arrived when thinking started; later messages form the next batch.
+    // Only an unprompted idle remark is dropped if people started talking meanwhile.
+    if (event && this.batcher.arrived) return void this.#write('idle_dropped', { newer: this.batcher.arrived })
 
     if (batch.length) {
       const { applied, rejected } = this.memory.apply(decision.memory, batch)

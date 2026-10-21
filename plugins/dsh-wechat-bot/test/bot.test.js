@@ -79,12 +79,12 @@ test('invalid output gets one corrective retry, a second failure is logged and s
   assert.equal(env.model.calls.length, 5)
 })
 
-test('messages arriving while the model thinks supersede the stale answer', async t => {
+test('messages arriving while the model thinks are answered in the next turn, not re-thought', async t => {
   const gate = Promise.withResolvers()
   const env = await watching(t, {
     reply: async (input, _call, n) => {
       if (n === 1) await gate.promise
-      return { to: null, reply: [`看到${input.new.length}条`] }
+      return { to: null, reply: [input.new.map(m => m.text).join('+')] }
     },
   })
   say(env, 'wxid_alice', '有人玩游戏吗')
@@ -93,22 +93,9 @@ test('messages arriving while the model thinks supersede the stale answer', asyn
   say(env, 'wxid_carol', '我也')
   await sleep(80)
   gate.resolve()
-  await until(() => sent(env).length === 1, { what: 'reply' })
-  assert.deepEqual(sent(env), ['看到3条'], 'the stale one-message answer was never sent')
-  assert.ok(logTypes(env).includes('superseded'))
-})
-
-test('supersede is bounded so a busy group still gets an answer', async t => {
-  const env = await watching(t, {
-    reply: async () => {
-      await sleep(60)
-      return { to: null, reply: ['好'] }
-    },
-  })
-  const chatter = setInterval(() => say(env, 'wxid_bob', '刷屏'), 20)
-  t.after(() => clearInterval(chatter))
-  await until(() => sent(env).length >= 1, { what: 'a reply despite constant chatter' })
-  clearInterval(chatter)
+  await until(() => sent(env).length === 2, { what: 'two replies' })
+  assert.deepEqual(sent(env), ['有人玩游戏吗', '我+我也'])
+  assert.deepEqual(env.model.calls[1].input.recent.map(m => m.text), ['有人玩游戏吗', '有人玩游戏吗'], 'the next turn sees the earlier message and the reply as context')
 })
 
 test('multi-part replies are sent in order as separate messages', async t => {

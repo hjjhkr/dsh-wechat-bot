@@ -37,7 +37,7 @@ test('batcher accumulates while busy and delivers everything after release', asy
   batcher.push(msg('1', 'a')); await sleep(40)
   batcher.push(msg('2', 'b')); batcher.push(msg('3', 'c')); await sleep(40)
   assert.equal(batches.length, 1)
-  batcher.requeue([msg('0', 'superseded')])
+  batcher.requeue([msg('0', 'requeued')])
   batcher.release(); await sleep(40)
   assert.deepEqual(batches[1], ['0', '2', '3'])
 })
