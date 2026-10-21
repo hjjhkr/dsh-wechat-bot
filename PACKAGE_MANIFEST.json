@@ -1,0 +1,1378 @@
+{
+  "schema": "dsh-wechat-sanitized-package-v1",
+  "createdAt": "2026-10-21T13:40:23+08:00",
+  "snapshotAt": "2026-10-21T13:40:18+08:00",
+  "sourcePluginVersion": "0.1.12-focus.2",
+  "installedPluginVersionAtSnapshot": "0.1.12-focus.2",
+  "files": [
+    {
+      "path": "plugins/dsh-wechat-bridge/README.md",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/README.md",
+      "bytes": 21421,
+      "sha256": "9ab274c92f8d0d45e49f955afa95934d1ee218257933aeca2363c874b7c5c441",
+      "sanitized": true,
+      "sourceSha256": "18565012f09b58ab207b7dc9e5d402728d4a1f9885f1845f076337147c7d0086"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/cordis.patch.yml",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/cordis.patch.yml",
+      "bytes": 101,
+      "sha256": "2db88c11f11f8781c1bab7d58d5309ce624a02ac55d0c6073a3d848025fe0765",
+      "sanitized": false,
+      "sourceSha256": "2db88c11f11f8781c1bab7d58d5309ce624a02ac55d0c6073a3d848025fe0765"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/package.json",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/package.json",
+      "bytes": 643,
+      "sha256": "b58a2df9537523713b4eee455c11fc1b68b3d47105fce6d198251aca98cde963",
+      "sanitized": false,
+      "sourceSha256": "b58a2df9537523713b4eee455c11fc1b68b3d47105fce6d198251aca98cde963"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/batch.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/batch.js",
+      "bytes": 1592,
+      "sha256": "3f4e44f6c910f07b200f637cd775aac0ca5f5984f3235e5f7b0a2c890c60ee2a",
+      "sanitized": false,
+      "sourceSha256": "3f4e44f6c910f07b200f637cd775aac0ca5f5984f3235e5f7b0a2c890c60ee2a"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/bridge.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/bridge.js",
+      "bytes": 47681,
+      "sha256": "1dd8e093901243e5c9bd18d8835f78cf4fdea25f16a6409bd74b4168f8e86bef",
+      "sanitized": true,
+      "sourceSha256": "62241f5adcd1d6450441db7a46f7e7eb3f3a5bb6f817805c6b893cf26057c9dc"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/config.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/config.js",
+      "bytes": 7372,
+      "sha256": "bfd071cc7fe638e3f9911998f9994d71dd38078992c811aa4634ed47a3bdd0e3",
+      "sanitized": false,
+      "sourceSha256": "bfd071cc7fe638e3f9911998f9994d71dd38078992c811aa4634ed47a3bdd0e3"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/console-log.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/console-log.js",
+      "bytes": 2832,
+      "sha256": "1cf8e1042cb9229e26ac6db71541cc56c3552b038640192d1a4c770af1725986",
+      "sanitized": false,
+      "sourceSha256": "1cf8e1042cb9229e26ac6db71541cc56c3552b038640192d1a4c770af1725986"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/conversations.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/conversations.js",
+      "bytes": 6654,
+      "sha256": "16b7d2400690dadef446f2ed416817b6e73fb5107f753a2a916ffe4ea8778d80",
+      "sanitized": false,
+      "sourceSha256": "16b7d2400690dadef446f2ed416817b6e73fb5107f753a2a916ffe4ea8778d80"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/diagnostics.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/diagnostics.js",
+      "bytes": 2851,
+      "sha256": "cbaf596dd07e3234ed84294216e6be1f278e9f6178a10496cde5ba01ac6f2bbd",
+      "sanitized": false,
+      "sourceSha256": "cbaf596dd07e3234ed84294216e6be1f278e9f6178a10496cde5ba01ac6f2bbd"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/group.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/group.js",
+      "bytes": 2935,
+      "sha256": "fca723839a82b0cf08e6e77d3d268677958ffc495064ad7f2e60648bf26b84f8",
+      "sanitized": false,
+      "sourceSha256": "fca723839a82b0cf08e6e77d3d268677958ffc495064ad7f2e60648bf26b84f8"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/http.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/http.js",
+      "bytes": 11667,
+      "sha256": "9f07bc8e7fddb13d0d33801e9d93784179aa9a36c48cfa6cd64c9d7b0f2d9e81",
+      "sanitized": false,
+      "sourceSha256": "9f07bc8e7fddb13d0d33801e9d93784179aa9a36c48cfa6cd64c9d7b0f2d9e81"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/index.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/index.js",
+      "bytes": 1112,
+      "sha256": "f58b4934fc3249b0f66012cb204c55b52def5f5866f9ce2de665d79176f44125",
+      "sanitized": false,
+      "sourceSha256": "f58b4934fc3249b0f66012cb204c55b52def5f5866f9ce2de665d79176f44125"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/memory.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/memory.js",
+      "bytes": 7927,
+      "sha256": "5ab5a9875d370197849dc6bcc71f43097231764fd84e32b62bb5dd433aafe6cc",
+      "sanitized": false,
+      "sourceSha256": "5ab5a9875d370197849dc6bcc71f43097231764fd84e32b62bb5dd433aafe6cc"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/model.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/model.js",
+      "bytes": 3455,
+      "sha256": "10be629984a0234a57c2c7fb8f3c58728aa328be4135d3ad121578ff5c383f70",
+      "sanitized": false,
+      "sourceSha256": "10be629984a0234a57c2c7fb8f3c58728aa328be4135d3ad121578ff5c383f70"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/retention.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/retention.js",
+      "bytes": 1893,
+      "sha256": "d7207e3c4fe66e922a345dcc9cec43266d1292c49868a7b28fb9dfbcc758af58",
+      "sanitized": false,
+      "sourceSha256": "d7207e3c4fe66e922a345dcc9cec43266d1292c49868a7b28fb9dfbcc758af58"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/store.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/store.js",
+      "bytes": 6013,
+      "sha256": "18373175be4f8a72e24b20425fb6e657b16c6b14aa7d283ee227ed2bbfc825e1",
+      "sanitized": false,
+      "sourceSha256": "18373175be4f8a72e24b20425fb6e657b16c6b14aa7d283ee227ed2bbfc825e1"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/ui.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/ui.js",
+      "bytes": 9354,
+      "sha256": "b2a03d4ca1c62b2bf0257dcb08135483c4fdae327ff131402c81bcd3ef9a1658",
+      "sanitized": false,
+      "sourceSha256": "b2a03d4ca1c62b2bf0257dcb08135483c4fdae327ff131402c81bcd3ef9a1658"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/lib/worker-client.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/lib/worker-client.js",
+      "bytes": 6514,
+      "sha256": "1802ff4d31954da51ef8aec7e0962f377875185d1cccb0f69784723c955712d5",
+      "sanitized": false,
+      "sourceSha256": "1802ff4d31954da51ef8aec7e0962f377875185d1cccb0f69784723c955712d5"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/.npmignore",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/.npmignore",
+      "bytes": 35,
+      "sha256": "d1babce1c69074691c76b48cdefdf93818efb379160b258374713994726a8d01",
+      "sanitized": false,
+      "sourceSha256": "d1babce1c69074691c76b48cdefdf93818efb379160b258374713994726a8d01"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/isolated_worker.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/isolated_worker.py",
+      "bytes": 398,
+      "sha256": "b6a834aeb5f655e3cabfd2c5824d2ca5132deaadf2b04dbc61294c92811fff82",
+      "sanitized": false,
+      "sourceSha256": "b6a834aeb5f655e3cabfd2c5824d2ca5132deaadf2b04dbc61294c92811fff82"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/requirements.txt",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/requirements.txt",
+      "bytes": 96,
+      "sha256": "a9b85e3dfcbd63d69133091d38b29eed1da414e8c53fbe111e5ffea878c20867",
+      "sanitized": false,
+      "sourceSha256": "a9b85e3dfcbd63d69133091d38b29eed1da414e8c53fbe111e5ffea878c20867"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/worker.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/worker.py",
+      "bytes": 284,
+      "sha256": "3900a645c1f5d72ae9da22cf895b43d6a94629bd5899d326fd0f8bccff0a7186",
+      "sanitized": false,
+      "sourceSha256": "3900a645c1f5d72ae9da22cf895b43d6a94629bd5899d326fd0f8bccff0a7186"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/__init__.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/__init__.py",
+      "bytes": 68,
+      "sha256": "b3b7daf24cc96c26f3260ff11ceaa22f6f9b09cc16332c5f9dd6fcd60c9b34f6",
+      "sanitized": false,
+      "sourceSha256": "b3b7daf24cc96c26f3260ff11ceaa22f6f9b09cc16332c5f9dd6fcd60c9b34f6"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/conversations.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/conversations.py",
+      "bytes": 5547,
+      "sha256": "cfa393dcc89b2f1bcd9671c80da813ada37f80aedf5bc6e585b93f87d054e0e3",
+      "sanitized": false,
+      "sourceSha256": "cfa393dcc89b2f1bcd9671c80da813ada37f80aedf5bc6e585b93f87d054e0e3"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/db_reader.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/db_reader.py",
+      "bytes": 6284,
+      "sha256": "92a47896a3bb0a840da9790e667995a64d858c3bdc31017abae6e3d49c551054",
+      "sanitized": false,
+      "sourceSha256": "92a47896a3bb0a840da9790e667995a64d858c3bdc31017abae6e3d49c551054"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/desktop.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/desktop.py",
+      "bytes": 10116,
+      "sha256": "af1da266d96a97bf96444d5679a8189d8cbe60ff5928c80b17dbda42dcfbbb0d",
+      "sanitized": false,
+      "sourceSha256": "af1da266d96a97bf96444d5679a8189d8cbe60ff5928c80b17dbda42dcfbbb0d"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/diagnostics.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/diagnostics.py",
+      "bytes": 1371,
+      "sha256": "c4f01d46cb183471ab9baa0d15f4a1dd8b510e007d0eae8a44b06ee989c342f5",
+      "sanitized": false,
+      "sourceSha256": "c4f01d46cb183471ab9baa0d15f4a1dd8b510e007d0eae8a44b06ee989c342f5"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/gate.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/gate.py",
+      "bytes": 20835,
+      "sha256": "e06382d3099b4942c73608285fa0437e29d3b47a8a101f93f6f415b556f3fabe",
+      "sanitized": false,
+      "sourceSha256": "e06382d3099b4942c73608285fa0437e29d3b47a8a101f93f6f415b556f3fabe"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/group.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/group.py",
+      "bytes": 3197,
+      "sha256": "37a5f678adbae58eae7a1b9fdefc43f537f4091c672059f5aff5fa2c87af14b3",
+      "sanitized": false,
+      "sourceSha256": "37a5f678adbae58eae7a1b9fdefc43f537f4091c672059f5aff5fa2c87af14b3"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/isolated.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/isolated.py",
+      "bytes": 14731,
+      "sha256": "6f7a965f00e75f79394dbd16080241013a2c64813bbf1647fedd3d387189a488",
+      "sanitized": false,
+      "sourceSha256": "6f7a965f00e75f79394dbd16080241013a2c64813bbf1647fedd3d387189a488"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/isolated_send.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/isolated_send.py",
+      "bytes": 4996,
+      "sha256": "014324d53f9e9b39b4c45d2bf2ffdbdeb703ce44c5f89af9d8bda4e8377a5a19",
+      "sanitized": false,
+      "sourceSha256": "014324d53f9e9b39b4c45d2bf2ffdbdeb703ce44c5f89af9d8bda4e8377a5a19"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/process.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/process.py",
+      "bytes": 12893,
+      "sha256": "dbe88bb64b285df604a9223b32b1906d86bc5ccd758870f32f32d0e32ab341c6",
+      "sanitized": false,
+      "sourceSha256": "dbe88bb64b285df604a9223b32b1906d86bc5ccd758870f32f32d0e32ab341c6"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/runtime.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/runtime.py",
+      "bytes": 14136,
+      "sha256": "f140b8314c62f84a1dcbe0ceeea9caba6cecced48fc053ff66fbde46c718a8cd",
+      "sanitized": false,
+      "sourceSha256": "f140b8314c62f84a1dcbe0ceeea9caba6cecced48fc053ff66fbde46c718a8cd"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/uia_send.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/uia_send.py",
+      "bytes": 15973,
+      "sha256": "6ddc79beb20c00414121b2ab157f7be97ca84710a8331117fc0e43fa3921679b",
+      "sanitized": false,
+      "sourceSha256": "6ddc79beb20c00414121b2ab157f7be97ca84710a8331117fc0e43fa3921679b"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/vendor.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/vendor.py",
+      "bytes": 2836,
+      "sha256": "7ce968b139c85211b6d2fdcfff448b5c048bfc0302393c965595ea61c27a6bb5",
+      "sanitized": false,
+      "sourceSha256": "7ce968b139c85211b6d2fdcfff448b5c048bfc0302393c965595ea61c27a6bb5"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/watchdog.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/watchdog.py",
+      "bytes": 405,
+      "sha256": "32266831d419ffc46d846969724f3110c8ab2a53f674faf59cd8cc17c9b3bbf6",
+      "sanitized": false,
+      "sourceSha256": "32266831d419ffc46d846969724f3110c8ab2a53f674faf59cd8cc17c9b3bbf6"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/worker.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/dsh_wechat_bridge/worker.py",
+      "bytes": 21141,
+      "sha256": "da8a1d3ad9272207e2d30e8eb4e1d07f37a2c19596b0e8a5cfdba90e23d9b689",
+      "sanitized": false,
+      "sourceSha256": "da8a1d3ad9272207e2d30e8eb4e1d07f37a2c19596b0e8a5cfdba90e23d9b689"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/vendor/LICENSE",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/vendor/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "sanitized": false,
+      "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/vendor/README.md",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/vendor/README.md",
+      "bytes": 548,
+      "sha256": "0df4d94b7441fe9dafdb1084afc1226466fbc016eeec7fe773454abfc05b9e71",
+      "sanitized": false,
+      "sourceSha256": "0df4d94b7441fe9dafdb1084afc1226466fbc016eeec7fe773454abfc05b9e71"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/python/vendor/db.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/python/vendor/db.py",
+      "bytes": 146889,
+      "sha256": "9d4eba69e868dea8000d8acdbaed723149cf8732c52e097f23fb3b07fa5ddc55",
+      "sanitized": false,
+      "sourceSha256": "9d4eba69e868dea8000d8acdbaed723149cf8732c52e097f23fb3b07fa5ddc55"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/batching-memory.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/batching-memory.test.js",
+      "bytes": 8096,
+      "sha256": "1d2f97979bea730e46d46e028730edf12a46d923b80ca86d90fc1ce01da2ee34",
+      "sanitized": false,
+      "sourceSha256": "1d2f97979bea730e46d46e028730edf12a46d923b80ca86d90fc1ce01da2ee34"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/bridge.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/bridge.test.js",
+      "bytes": 33249,
+      "sha256": "eed9183e870183087730d12b449cc5178993ed43dd5d6113db268a0ea6774fc7",
+      "sanitized": true,
+      "sourceSha256": "4b5c0d0af66a4789846d8b1820ae5943d44434394be270ef47c0e5fc6abcc80a"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/config.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/config.test.js",
+      "bytes": 2981,
+      "sha256": "8ac22dc547769f608e1b56d72936c7b85288f6a8e093b9892ceaa4290b0e95c6",
+      "sanitized": true,
+      "sourceSha256": "e16a54b795078357d708354e74325887b80fff454f9d17988f1297ad1d795d73"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/conversations.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/conversations.test.js",
+      "bytes": 5835,
+      "sha256": "166077c6b6b2ecc71dc0c9b38b18a4a5a46be652c6a0408b1ac9045c4635fbfd",
+      "sanitized": true,
+      "sourceSha256": "265bc0435a59f3493f5171d0510bb48add1da724298e011a16a283f7e24cdf78"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/group.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/group.test.js",
+      "bytes": 17295,
+      "sha256": "c071275336a233145a788abadc83bf8430278c9b5a8857626264549c2df94054",
+      "sanitized": false,
+      "sourceSha256": "c071275336a233145a788abadc83bf8430278c9b5a8857626264549c2df94054"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/http.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/http.test.js",
+      "bytes": 9372,
+      "sha256": "4b81beac1b21595676963d069cb4f0b27afab2434f07fe57b171bd599d6314fb",
+      "sanitized": false,
+      "sourceSha256": "4b81beac1b21595676963d069cb4f0b27afab2434f07fe57b171bd599d6314fb"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/memory-retention.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/memory-retention.test.js",
+      "bytes": 5561,
+      "sha256": "c52b795420f16bc7f0c6d07b2771b7e197d2c7ff6593546bb97613fc23d41b47",
+      "sanitized": false,
+      "sourceSha256": "c52b795420f16bc7f0c6d07b2771b7e197d2c7ff6593546bb97613fc23d41b47"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/model-runtime.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/model-runtime.test.js",
+      "bytes": 2245,
+      "sha256": "33e476e3a0815412a9936d7d3badc0e23836257827e90bc3f50451fffa22837f",
+      "sanitized": false,
+      "sourceSha256": "33e476e3a0815412a9936d7d3badc0e23836257827e90bc3f50451fffa22837f"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/model.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/model.test.js",
+      "bytes": 4908,
+      "sha256": "b3fdba259531ce8ceb348103986b58cec487edd529365d3b75bd2802bd198596",
+      "sanitized": false,
+      "sourceSha256": "b3fdba259531ce8ceb348103986b58cec487edd529365d3b75bd2802bd198596"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/store.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/store.test.js",
+      "bytes": 1434,
+      "sha256": "4295ad499dd7abd0f8faaa99d42c13b9a0beb882cd94dabdccefad55cc61ab69",
+      "sanitized": false,
+      "sourceSha256": "4295ad499dd7abd0f8faaa99d42c13b9a0beb882cd94dabdccefad55cc61ab69"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/test/worker-client.test.js",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/test/worker-client.test.js",
+      "bytes": 1879,
+      "sha256": "365a213aeb69f068caa2922598f93f9d937a166a24cad599c843fd64303a0e4c",
+      "sanitized": false,
+      "sourceSha256": "365a213aeb69f068caa2922598f93f9d937a166a24cad599c843fd64303a0e4c"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_conversations.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_conversations.py",
+      "bytes": 2549,
+      "sha256": "70f864e9724737dea35eafce80b9e645a9f71ef08db359c0a8cafbc3c5a85134",
+      "sanitized": true,
+      "sourceSha256": "f894a44afe07e9827deeba5e34e151931fcb02ad6f499819bacb94fbbb496b3f"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_db_reader.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_db_reader.py",
+      "bytes": 2158,
+      "sha256": "bf36d9e758ff57149053bee4a66b7f1572a614f8bbb2db996d40194062fba4c4",
+      "sanitized": true,
+      "sourceSha256": "b9ba8c9330fa622fdbcf721ea441ddd23c0cfedffed08ea08c18605b181b83cd"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_gate.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_gate.py",
+      "bytes": 4436,
+      "sha256": "5008cd1434f2c6888367c0981cc9ed9cfcfd26f0fdfd52cce90a02728029c7d1",
+      "sanitized": false,
+      "sourceSha256": "5008cd1434f2c6888367c0981cc9ed9cfcfd26f0fdfd52cce90a02728029c7d1"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_group.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_group.py",
+      "bytes": 3262,
+      "sha256": "068211d609045575aba521f0085abead78b37d6aeff7f965d77eb911816f0393",
+      "sanitized": false,
+      "sourceSha256": "068211d609045575aba521f0085abead78b37d6aeff7f965d77eb911816f0393"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_isolated.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_isolated.py",
+      "bytes": 22537,
+      "sha256": "c68df5d1ca9dcfe187ece3ee7b48b063c010e74d7ee56edfc133209479f0bb56",
+      "sanitized": false,
+      "sourceSha256": "c68df5d1ca9dcfe187ece3ee7b48b063c010e74d7ee56edfc133209479f0bb56"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_process.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_process.py",
+      "bytes": 6318,
+      "sha256": "4798ad28ff8b07cee1525c6dbb1b795f584235cdbd1149c61bf3265a97c36f8d",
+      "sanitized": true,
+      "sourceSha256": "ae0359f346339abe04f9063c7fcd8262206aba05234aa699b98af513b107260b"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_protocol.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_protocol.py",
+      "bytes": 2425,
+      "sha256": "09b4cf0d157a690ae106c7759629cfff158b833bb2a186cc7ad5077875564bc4",
+      "sanitized": false,
+      "sourceSha256": "09b4cf0d157a690ae106c7759629cfff158b833bb2a186cc7ad5077875564bc4"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_runtime.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_runtime.py",
+      "bytes": 6143,
+      "sha256": "1f5716def0795981e41418003b2a7d502fdaefcd22074e5608a89bb29e15ed16",
+      "sanitized": true,
+      "sourceSha256": "3e2a1d50d2205d019eeac7902994cfa0be291dbeb2c06fa28f6524ce903acc01"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_uia_send.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_uia_send.py",
+      "bytes": 12029,
+      "sha256": "b0791f9f920bb99ede1cddb1fac196cc42d6ad585f89324b08528dc2c593163a",
+      "sanitized": true,
+      "sourceSha256": "e74cd09f13d744bf8d245988675d235231bf565f9c915a9564cc18733347d689"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_vendor.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_vendor.py",
+      "bytes": 1142,
+      "sha256": "ec1b65c10590b29fc693226728743ab0537bde6fc8d83a6c24f2439b70c6de37",
+      "sanitized": false,
+      "sourceSha256": "ec1b65c10590b29fc693226728743ab0537bde6fc8d83a6c24f2439b70c6de37"
+    },
+    {
+      "path": "plugins/dsh-wechat-bridge/tests/python/test_worker.py",
+      "source": "PROJECT/plugins/dsh-wechat-bridge/tests/python/test_worker.py",
+      "bytes": 13216,
+      "sha256": "1a09edeb16da5b8848072b18beb48f4315514290c35497c1bb195d92213a3557",
+      "sanitized": true,
+      "sourceSha256": "7c56ef0227792fd3a8d4b5f9d9f46108dd1429117998226a6809cd698a2cce62"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/README.md",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/README.md",
+      "bytes": 19526,
+      "sha256": "28125d9efce6627cbef1c2c9b41f41be11c61b14aa17ae32cdaf631e31b46916",
+      "sanitized": true,
+      "sourceSha256": "468675583b9aa03c62a641373b0d6d6ef53f82fe3ba68ab92a53d7f9fb69c917"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/cordis.patch.yml",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/cordis.patch.yml",
+      "bytes": 101,
+      "sha256": "2db88c11f11f8781c1bab7d58d5309ce624a02ac55d0c6073a3d848025fe0765",
+      "sanitized": false,
+      "sourceSha256": "2db88c11f11f8781c1bab7d58d5309ce624a02ac55d0c6073a3d848025fe0765"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/package.json",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/package.json",
+      "bytes": 879,
+      "sha256": "e87cadf5dd8e282638fe44ba1f8f9be1c774b73041bde2e6c68f389f63db2913",
+      "sanitized": false,
+      "sourceSha256": "e87cadf5dd8e282638fe44ba1f8f9be1c774b73041bde2e6c68f389f63db2913"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/batch.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/batch.js",
+      "bytes": 1592,
+      "sha256": "3f4e44f6c910f07b200f637cd775aac0ca5f5984f3235e5f7b0a2c890c60ee2a",
+      "sanitized": false,
+      "sourceSha256": "3f4e44f6c910f07b200f637cd775aac0ca5f5984f3235e5f7b0a2c890c60ee2a"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/bridge.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/bridge.js",
+      "bytes": 45053,
+      "sha256": "bedd5ba988b58f8861d69abd71500dc18b86303fe8a041484e41fd283e30ff68",
+      "sanitized": true,
+      "sourceSha256": "4cbdd6d7051420220f48700d89ee7ef6339a2082d7dfc19982b2eb12cec3b578"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/config.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/config.js",
+      "bytes": 7463,
+      "sha256": "eb5c14f7b89e892b319c0c27f58b52e9a1fa9322fec85fc8ccf83d5644c83a3f",
+      "sanitized": false,
+      "sourceSha256": "eb5c14f7b89e892b319c0c27f58b52e9a1fa9322fec85fc8ccf83d5644c83a3f"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/conversations.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/conversations.js",
+      "bytes": 6495,
+      "sha256": "8498f9c8f94cd7065c9c7388e53d34e23bed7b1351deb10002b9b9dee78e466f",
+      "sanitized": false,
+      "sourceSha256": "8498f9c8f94cd7065c9c7388e53d34e23bed7b1351deb10002b9b9dee78e466f"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/diagnostics.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/diagnostics.js",
+      "bytes": 2881,
+      "sha256": "043e3020f88ce13a5cf477e12a2a4f51f7e53342d5d724ebc23a375ec2ee2371",
+      "sanitized": false,
+      "sourceSha256": "043e3020f88ce13a5cf477e12a2a4f51f7e53342d5d724ebc23a375ec2ee2371"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/group.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/group.js",
+      "bytes": 2608,
+      "sha256": "44098858f68f4574ff38be3d46d7d2d52918a87c149d0ab6c50741928a406328",
+      "sanitized": false,
+      "sourceSha256": "44098858f68f4574ff38be3d46d7d2d52918a87c149d0ab6c50741928a406328"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/http.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/http.js",
+      "bytes": 11377,
+      "sha256": "cfcabcc47a600f341eb43bb15491bc4299e302c31a0567240f86f35acbc52cd2",
+      "sanitized": false,
+      "sourceSha256": "cfcabcc47a600f341eb43bb15491bc4299e302c31a0567240f86f35acbc52cd2"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/index.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/index.js",
+      "bytes": 1311,
+      "sha256": "be1ab48e56b8bf8026fdd542cf0a6ccbf79f712899503ae4c8d377201fbe1fb1",
+      "sanitized": false,
+      "sourceSha256": "be1ab48e56b8bf8026fdd542cf0a6ccbf79f712899503ae4c8d377201fbe1fb1"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/memory.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/memory.js",
+      "bytes": 6465,
+      "sha256": "adfeb67c90acc242659cb977ddd8d1d56be5cd67660f3d413b6d9cd43f4c6bd7",
+      "sanitized": false,
+      "sourceSha256": "adfeb67c90acc242659cb977ddd8d1d56be5cd67660f3d413b6d9cd43f4c6bd7"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/model-session.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/model-session.js",
+      "bytes": 8603,
+      "sha256": "34be23b2e69b5e8fe6c06c9fe06abd38c73f73ab664710d12553d465cf17f6da",
+      "sanitized": false,
+      "sourceSha256": "34be23b2e69b5e8fe6c06c9fe06abd38c73f73ab664710d12553d465cf17f6da"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/model.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/model.js",
+      "bytes": 3709,
+      "sha256": "410d3bbc4cb98a09bea6f1681495b74413c4bf7116a60409ec2c4531341661c6",
+      "sanitized": false,
+      "sourceSha256": "410d3bbc4cb98a09bea6f1681495b74413c4bf7116a60409ec2c4531341661c6"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/retention.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/retention.js",
+      "bytes": 1762,
+      "sha256": "a0c8554c63433edaa65cfa862f7f49b98ed94b9f4d1316c90a01f00b88bf3bb8",
+      "sanitized": false,
+      "sourceSha256": "a0c8554c63433edaa65cfa862f7f49b98ed94b9f4d1316c90a01f00b88bf3bb8"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/store.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/store.js",
+      "bytes": 6013,
+      "sha256": "18373175be4f8a72e24b20425fb6e657b16c6b14aa7d283ee227ed2bbfc825e1",
+      "sanitized": false,
+      "sourceSha256": "18373175be4f8a72e24b20425fb6e657b16c6b14aa7d283ee227ed2bbfc825e1"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/ui.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/ui.js",
+      "bytes": 21507,
+      "sha256": "516b27f03e97ebdf52e1d69224783d256049f98b2f14d4e391a5ddaa30abe627",
+      "sanitized": true,
+      "sourceSha256": "971c3c88bcdfd6c9c18812ad1d78cb9526ce50fd794dff24d680330c0de0a902"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/lib/worker-client.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/lib/worker-client.js",
+      "bytes": 6514,
+      "sha256": "1802ff4d31954da51ef8aec7e0962f377875185d1cccb0f69784723c955712d5",
+      "sanitized": false,
+      "sourceSha256": "1802ff4d31954da51ef8aec7e0962f377875185d1cccb0f69784723c955712d5"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/.npmignore",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/.npmignore",
+      "bytes": 35,
+      "sha256": "d1babce1c69074691c76b48cdefdf93818efb379160b258374713994726a8d01",
+      "sanitized": false,
+      "sourceSha256": "d1babce1c69074691c76b48cdefdf93818efb379160b258374713994726a8d01"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/isolated_worker.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/isolated_worker.py",
+      "bytes": 398,
+      "sha256": "b6a834aeb5f655e3cabfd2c5824d2ca5132deaadf2b04dbc61294c92811fff82",
+      "sanitized": false,
+      "sourceSha256": "b6a834aeb5f655e3cabfd2c5824d2ca5132deaadf2b04dbc61294c92811fff82"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/requirements.txt",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/requirements.txt",
+      "bytes": 96,
+      "sha256": "a9b85e3dfcbd63d69133091d38b29eed1da414e8c53fbe111e5ffea878c20867",
+      "sanitized": false,
+      "sourceSha256": "a9b85e3dfcbd63d69133091d38b29eed1da414e8c53fbe111e5ffea878c20867"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/worker.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/worker.py",
+      "bytes": 284,
+      "sha256": "3900a645c1f5d72ae9da22cf895b43d6a94629bd5899d326fd0f8bccff0a7186",
+      "sanitized": false,
+      "sourceSha256": "3900a645c1f5d72ae9da22cf895b43d6a94629bd5899d326fd0f8bccff0a7186"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/__init__.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/__init__.py",
+      "bytes": 68,
+      "sha256": "b3b7daf24cc96c26f3260ff11ceaa22f6f9b09cc16332c5f9dd6fcd60c9b34f6",
+      "sanitized": false,
+      "sourceSha256": "b3b7daf24cc96c26f3260ff11ceaa22f6f9b09cc16332c5f9dd6fcd60c9b34f6"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/conversations.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/conversations.py",
+      "bytes": 5547,
+      "sha256": "cfa393dcc89b2f1bcd9671c80da813ada37f80aedf5bc6e585b93f87d054e0e3",
+      "sanitized": false,
+      "sourceSha256": "cfa393dcc89b2f1bcd9671c80da813ada37f80aedf5bc6e585b93f87d054e0e3"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/db_reader.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/db_reader.py",
+      "bytes": 6284,
+      "sha256": "92a47896a3bb0a840da9790e667995a64d858c3bdc31017abae6e3d49c551054",
+      "sanitized": false,
+      "sourceSha256": "92a47896a3bb0a840da9790e667995a64d858c3bdc31017abae6e3d49c551054"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/desktop.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/desktop.py",
+      "bytes": 10116,
+      "sha256": "af1da266d96a97bf96444d5679a8189d8cbe60ff5928c80b17dbda42dcfbbb0d",
+      "sanitized": false,
+      "sourceSha256": "af1da266d96a97bf96444d5679a8189d8cbe60ff5928c80b17dbda42dcfbbb0d"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/diagnostics.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/diagnostics.py",
+      "bytes": 1371,
+      "sha256": "c4f01d46cb183471ab9baa0d15f4a1dd8b510e007d0eae8a44b06ee989c342f5",
+      "sanitized": false,
+      "sourceSha256": "c4f01d46cb183471ab9baa0d15f4a1dd8b510e007d0eae8a44b06ee989c342f5"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/gate.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/gate.py",
+      "bytes": 20835,
+      "sha256": "e06382d3099b4942c73608285fa0437e29d3b47a8a101f93f6f415b556f3fabe",
+      "sanitized": false,
+      "sourceSha256": "e06382d3099b4942c73608285fa0437e29d3b47a8a101f93f6f415b556f3fabe"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/group.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/group.py",
+      "bytes": 3197,
+      "sha256": "37a5f678adbae58eae7a1b9fdefc43f537f4091c672059f5aff5fa2c87af14b3",
+      "sanitized": false,
+      "sourceSha256": "37a5f678adbae58eae7a1b9fdefc43f537f4091c672059f5aff5fa2c87af14b3"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/isolated.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/isolated.py",
+      "bytes": 13085,
+      "sha256": "a08f671bdd4c074480e6f148ca3538027a0f3c878063739acbd06423a26a582b",
+      "sanitized": false,
+      "sourceSha256": "a08f671bdd4c074480e6f148ca3538027a0f3c878063739acbd06423a26a582b"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/isolated_send.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/isolated_send.py",
+      "bytes": 4996,
+      "sha256": "014324d53f9e9b39b4c45d2bf2ffdbdeb703ce44c5f89af9d8bda4e8377a5a19",
+      "sanitized": false,
+      "sourceSha256": "014324d53f9e9b39b4c45d2bf2ffdbdeb703ce44c5f89af9d8bda4e8377a5a19"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/process.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/process.py",
+      "bytes": 12893,
+      "sha256": "dbe88bb64b285df604a9223b32b1906d86bc5ccd758870f32f32d0e32ab341c6",
+      "sanitized": false,
+      "sourceSha256": "dbe88bb64b285df604a9223b32b1906d86bc5ccd758870f32f32d0e32ab341c6"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/runtime.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/runtime.py",
+      "bytes": 14136,
+      "sha256": "f140b8314c62f84a1dcbe0ceeea9caba6cecced48fc053ff66fbde46c718a8cd",
+      "sanitized": false,
+      "sourceSha256": "f140b8314c62f84a1dcbe0ceeea9caba6cecced48fc053ff66fbde46c718a8cd"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/uia_send.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/uia_send.py",
+      "bytes": 15690,
+      "sha256": "f856d0679c3a7f5862415a2f9859d54633f1ee3c8f593e6d226aeb679579e59d",
+      "sanitized": false,
+      "sourceSha256": "f856d0679c3a7f5862415a2f9859d54633f1ee3c8f593e6d226aeb679579e59d"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/vendor.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/vendor.py",
+      "bytes": 2836,
+      "sha256": "7ce968b139c85211b6d2fdcfff448b5c048bfc0302393c965595ea61c27a6bb5",
+      "sanitized": false,
+      "sourceSha256": "7ce968b139c85211b6d2fdcfff448b5c048bfc0302393c965595ea61c27a6bb5"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/watchdog.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/watchdog.py",
+      "bytes": 405,
+      "sha256": "32266831d419ffc46d846969724f3110c8ab2a53f674faf59cd8cc17c9b3bbf6",
+      "sanitized": false,
+      "sourceSha256": "32266831d419ffc46d846969724f3110c8ab2a53f674faf59cd8cc17c9b3bbf6"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/worker.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/dsh_wechat_bridge/worker.py",
+      "bytes": 21141,
+      "sha256": "da8a1d3ad9272207e2d30e8eb4e1d07f37a2c19596b0e8a5cfdba90e23d9b689",
+      "sanitized": false,
+      "sourceSha256": "da8a1d3ad9272207e2d30e8eb4e1d07f37a2c19596b0e8a5cfdba90e23d9b689"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/vendor/LICENSE",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/vendor/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "sanitized": false,
+      "sourceSha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/vendor/README.md",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/vendor/README.md",
+      "bytes": 548,
+      "sha256": "0df4d94b7441fe9dafdb1084afc1226466fbc016eeec7fe773454abfc05b9e71",
+      "sanitized": false,
+      "sourceSha256": "0df4d94b7441fe9dafdb1084afc1226466fbc016eeec7fe773454abfc05b9e71"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/python/vendor/db.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/python/vendor/db.py",
+      "bytes": 146889,
+      "sha256": "9d4eba69e868dea8000d8acdbaed723149cf8732c52e097f23fb3b07fa5ddc55",
+      "sanitized": false,
+      "sourceSha256": "9d4eba69e868dea8000d8acdbaed723149cf8732c52e097f23fb3b07fa5ddc55"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/batching-memory.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/batching-memory.test.js",
+      "bytes": 7962,
+      "sha256": "7c879f0726c2cface34001ca6fc5311bb3c933c2259f1e7e4d970aeb45d52212",
+      "sanitized": false,
+      "sourceSha256": "7c879f0726c2cface34001ca6fc5311bb3c933c2259f1e7e4d970aeb45d52212"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/bridge.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/bridge.test.js",
+      "bytes": 30652,
+      "sha256": "17eb57de26ad9031b4bfb2d3f03db3b6cb69a3b78a48a85e7f5a8ed71409fbdf",
+      "sanitized": true,
+      "sourceSha256": "0f39e5bf63cd4edf7b87096c206cc782716a1a19df8f2b6352886a6357e1cbe6"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/config.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/config.test.js",
+      "bytes": 2981,
+      "sha256": "8ac22dc547769f608e1b56d72936c7b85288f6a8e093b9892ceaa4290b0e95c6",
+      "sanitized": true,
+      "sourceSha256": "e16a54b795078357d708354e74325887b80fff454f9d17988f1297ad1d795d73"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/conversations.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/conversations.test.js",
+      "bytes": 5527,
+      "sha256": "b0df3fd6496435ae4dcf0206bb1bf890087a53a15c8f96eb2d6cf7c865676e92",
+      "sanitized": true,
+      "sourceSha256": "c827338f12a03e88a7d9d427f527c525867ebe63bf9e79a83bf0aea8883c2a3b"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/group.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/group.test.js",
+      "bytes": 12478,
+      "sha256": "3020daa97da1c947dd4d46a55df20f574c0e4b74018f048faf7d8648fedffa71",
+      "sanitized": false,
+      "sourceSha256": "3020daa97da1c947dd4d46a55df20f574c0e4b74018f048faf7d8648fedffa71"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/http.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/http.test.js",
+      "bytes": 8601,
+      "sha256": "4ced82df924a623737a63b6a9810bccd4cb485d2d4a1e94cbd52741f1d3ebb6a",
+      "sanitized": false,
+      "sourceSha256": "4ced82df924a623737a63b6a9810bccd4cb485d2d4a1e94cbd52741f1d3ebb6a"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/memory-retention.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/memory-retention.test.js",
+      "bytes": 5188,
+      "sha256": "808beb3fbe1594e2b0399ba2998a5073bfd5a45443438fce6790e85a53464966",
+      "sanitized": false,
+      "sourceSha256": "808beb3fbe1594e2b0399ba2998a5073bfd5a45443438fce6790e85a53464966"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/model-runtime.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/model-runtime.test.js",
+      "bytes": 2245,
+      "sha256": "33e476e3a0815412a9936d7d3badc0e23836257827e90bc3f50451fffa22837f",
+      "sanitized": false,
+      "sourceSha256": "33e476e3a0815412a9936d7d3badc0e23836257827e90bc3f50451fffa22837f"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/model-session.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/model-session.test.js",
+      "bytes": 9454,
+      "sha256": "71ea84f729987f142e0140622287c0b4d27b286a801b4e1eac5b6e2d3cd73010",
+      "sanitized": false,
+      "sourceSha256": "71ea84f729987f142e0140622287c0b4d27b286a801b4e1eac5b6e2d3cd73010"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/model.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/model.test.js",
+      "bytes": 4908,
+      "sha256": "b3fdba259531ce8ceb348103986b58cec487edd529365d3b75bd2802bd198596",
+      "sanitized": false,
+      "sourceSha256": "b3fdba259531ce8ceb348103986b58cec487edd529365d3b75bd2802bd198596"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/store.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/store.test.js",
+      "bytes": 1434,
+      "sha256": "4295ad499dd7abd0f8faaa99d42c13b9a0beb882cd94dabdccefad55cc61ab69",
+      "sanitized": false,
+      "sourceSha256": "4295ad499dd7abd0f8faaa99d42c13b9a0beb882cd94dabdccefad55cc61ab69"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/test/worker-client.test.js",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/test/worker-client.test.js",
+      "bytes": 1879,
+      "sha256": "365a213aeb69f068caa2922598f93f9d937a166a24cad599c843fd64303a0e4c",
+      "sanitized": false,
+      "sourceSha256": "365a213aeb69f068caa2922598f93f9d937a166a24cad599c843fd64303a0e4c"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_conversations.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_conversations.py",
+      "bytes": 2549,
+      "sha256": "70f864e9724737dea35eafce80b9e645a9f71ef08db359c0a8cafbc3c5a85134",
+      "sanitized": true,
+      "sourceSha256": "f894a44afe07e9827deeba5e34e151931fcb02ad6f499819bacb94fbbb496b3f"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_db_reader.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_db_reader.py",
+      "bytes": 2158,
+      "sha256": "bf36d9e758ff57149053bee4a66b7f1572a614f8bbb2db996d40194062fba4c4",
+      "sanitized": true,
+      "sourceSha256": "b9ba8c9330fa622fdbcf721ea441ddd23c0cfedffed08ea08c18605b181b83cd"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_gate.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_gate.py",
+      "bytes": 4436,
+      "sha256": "5008cd1434f2c6888367c0981cc9ed9cfcfd26f0fdfd52cce90a02728029c7d1",
+      "sanitized": false,
+      "sourceSha256": "5008cd1434f2c6888367c0981cc9ed9cfcfd26f0fdfd52cce90a02728029c7d1"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_group.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_group.py",
+      "bytes": 3262,
+      "sha256": "068211d609045575aba521f0085abead78b37d6aeff7f965d77eb911816f0393",
+      "sanitized": false,
+      "sourceSha256": "068211d609045575aba521f0085abead78b37d6aeff7f965d77eb911816f0393"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_isolated.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_isolated.py",
+      "bytes": 19173,
+      "sha256": "b4338adb1b0861a0ecfed7786d0638585f2ebc7c6f028ecf938bfcf70ad4cb82",
+      "sanitized": false,
+      "sourceSha256": "b4338adb1b0861a0ecfed7786d0638585f2ebc7c6f028ecf938bfcf70ad4cb82"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_process.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_process.py",
+      "bytes": 6318,
+      "sha256": "4798ad28ff8b07cee1525c6dbb1b795f584235cdbd1149c61bf3265a97c36f8d",
+      "sanitized": true,
+      "sourceSha256": "ae0359f346339abe04f9063c7fcd8262206aba05234aa699b98af513b107260b"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_protocol.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_protocol.py",
+      "bytes": 2425,
+      "sha256": "09b4cf0d157a690ae106c7759629cfff158b833bb2a186cc7ad5077875564bc4",
+      "sanitized": false,
+      "sourceSha256": "09b4cf0d157a690ae106c7759629cfff158b833bb2a186cc7ad5077875564bc4"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_runtime.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_runtime.py",
+      "bytes": 6143,
+      "sha256": "1f5716def0795981e41418003b2a7d502fdaefcd22074e5608a89bb29e15ed16",
+      "sanitized": true,
+      "sourceSha256": "3e2a1d50d2205d019eeac7902994cfa0be291dbeb2c06fa28f6524ce903acc01"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_uia_send.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_uia_send.py",
+      "bytes": 11431,
+      "sha256": "384bfe6753ef9b3fb00a9437fc5839b731833d3ad9ef1a2978a5010c432c5826",
+      "sanitized": true,
+      "sourceSha256": "366df2e0ffc9cdff9c86d0cba9420299d2592a36b954d1eca82a83528f7dd8d4"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_vendor.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_vendor.py",
+      "bytes": 1142,
+      "sha256": "ec1b65c10590b29fc693226728743ab0537bde6fc8d83a6c24f2439b70c6de37",
+      "sanitized": false,
+      "sourceSha256": "ec1b65c10590b29fc693226728743ab0537bde6fc8d83a6c24f2439b70c6de37"
+    },
+    {
+      "path": "_work/dsh-model-session/staged-plugin/tests/python/test_worker.py",
+      "source": "PROJECT/_work/dsh-model-session/staged-plugin/tests/python/test_worker.py",
+      "bytes": 13216,
+      "sha256": "1a09edeb16da5b8848072b18beb48f4315514290c35497c1bb195d92213a3557",
+      "sanitized": true,
+      "sourceSha256": "7c56ef0227792fd3a8d4b5f9d9f46108dd1429117998226a6809cd698a2cce62"
+    },
+    {
+      "path": "Start-DshBot.ps1",
+      "source": "PROJECT/Start-DshBot.ps1",
+      "bytes": 2005,
+      "sha256": "327479ecd6fe32d90ca1fa29500462d2fc3b1b2b62bbf415871d0f6d053f1bfe",
+      "sanitized": true,
+      "sourceSha256": "667f776773b459b30903ffa24efafa3459646ec2cee4ecbd192e27a8f0f915d4"
+    },
+    {
+      "path": "Stop-DshBot.ps1",
+      "source": "PROJECT/Stop-DshBot.ps1",
+      "bytes": 2285,
+      "sha256": "c2ea2c1e55fca9aee38e52473352fb47aa4f603d1908b11055a0d6ba28267c4a",
+      "sanitized": false,
+      "sourceSha256": "c2ea2c1e55fca9aee38e52473352fb47aa4f603d1908b11055a0d6ba28267c4a"
+    },
+    {
+      "path": "personas/persona_dafeiyu.md",
+      "source": "PROJECT/personas/persona_dafeiyu.md",
+      "bytes": 13612,
+      "sha256": "2fd424bf822cbb024d9c8be4022b2ac687f01226c585c6dfb06ed30bc7132001",
+      "sanitized": true,
+      "sourceSha256": "4ab7026c5d0b37340f28c637c94d04b0500e0e7c89099cf10d395a345c57dd02"
+    },
+    {
+      "path": "personas/persona_dafeiyu.source.md",
+      "source": "PROJECT/personas/persona_dafeiyu.source.md",
+      "bytes": 12922,
+      "sha256": "a104972c4e189a0b7897a59338a06f3d5eb40c54d3c84b85806b8e40956ff4af",
+      "sanitized": false,
+      "sourceSha256": "a104972c4e189a0b7897a59338a06f3d5eb40c54d3c84b85806b8e40956ff4af"
+    },
+    {
+      "path": "personas/LICENSE",
+      "source": "PROJECT/personas/LICENSE",
+      "bytes": 1064,
+      "sha256": "eec0dcba58f6d4e92d98f2fa3a61f86235e1b322aa512bc40daa8886a4f9cfb3",
+      "sanitized": false,
+      "sourceSha256": "eec0dcba58f6d4e92d98f2fa3a61f86235e1b322aa512bc40daa8886a4f9cfb3"
+    },
+    {
+      "path": "personas/source.json",
+      "source": "PROJECT/personas/source.json",
+      "bytes": 315,
+      "sha256": "b6f2bade767a6871d4b22371b3a899874123f1df15efd04839dcb8fa119cb2d3",
+      "sanitized": false,
+      "sourceSha256": "b6f2bade767a6871d4b22371b3a899874123f1df15efd04839dcb8fa119cb2d3"
+    },
+    {
+      "path": "runtime/package.json",
+      "source": "PROJECT/runtime/package.json",
+      "bytes": 197,
+      "sha256": "eacb75fc6998644f738ed0edf5d4d9223a72364b8d8dd60db22377083c01c1b5",
+      "sanitized": false,
+      "sourceSha256": "eacb75fc6998644f738ed0edf5d4d9223a72364b8d8dd60db22377083c01c1b5"
+    },
+    {
+      "path": "runtime/package-lock.json",
+      "source": "PROJECT/runtime/package-lock.json",
+      "bytes": 417175,
+      "sha256": "4fbb9e93e613724c97760cf7b74b4a0dc794d8f96d8ea1127952e4da1e096d0b",
+      "sanitized": false,
+      "sourceSha256": "4fbb9e93e613724c97760cf7b74b4a0dc794d8f96d8ea1127952e4da1e096d0b"
+    },
+    {
+      "path": "_work/dsh-model-session/DELIVERY.md",
+      "source": "PROJECT/_work/dsh-model-session/DELIVERY.md",
+      "bytes": 5244,
+      "sha256": "86405d3211f2897469ec8f814910aab4a4c7cc75f558a65e3e2ae5806b8cd29b",
+      "sanitized": true,
+      "sourceSha256": "5ea0f2305733f3a4853e0f4592c09c25f2e30ea71ef28ba594d6670e1d2a4731"
+    },
+    {
+      "path": "_work/dsh-model-session/manifest.json",
+      "source": "PROJECT/_work/dsh-model-session/manifest.json",
+      "bytes": 2469,
+      "sha256": "64070405f06b0346b31d256aa2e959906a61381eb9109e7f2349cf2ea5b3d072",
+      "sanitized": false,
+      "sourceSha256": "64070405f06b0346b31d256aa2e959906a61381eb9109e7f2349cf2ea5b3d072"
+    },
+    {
+      "path": "_work/dsh-model-session/dsh-model-session.patch",
+      "source": "PROJECT/_work/dsh-model-session/dsh-model-session.patch",
+      "bytes": 34271,
+      "sha256": "d0282b213ef464b50c77e12e0aad80d2622a05082bafe78c5cb02064c3b40e61",
+      "sanitized": true,
+      "sourceSha256": "bf6bf428e426ba49b2ebb4724d8d5ce817475786b1fe2c47031d00df490984b9"
+    },
+    {
+      "path": "_work/20261021-start-lock/RESULTS.md",
+      "source": "PROJECT/_work/20261021-start-lock/RESULTS.md",
+      "bytes": 3970,
+      "sha256": "134d664cd8eb9772bf8a6ee7c5401ab584393d4e75696d7274232d2c04c58f21",
+      "sanitized": true,
+      "sourceSha256": "48e1f963631cb33a8fa5a86c40b64489d50a076a5138a206be046f1ed9e85298"
+    },
+    {
+      "path": "_work/20261021-console/RESULTS.md",
+      "source": "PROJECT/_work/20261021-console/RESULTS.md",
+      "bytes": 4579,
+      "sha256": "a5957c7565686b397029227102a0bfd7c470202abd2f0787c34589271011400d",
+      "sanitized": true,
+      "sourceSha256": "b45a67a30cb0d8c2827a27f96f3b61c2299d5213d1772dbf45b78148afcaef1e"
+    },
+    {
+      "path": "_work/20261021-model-recovery/RESULTS.md",
+      "source": "PROJECT/_work/20261021-model-recovery/RESULTS.md",
+      "bytes": 3957,
+      "sha256": "3cbb4518146a27ddbf3cc891265ec8256a9f7e2628f351ce2fe9795c888f6283",
+      "sanitized": true,
+      "sourceSha256": "a1f2e14c8d7fbbb9eef5df382837ebc531f9b4907d4b75bf20e6647114173501"
+    },
+    {
+      "path": "_work/20261021-autonomous-memory/RESULTS.md",
+      "source": "PROJECT/_work/20261021-autonomous-memory/RESULTS.md",
+      "bytes": 5531,
+      "sha256": "730a5ab09b44def2711a79ada213ebfa0d04ff9d43fc566782c576beb0b0f915",
+      "sanitized": true,
+      "sourceSha256": "7bbff54e292e5d3a2c9f5358ea1ba4a192acb7784f7a097e5c5fb94b6bd0fb99"
+    },
+    {
+      "path": "_work/20261021-focus-lifetime/RESULTS.md",
+      "source": "PROJECT/_work/20261021-focus-lifetime/RESULTS.md",
+      "bytes": 2908,
+      "sha256": "21b1f4e6af6155e7f992f5e7e1b08eef9c0e95202ea8abaffbce4c3c07627a8c",
+      "sanitized": true,
+      "sourceSha256": "688bde7e4bf3e97e7d323da5433d0b65bebcc802c48c6fa58ea932d5fb8170f8"
+    },
+    {
+      "path": "_work/20261021-window-visibility/DEFERRED.md",
+      "source": "USER_DECISION",
+      "bytes": 255,
+      "sha256": "55ef2c87b8d02be19b98bc07d0fc2c3856fb28d7d1f323fa9e44a5e8d3e7c687",
+      "sanitized": false,
+      "sourceSha256": null
+    },
+    {
+      "path": "config/wechat-bot.example.json",
+      "source": "GENERATED_SANITIZED_TEMPLATE",
+      "bytes": 1394,
+      "sha256": "3b248b44d1f75d133e12777ff93f3e56493519085a2118e72e60f12b34d13b98",
+      "sanitized": false,
+      "sourceSha256": null
+    },
+    {
+      "path": "handoff/2026-10-21/checksums.sha256",
+      "source": "PROJECT/handoff/2026-10-21/checksums.sha256",
+      "bytes": 1850,
+      "sha256": "85486db6946a2d601c5158c817cb8b2ddba7c0905c8d8e44e580d9191e873e05",
+      "sanitized": true,
+      "sourceSha256": "f135119fe377cf7e60cbe6a1c3e4d7142845244b47c236c09c0fdb6e9b734ba2"
+    },
+    {
+      "path": "handoff/2026-10-21/evidence/project-snapshot.json",
+      "source": "PROJECT/handoff/2026-10-21/evidence/project-snapshot.json",
+      "bytes": 11495,
+      "sha256": "2a1c2928a281e05702d330d427569b7050026af6f61d566d80fbd350d62694f2",
+      "sanitized": true,
+      "sourceSha256": "393eb0279610a03a3be5521846ae50b0e7ef013ed85c35be01d30d9883851310"
+    },
+    {
+      "path": "handoff/2026-10-21/evidence/verification.json",
+      "source": "PROJECT/handoff/2026-10-21/evidence/verification.json",
+      "bytes": 1038,
+      "sha256": "ec2d8a45391e915f3e4b2abbddc4b9f86d98d5c1ee9bdb573378883b874de755",
+      "sanitized": false,
+      "sourceSha256": "ec2d8a45391e915f3e4b2abbddc4b9f86d98d5c1ee9bdb573378883b874de755"
+    },
+    {
+      "path": "handoff/2026-10-21/HANDOFF.zh-CN.md",
+      "source": "PROJECT/handoff/2026-10-21/HANDOFF.zh-CN.md",
+      "bytes": 15541,
+      "sha256": "f57a92d24862f04251f67982e24bee1f07b5e91a218fb1ced3b550af30f9060c",
+      "sanitized": true,
+      "sourceSha256": "aa362c14a91a760e8f4650ed19c7b53dd67d8f328c5ee5b57714840b0157089a"
+    },
+    {
+      "path": "handoff/2026-10-21/manifest.json",
+      "source": "PROJECT/handoff/2026-10-21/manifest.json",
+      "bytes": 13366,
+      "sha256": "5f53242624c8e7ea29641db0b82da0f42e6557a154695fb4718981da9114967a",
+      "sanitized": true,
+      "sourceSha256": "93c2f4a240ab5a7dcd9e0b4ee4aac152becc7ff2df1a165b316e441daa867c94"
+    },
+    {
+      "path": "handoff/2026-10-21/PACKING.md",
+      "source": "PROJECT/handoff/2026-10-21/PACKING.md",
+      "bytes": 3383,
+      "sha256": "bef30734ddb39323a7a99931b42fb1ef8500748191092ba6650de94c06e897cc",
+      "sanitized": true,
+      "sourceSha256": "01167f5e14f19d29f152517da08962564cbb6701f1a7b4b9b728bd5c63f706ea"
+    },
+    {
+      "path": "handoff/2026-10-21/README.md",
+      "source": "PROJECT/handoff/2026-10-21/README.md",
+      "bytes": 3922,
+      "sha256": "3ab6b84ceba73ae5fbafe69c1dd2bba97e098a53f17d3c9269380322197a2e51",
+      "sanitized": false,
+      "sourceSha256": "3ab6b84ceba73ae5fbafe69c1dd2bba97e098a53f17d3c9269380322197a2e51"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/01-方案选择与初版实现.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/01-方案选择与初版实现.jsonl",
+      "bytes": 7327454,
+      "sha256": "8ad9439b8011fd9c2b41ad8255d1ab799b19a5891cb4b0b2cbea9f9e03f159e3",
+      "sanitized": true,
+      "sourceSha256": "cb16c9a2dd6e447982d805eb5c5e4de217b7e0b974ffc128411c34790e17e0e2"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/01-方案选择与初版实现.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/01-方案选择与初版实现.md",
+      "bytes": 118073,
+      "sha256": "0ee4eac60151cd2de6903f68a8bbe8d764a877acff1c880ebe874af22bf4bdf2",
+      "sanitized": true,
+      "sourceSha256": "8f36dab20a9b31b68617e952348b41c0ded8543710aacc7023135d010f0b7232"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/02-独立窗口早期归档.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/02-独立窗口早期归档.jsonl",
+      "bytes": 1626,
+      "sha256": "8ffa693a6a84dec3625ba759b5b3513c9f26ce02207468a03193603e9d6b06a7",
+      "sanitized": false,
+      "sourceSha256": "8ffa693a6a84dec3625ba759b5b3513c9f26ce02207468a03193603e9d6b06a7"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/02-独立窗口早期归档.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/02-独立窗口早期归档.md",
+      "bytes": 1129,
+      "sha256": "80ade1f40476f8352fc2e62978a830e0e28f0abb944d18dc241ca2c9a06a1485",
+      "sanitized": false,
+      "sourceSha256": "80ade1f40476f8352fc2e62978a830e0e28f0abb944d18dc241ca2c9a06a1485"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.jsonl",
+      "bytes": 666529,
+      "sha256": "2d4046c8d289f7f00956b47fa1c39957cc9d17223aa95b287c2f0cc845e2b2b6",
+      "sanitized": true,
+      "sourceSha256": "3016b93e19a0c23e72d172a88bd5fb39533d593b94f0d40c5d44e12333a59d74"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.md",
+      "bytes": 9483,
+      "sha256": "63aebcb6653bf5a288165b1089b8ca3f3b8a81ab39e76bb06d0c75b0a5c8bacc",
+      "sanitized": true,
+      "sourceSha256": "627f318c85ea71df3d81b375ac9b96df71e8bb63646c234c8214c510526ffdfb"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.jsonl",
+      "bytes": 2630067,
+      "sha256": "4471b240238720733e5340fae6ac0a5ef77d2c8c8a609f9bd945b11eeb74da18",
+      "sanitized": true,
+      "sourceSha256": "5333610d88782b2bca283d798ab2c6545dac8778293885cbdc7970760effccef"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.md",
+      "bytes": 25243,
+      "sha256": "e11da63bd5b211bc0b9cf19a8ac3c06e5f0da41eeeeaad0c4f5c42bf0f7d4503",
+      "sanitized": true,
+      "sourceSha256": "71e0e375657b3117e97aea8ae33977d7ef90bebcc6d1ee9319405031c8a3fda5"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/05-插件架构边界评估.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/05-插件架构边界评估.jsonl",
+      "bytes": 38695,
+      "sha256": "e8c86525ba6f5031b9cc33a3b682635a808f2fee3370747f256aa5dd64c8aac6",
+      "sanitized": true,
+      "sourceSha256": "bd5230d52c1944c2998cde9a3a1b1a78d507d03196dd1195df6b021e242154c4"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/05-插件架构边界评估.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/05-插件架构边界评估.md",
+      "bytes": 3688,
+      "sha256": "2d7cb4213e69764566789db66605b69fafd961c9330a4d761ddb86a04637c808",
+      "sanitized": true,
+      "sourceSha256": "6801824373362a5c87cd8543ca047b30eb52dfb86cb52b3e5f3cf25096dd082e"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/06-本次归档与交接要求.jsonl",
+      "source": "PROJECT/handoff/2026-10-21/sessions/06-本次归档与交接要求.jsonl",
+      "bytes": 6662,
+      "sha256": "8052e96b5f67b311ae00b17b2dd52d32094031af51ceb09c101f0ec30f5abe25",
+      "sanitized": true,
+      "sourceSha256": "db46a26e185d24090111c6733837b12e1bccf81805f08091c5bd1acf8a20d0f8"
+    },
+    {
+      "path": "handoff/2026-10-21/sessions/06-本次归档与交接要求.md",
+      "source": "PROJECT/handoff/2026-10-21/sessions/06-本次归档与交接要求.md",
+      "bytes": 5053,
+      "sha256": "2c57e22f45e5df363614caadeb6322d28803fdb404ba2d1d712067f1b0831db6",
+      "sanitized": true,
+      "sourceSha256": "5733ad203d2c553685311f62ef89bc6edee7d5984ad814f35d41793da9de813a"
+    },
+    {
+      "path": "README-SHARE.zh-CN.md",
+      "source": "GENERATED",
+      "bytes": 2147,
+      "sha256": "b3278688a770bf10f6e96cb1209069afcf58872842ea0953853abcb67cc5b1c5",
+      "sanitized": true,
+      "sourceSha256": null
+    }
+  ],
+  "sanitizedFiles": [
+    "plugins/dsh-wechat-bridge/lib/bridge.js",
+    "plugins/dsh-wechat-bridge/test/bridge.test.js",
+    "plugins/dsh-wechat-bridge/test/config.test.js",
+    "plugins/dsh-wechat-bridge/test/conversations.test.js",
+    "plugins/dsh-wechat-bridge/tests/python/test_conversations.py",
+    "plugins/dsh-wechat-bridge/tests/python/test_db_reader.py",
+    "plugins/dsh-wechat-bridge/tests/python/test_process.py",
+    "plugins/dsh-wechat-bridge/tests/python/test_runtime.py",
+    "plugins/dsh-wechat-bridge/tests/python/test_uia_send.py",
+    "plugins/dsh-wechat-bridge/tests/python/test_worker.py",
+    "_work/dsh-model-session/staged-plugin/lib/bridge.js",
+    "_work/dsh-model-session/staged-plugin/lib/ui.js",
+    "_work/dsh-model-session/staged-plugin/test/bridge.test.js",
+    "_work/dsh-model-session/staged-plugin/test/config.test.js",
+    "_work/dsh-model-session/staged-plugin/test/conversations.test.js",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_conversations.py",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_db_reader.py",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_process.py",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_runtime.py",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_uia_send.py",
+    "_work/dsh-model-session/staged-plugin/tests/python/test_worker.py",
+    "personas/persona_dafeiyu.md",
+    "_work/dsh-model-session/DELIVERY.md",
+    "_work/dsh-model-session/dsh-model-session.patch",
+    "_work/20261021-start-lock/RESULTS.md",
+    "_work/20261021-console/RESULTS.md",
+    "_work/20261021-model-recovery/RESULTS.md",
+    "_work/20261021-autonomous-memory/RESULTS.md",
+    "_work/20261021-focus-lifetime/RESULTS.md",
+    "handoff/2026-10-21/HANDOFF.zh-CN.md",
+    "handoff/2026-10-21/sessions/01-方案选择与初版实现.jsonl",
+    "handoff/2026-10-21/sessions/01-方案选择与初版实现.md",
+    "handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.jsonl",
+    "handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.jsonl",
+    "handoff/2026-10-21/sessions/04-群监听锁屏与记忆修复.md",
+    "handoff/2026-10-21/checksums.sha256",
+    "handoff/2026-10-21/manifest.json",
+    "plugins/dsh-wechat-bridge/README.md",
+    "_work/dsh-model-session/staged-plugin/README.md",
+    "Start-DshBot.ps1",
+    "handoff/2026-10-21/evidence/project-snapshot.json",
+    "handoff/2026-10-21/PACKING.md",
+    "handoff/2026-10-21/sessions/03-独立窗口与DSH模型展示.md",
+    "handoff/2026-10-21/sessions/05-插件架构边界评估.jsonl",
+    "handoff/2026-10-21/sessions/05-插件架构边界评估.md",
+    "handoff/2026-10-21/sessions/06-本次归档与交接要求.jsonl",
+    "handoff/2026-10-21/sessions/06-本次归档与交接要求.md",
+    "README-SHARE.zh-CN.md"
+  ],
+  "excluded": [
+    "home/",
+    "agents-home/",
+    "workspace/",
+    "logs/",
+    "config/wechat-bot.json",
+    "runtime/node_modules/",
+    "python virtualenv",
+    ".pnpm-store/",
+    "_work backups/private outputs/screenshots/install profiles/old packages"
+  ],
+  "decisions": {
+    "windowVisibilityToggle": "待重构版实现，当前未实现、未部署"
+  },
+  "note": "副本替换已知真实微信标识/昵称、本机用户路径和凭据；合成测试身份不属于真实账号。原项目未改动。"
+}

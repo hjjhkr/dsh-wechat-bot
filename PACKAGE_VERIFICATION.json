@@ -1,0 +1,33 @@
+{
+  "verifiedAt": "2026-10-21T13:40:23+08:00",
+  "result": "PASS",
+  "knownCredentialCandidatesChecked": 3,
+  "knownCredentialMatches": 0,
+  "realAccountIdentifiersChecked": 3,
+  "realAccountIdentifierMatches": 0,
+  "sourceManifestFilesChecked": 163,
+  "unexpectedBinaryFiles": 0,
+  "errors": [],
+  "verificationScope": "白名单选文件、内存中已知凭据/真实账号值匹配、密钥模式、逐文件哈希、ZIP CRC与解压内容核验；未操作服务/发送微信",
+  "limits": [
+    "保留合成测试身份、参与者昵称及项目技术背景；不声称完全匿名",
+    "本次未重跑插件行为测试；历史测试结果见交接证据",
+    "只含源码/依赖清单与模板，未做接收方环境运行验证",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。",
+    "语法检查不是接收方安装或真实微信收发验证；未重跑插件完整行为测试。"
+  ],
+  "syntaxChecks": {
+    "javascriptNodeCheck": 53,
+    "pythonAstParse": 58,
+    "powershellParser": 2,
+    "jsonParse": 12,
+    "result": "PASS"
+  },
+  "privateUserPathMatches": 0,
+  "identifiedPrivateNicknameMatches": 0,
+  "localRootPathRedaction": "项目、旧实验、办公DSH、DSH工作区与Harness绝对根路径使用占位符；通用Windows/Node安装路径与合成测试路径保留。"
+}
