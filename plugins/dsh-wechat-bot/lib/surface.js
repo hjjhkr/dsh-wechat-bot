@@ -123,7 +123,7 @@ export function registerTool(ctx, app) {
     parameters: {
       action: { type: 'string', required: true, enum: ['setup', 'status', 'chats', 'watch', 'mode', 'log', 'eval'] },
       chat: { type: 'string', description: 'watch：群名称或 id' },
-      mode: { type: 'string', enum: Object.keys(MODES), description: 'mode：free 自由发言 / mention 只回复@和点名 / silent 不说话' },
+      mode: { type: 'string', enum: Object.keys(MODES), description: 'mode：free 每批都给模型 / infer 像是在跟它说话才给模型 / at 只回@ / silent 不说话' },
       query: { type: 'string', description: 'chats：按名称过滤' },
       efforts: { type: 'array', items: { type: 'string', enum: EFFORTS }, description: 'eval：要比较的思考强度，默认用当前配置' },
     },

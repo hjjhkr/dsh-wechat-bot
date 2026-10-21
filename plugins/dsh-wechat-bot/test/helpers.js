@@ -39,7 +39,7 @@ export function scriptedModel(reply) {
   return { think, calls }
 }
 
-export const FAST = { quietMs: 40, maxWaitMs: 300, typingDelay: false, retryDelayMs: 10, idleMinutes: 0, maxTurnsPerMinute: 10_000 }
+export const FAST = { mode: 'free', quietMs: 40, maxWaitMs: 300, typingDelay: false, retryDelayMs: 10, idleMinutes: 0, maxTurnsPerMinute: 10_000 }
 
 export async function startBot(t, { reply, settings = {}, simulator: simOptions, dir, persona = '你是小鲸鱼。' } = {}) {
   const dataDir = dir ?? await mkdtemp(join(tmpdir(), 'wechat-bot-test-'))

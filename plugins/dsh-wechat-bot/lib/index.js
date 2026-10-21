@@ -24,7 +24,7 @@ export const Config = z.object({
   aliases: z.array(z.string()).default(['小鲸鱼', 'DeepSeek']).description('Names people call the bot besides its WeChat name.'),
   stickers: z.dict(z.string()).default({}).description('Sticker name → image path the model may send.'),
   behavior: z.object({
-    mode: z.union(['free', 'mention', 'silent']).default('free'),
+    mode: z.union(['free', 'infer', 'at', 'silent']).default('infer').description('free: model sees every batch; infer: only batches that seem addressed to the bot; at: only @/quote; silent: never speaks.'),
     quietMs: z.natural().default(2000),
     maxWaitMs: z.natural().default(8000),
     maxMessages: z.natural().min(1).default(20),
@@ -36,6 +36,7 @@ export const Config = z.object({
   }).default({}),
   guard: z.object({
     maxTurnsPerMinute: z.natural().min(1).default(8).description('Model calls per minute; extra batches wait and merge.'),
+    commandsPerMinute: z.natural().min(1).default(6).description('Chat commands per member per minute.'),
     modelTimeoutSeconds: z.natural().min(5).default(90),
     maxTextChars: z.natural().min(100).default(2000).description('Longer incoming messages are truncated.'),
     breakerThreshold: z.natural().min(1).default(3).description('Consecutive model failures before pausing.'),

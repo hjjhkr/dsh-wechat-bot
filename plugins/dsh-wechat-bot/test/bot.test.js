@@ -247,13 +247,13 @@ test('the configured mode applies until someone explicitly changes it', async t 
   await until(() => first.model.calls.length === 1)
   await first.bot.dispose()
 
-  const second = await startBot(t, { dir, settings: { mode: 'mention' } })
+  const second = await startBot(t, { dir, settings: { mode: 'at' } })
   await until(() => second.bot.runner)
-  assert.equal(second.bot.runner.mode, 'mention', 'config change takes effect')
+  assert.equal(second.bot.runner.mode, 'at', 'config change takes effect')
   second.bot.setMode('silent')
   await second.bot.dispose()
 
-  const third = await startBot(t, { dir, settings: { mode: 'mention' } })
+  const third = await startBot(t, { dir, settings: { mode: 'at' } })
   await until(() => third.bot.runner)
   assert.equal(third.bot.runner.mode, 'silent', 'an explicit choice survives restarts')
 })
@@ -282,9 +282,9 @@ test('/mute during a multi-part reply stops the remaining parts', async t => {
   say(env, 'wxid_carol', '/mute 10')
   await until(() => logTypes(env).includes('mute'))
   await env.simulator.handlers()['sim/status']({ canSend: true })
-  await until(() => sent(env).includes('好，安静 10 分钟'))
+  await until(() => sent(env).includes('已执行：安静 10 分钟'))
   await sleep(60)
-  assert.deepEqual(sent(env), ['一', '好，安静 10 分钟'])
+  assert.deepEqual(sent(env), ['一', '已执行：安静 10 分钟'])
 })
 
 test('an adapter that reports it cannot send is believed after login', async t => {

@@ -7,8 +7,15 @@
 // At most `maxMessages` messages ever wait: under a flood the oldest are
 // handed to `onOverflow` (they stay in the conversation as context) so the
 // bot always answers the newest messages and memory stays bounded.
+//
+// Urgent messages (commands handed to the model) skip the line: they form
+// their own batch as soon as the consumer is free, and cut short any defer.
+const URGENT_LIMIT = 5
+
 export class Batcher {
   #pending = []
+  #urgent = []
+  #deferred = false
   #arrived = 0
   #firstAt = 0
   #quietTimer
@@ -30,6 +37,10 @@ export class Batcher {
     return this.#busy
   }
 
+  get urgentSize() {
+    return this.#urgent.length
+  }
+
   // Messages pushed since the consumer last took a batch (excludes leftover backlog).
   get arrived() {
     return this.#arrived
@@ -43,6 +54,14 @@ export class Batcher {
     if (this.#busy) return
     if (this.#full()) return this.#flush()
     this.#arm()
+  }
+
+  pushUrgent(message, { front = false } = {}) {
+    if (front) this.#urgent.unshift(message)
+    else this.#urgent.push(message)
+    while (this.#urgent.length > URGENT_LIMIT) this.onOverflow(this.#urgent.shift())
+    if (this.#deferred) return this.release()
+    if (!this.#busy) this.#flush()
   }
 
   // Put an unprocessed batch back in front (e.g. superseded by newer messages).
@@ -63,6 +82,8 @@ export class Batcher {
   release() {
     clearTimeout(this.#deferTimer)
     this.#busy = false
+    this.#deferred = false
+    if (this.#urgent.length) return this.#flush()
     if (!this.#pending.length) return
     if (this.#full()) return this.#flush()
     this.#arm()
@@ -72,6 +93,7 @@ export class Batcher {
   defer(ms) {
     clearTimeout(this.#deferTimer)
     this.#busy = true
+    this.#deferred = true
     this.#deferTimer = setTimeout(() => this.release(), ms)
     this.#deferTimer.unref?.()
   }
@@ -80,6 +102,7 @@ export class Batcher {
     this.#disarm()
     clearTimeout(this.#deferTimer)
     this.#pending = []
+    this.#urgent = []
   }
 
   #cap() {
@@ -122,8 +145,13 @@ export class Batcher {
   }
 
   #flush() {
+    if (this.#busy) return
+    if (this.#urgent.length) {
+      this.#busy = true
+      return this.onBatch(this.#urgent.splice(0))
+    }
     this.#disarm()
-    if (this.#busy || !this.#pending.length) return
+    if (!this.#pending.length) return
     this.#busy = true
     this.onBatch(this.#take())
   }

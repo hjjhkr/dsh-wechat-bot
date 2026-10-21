@@ -60,6 +60,7 @@ export class WeChatBotApp {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
         maxTurnsPerMinute: config.guard.maxTurnsPerMinute,
+        commandsPerMinute: config.guard.commandsPerMinute,
         modelTimeoutMs: config.guard.modelTimeoutSeconds * 1000,
         maxTextChars: config.guard.maxTextChars,
         breakerThreshold: config.guard.breakerThreshold,

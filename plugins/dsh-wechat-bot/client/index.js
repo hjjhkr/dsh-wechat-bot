@@ -69,7 +69,7 @@ window.__ModuleLoader__.load({
 .wxb-error{color:var(--dsw-alias-state-error-primary)}
 `
 
-    const MODES = [['free', '自由发言'], ['mention', '只回@'], ['silent', '静音']]
+    const MODES = [['free', '自由'], ['infer', '推断'], ['at', '只回@'], ['silent', '静音']]
     const CONNECTION = { connected: ['ok', '已连接'], degraded: ['warn', '不稳定'], disconnected: ['err', '未连接'], adapter_down: ['err', '适配器未运行'], starting: ['warn', '启动中'] }
 
     function Status({ state }) {

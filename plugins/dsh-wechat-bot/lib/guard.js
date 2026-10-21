@@ -67,6 +67,41 @@ export class CircuitBreaker {
   }
 }
 
+// Runs async jobs strictly one at a time; urgent jobs (command replies) go ahead
+// of every waiting normal job (reply parts), but never interrupt a running one.
+export class SendLane {
+  #queue = []
+  #busy = false
+
+  run(job, { urgent = false } = {}) {
+    return new Promise((resolve, reject) => {
+      const entry = { job, urgent, resolve, reject }
+      const firstNormal = urgent ? this.#queue.findIndex(e => !e.urgent) : -1
+      if (firstNormal >= 0) this.#queue.splice(firstNormal, 0, entry)
+      else this.#queue.push(entry)
+      this.#pump()
+    })
+  }
+
+  get waiting() {
+    return this.#queue.length
+  }
+
+  async #pump() {
+    if (this.#busy || !this.#queue.length) return
+    const { job, resolve, reject } = this.#queue.shift()
+    this.#busy = true
+    try {
+      resolve(await job())
+    } catch (error) {
+      reject(error)
+    } finally {
+      this.#busy = false
+      this.#pump()
+    }
+  }
+}
+
 export class TimeoutError extends Error {
   constructor(ms) {
     super(`timed out after ${ms}ms`)

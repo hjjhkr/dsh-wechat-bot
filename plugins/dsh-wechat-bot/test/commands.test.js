@@ -26,23 +26,114 @@ test('command syntax: leading @-mentions, full-width slash and Chinese names are
   for (const text of ['看这个 /mode', '/usr/bin/env', 'http://x.com', '/', '//']) assert.equal(parseCommand(text), null, text)
 })
 
-test('/mode mention: only addressed batches reach the model; /mode free restores', async t => {
-  const env = await watching(t, { reply: () => ({ reply: ['嗯'] }) })
-  say(env, 'wxid_carol', '/mode mention')
-  await until(() => sent(env).some(s => s.includes('已切换为 mention')))
-  say(env, 'wxid_alice', '今天好热')
-  await until(() => logOf(env).some(e => e.type === 'skipped' && e.reason === 'mention_only'))
-  assert.equal(env.model.calls.length, 0)
-  say(env, 'wxid_alice', '@小鲸鱼 你热吗', { mentions: ['wxid_bot'] })
+test('modes decide which batches reach the model: free / infer / at / silent', async t => {
+  const env = await watching(t, { reply: () => ({ reply: [] }) })
+  // One batch per mode: plain chatter, a name mention in passing, a name call, an @.
+  const probe = async (mode, expected) => {
+    say(env, 'wxid_carol', `/mode ${mode}`)
+    await until(() => env.bot.runner.mode === (mode === 'at-only' ? 'at' : mode))
+    const before = env.model.calls.length
+    for (const [text, extra] of [['今天好热', {}], ['deepseek出新模型了', {}], ['小鲸鱼，你热吗', {}], ['在吗', { mentions: ['wxid_bot'] }]]) {
+      say(env, 'wxid_alice', text, extra)
+      await sleep(80)
+    }
+    await sleep(80)
+    const seen = [...new Set(env.model.calls.slice(before).flatMap(c => c.input.new.map(m => m.text)))]
+    assert.deepEqual(seen, expected, mode)
+  }
+  await probe('free', ['今天好热', 'deepseek出新模型了', '小鲸鱼，你热吗', '在吗'])
+  await probe('infer', ['deepseek出新模型了', '小鲸鱼，你热吗', '在吗'])
+  await probe('at-only', ['在吗'])
+  await probe('silent', [])
+  assert.match(sent(env).at(-1), /^已执行：切换为 silent/)
+  assert.equal(env.bot.view().chat.mode, 'silent')
+})
+
+test('a command is answered at once, ahead of a reply that is still being typed out', async t => {
+  const env = await watching(t, { settings: { typingDelay: true }, reply: () => ({ reply: ['第一句', '第二句', '第三句'] }) })
+  say(env, 'wxid_alice', '小鲸鱼讲个故事')
+  await until(() => sent(env).includes('第一句'))
+  say(env, 'wxid_bob', '/status')
+  await until(() => sent(env).includes('第三句'), { timeoutMs: 8000 })
+  const order = sent(env)
+  assert.ok(order.findIndex(s => s.startsWith('模式')) < order.indexOf('第三句'), `status jumped the queue: ${order}`)
+})
+
+test('a state-changing command interrupts the answer still being thought out', async t => {
+  const aborted = []
+  const env = await watching(t, {
+    reply: async (input, call) => {
+      if (input.new.some(m => m.text === '慢慢想')) {
+        await new Promise((resolve, reject) => {
+          setTimeout(resolve, 1000)
+          call.signal.addEventListener('abort', () => { aborted.push(true); reject(call.signal.reason) }, { once: true })
+        })
+      }
+      return { reply: ['想好了'] }
+    },
+  })
+  say(env, 'wxid_alice', '慢慢想')
   await until(() => env.model.calls.length === 1)
-  assert.ok(env.model.calls[0].input.recent.some(m => m.text === '今天好热'), 'skipped messages stay as context')
-  assert.equal(env.bot.view().chat.mode, 'mention')
+  const t0 = Date.now()
+  say(env, 'wxid_carol', '/mute 5')
+  await until(() => sent(env).includes('已执行：安静 5 分钟'))
+  assert.ok(Date.now() - t0 < 500, 'acknowledged without waiting for the model')
+  await until(() => aborted.length === 1, { what: 'model call aborted' })
+  await sleep(100)
+  assert.ok(!sent(env).includes('想好了'), 'the stale answer never went out')
+  assert.ok(logOf(env).some(e => e.type === 'interrupted'))
+  assert.ok(logOf(env).some(e => e.type === 'skipped' && e.reason === 'muted'), 'the batch was reconsidered under the new state')
+})
+
+test('/forget interrupts an answer that would re-learn what was just forgotten', async t => {
+  const env = await watching(t, {
+    reply: async (input, call) => {
+      if (input.new.some(m => m.text.includes('杭州'))) await sleep(300)
+      call.signal.throwIfAborted()
+      const m = input.new.find(m => m.text.includes('杭州'))
+      return { reply: [], memory: m ? [{ who: m.from.id, topic: '城市', note: '住在杭州', evidence: m.id }] : [] }
+    },
+  })
+  say(env, 'wxid_alice', '我住在杭州')
+  await until(() => env.model.calls.length === 1)
+  say(env, 'wxid_alice', '/forget all')
+  await until(() => sent(env).some(s => s.includes('已执行') || s.includes('没有叫')))
+  await until(() => env.model.calls.length >= 2, { what: 'batch reconsidered' })
+  await until(() => env.bot.runner.status === 'idle')
+  // The reconsidered batch may legitimately learn it again from the original message;
+  // what must never happen is the stale, pre-forget decision landing after the forget.
+  assert.ok(logOf(env).some(e => e.type === 'interrupted'))
+})
+
+test('/ask jumps ahead of a rate-limited queue and is acknowledged first', async t => {
+  const env = await watching(t, {
+    settings: { maxTurnsPerMinute: 1, rateWindowMs: 60_000 },
+    reply: input => input.new.some(m => m.command) ? { reply: ['认真的回答'] } : { reply: [] },
+  })
+  say(env, 'wxid_alice', '随便聊聊')
+  await until(() => env.model.calls.length === 1)
+  say(env, 'wxid_bob', '还在聊')
+  await until(() => logOf(env).some(e => e.type === 'deferred'), { what: 'rate limited' })
+  say(env, 'wxid_carol', '/ask 地球为什么是圆的')
+  await until(() => sent(env).includes('认真的回答'))
+  assert.deepEqual(sent(env), ['收到，想一下', '认真的回答'])
+  assert.equal(env.model.calls.at(-1).input.new[0].text, '地球为什么是圆的')
+})
+
+test('one member spamming commands is throttled; others are not', async t => {
+  const env = await watching(t, { settings: { commandsPerMinute: 3 } })
+  for (let i = 0; i < 10; i++) say(env, 'wxid_alice', '/status')
+  say(env, 'wxid_bob', '/status')
+  await until(() => sent(env).length === 4)
+  await sleep(100)
+  assert.equal(sent(env).length, 4)
+  assert.ok(logOf(env).some(e => e.type === 'command_throttled'))
 })
 
 test('/mute silences the bot, but /ask still gets a deliberate answer', async t => {
   const env = await watching(t, { reply: input => ({ reply: [input.new.some(m => m.command) ? '认真回答' : '闲聊'] }) })
   say(env, 'wxid_carol', '/mute 5')
-  await until(() => sent(env).includes('好，安静 5 分钟'))
+  await until(() => sent(env).includes('已执行：安静 5 分钟'))
   say(env, 'wxid_alice', '小鲸鱼 在吗')
   await until(() => logOf(env).some(e => e.reason === 'muted'))
   say(env, 'wxid_alice', '/ask 为什么天是蓝的')
@@ -53,7 +144,7 @@ test('/mute silences the bot, but /ask still gets a deliberate answer', async t 
   assert.match(call.input.new.at(-1).command.instruction, /认真提问/)
   assert.equal(env.model.calls.length, 1)
   say(env, 'wxid_carol', '/unmute')
-  await until(() => sent(env).includes('我回来了'))
+  await until(() => sent(env).includes('已执行：解除禁言'))
   assert.equal(env.bot.runner.muted, false)
 })
 

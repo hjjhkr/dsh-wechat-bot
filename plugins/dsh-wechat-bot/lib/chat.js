@@ -3,13 +3,13 @@ import { addressOf, nameMatchers } from './addressing.js'
 import { Batcher } from './batcher.js'
 import { CommandRegistry, MODES, parseCommand } from './commands.js'
 import { DecisionError, parseDecision } from './decision.js'
-import { CircuitBreaker, RateWindow, withDeadline } from './guard.js'
+import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
 import { MemoryBook } from './memory.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
 
 export const chatDefaults = Object.freeze({
-  mode: 'free',
+  mode: 'infer',
   quietMs: 2000,
   maxWaitMs: 8000,
   maxMessages: 20,
@@ -31,19 +31,33 @@ export const chatDefaults = Object.freeze({
   breakerThreshold: 3,         // consecutive model failures before pausing model calls
   breakerBaseMs: 30_000,       // first pause; doubles on each repeated trip
   breakerMaxMs: 10 * 60_000,
+  commandsPerMinute: 6,        // per member, so commands cannot be used to spam the group
+  echoWindowMs: 2 * 60_000,    // how long a sent text may take to come back from the adapter
 })
 
 const LOG_LIMIT = 300
 const SEEN_LIMIT = 1000
 const NOTICE_INTERVAL_MS = 5000
+const COMMAND_SENDERS_LIMIT = 500
+// Signals that count as "@" for the `at` mode.
+const AT_REASONS = new Set(['at_you', 'quotes_you', 'direct_chat'])
 
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 const today = () => new Date().toLocaleDateString('sv')
 
-// One watched chat. Messages are processed strictly in order: collect a batch,
-// ask the model once, deliver the reply, then take the next batch.
+class Interrupted extends Error {
+  constructor(reason) {
+    super(`interrupted by ${reason}`)
+    this.name = 'Interrupted'
+  }
+}
+
+// The one group the bot serves. Messages are processed strictly in order:
+// collect a batch, ask the model once, deliver the reply, take the next batch.
+// Commands are the exception: they run on arrival, their output jumps the send
+// queue, and state-changing ones interrupt an answer still being thought out.
 export class ChatRunner {
   /**
    * @param {object} o
@@ -76,15 +90,19 @@ export class ChatRunner {
     this.stats = state.stats?.date === today() ? state.stats : { date: today(), batches: 0, sent: 0 }
     this.seen = new Set(this.transcript.map(m => m.id))
     this.sentIds = new Set()
+    this.echoes = []
     this.status = 'idle'
     this.busySince = 0
+    this.turn = null
     this.supersedes = new WeakMap()
     this.abort = new AbortController()
+    this.lane = new SendLane()
     this.rate = new RateWindow(this.settings.maxTurnsPerMinute, this.settings.rateWindowMs)
     this.breaker = new CircuitBreaker({
       threshold: this.settings.breakerThreshold, baseMs: this.settings.breakerBaseMs, maxMs: this.settings.breakerMaxMs,
     })
-    this.counters = { received: 0, overflow: 0, deferred: 0, modelErrors: 0, sendErrors: 0, internalErrors: 0 }
+    this.commandRates = new Map()
+    this.counters = { received: 0, overflow: 0, deferred: 0, interrupted: 0, modelErrors: 0, sendErrors: 0, internalErrors: 0 }
     this.notices = {}
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     this.#scheduleIdle()
@@ -160,8 +178,10 @@ export class ChatRunner {
       message = { ...message, text: message.text.slice(0, this.settings.maxTextChars) + '…（太长，已截断）' }
     }
     if (message.fromSelf) {
-      // Echo of something we sent, or someone typing on the bot account's phone.
-      if (!this.sentIds.has(message.id)) this.#record(message)
+      // Our own reply coming back (by id, or by text when the adapter only queued it),
+      // or someone typing on the bot account's phone.
+      if (this.sentIds.has(message.id) || this.#isEcho(message)) return
+      this.#record(message)
       return
     }
     this.counters.received++
@@ -198,6 +218,15 @@ export class ChatRunner {
     this.emit('change')
   }
 
+  #isEcho(message) {
+    const now = Date.now()
+    this.echoes = this.echoes.filter(e => now - e.at < this.settings.echoWindowMs)
+    const index = this.echoes.findIndex(e => e.text === message.text)
+    if (index < 0) return false
+    this.echoes.splice(index, 1)
+    return true
+  }
+
   #write(type, data) {
     const entry = { time: Date.now(), type, ...data }
     this.log.push(entry)
@@ -226,10 +255,34 @@ export class ChatRunner {
     this.emit('status', status)
   }
 
-  // ── commands ────────────────────────────────────────────────────────────
+  // ── commands: run on arrival, reply first, interrupt stale thinking ───────
+
+  #commandAllowed(senderId) {
+    let window = this.commandRates.get(senderId)
+    if (!window) {
+      if (this.commandRates.size >= COMMAND_SENDERS_LIMIT) this.commandRates.delete(this.commandRates.keys().next().value)
+      window = new RateWindow(this.settings.commandsPerMinute, this.settings.rateWindowMs)
+      this.commandRates.set(senderId, window)
+    }
+    if (window.wait()) return false
+    window.record()
+    return true
+  }
+
+  // Aborts the model call that is still thinking; its batch is reconsidered afterwards
+  // under whatever the command changed (mode, mute, memory, context).
+  #interrupt(reason) {
+    if (this.status !== 'thinking' || !this.turn || this.turn.interrupted) return
+    this.turn.interrupted = reason
+    this.turn.controller.abort(new Interrupted(reason))
+  }
 
   async #command(message, command, parsed) {
+    if (!this.#commandAllowed(message.sender.id)) {
+      return this.#notice('command_throttled', { from: message.sender.name, name: command.name })
+    }
     this.#write('command', { name: command.name, from: message.sender.name, text: parsed.text })
+    if (command.interrupts) this.#interrupt(`/${command.name}`)
     let result
     try {
       result = await command.run({
@@ -259,14 +312,15 @@ export class ChatRunner {
     if (result?.reply) return this.#say(result.reply)
     if (result?.forward) {
       const { text = parsed.text, instruction, effort } = result.forward
-      this.batcher.push({ ...message, text, command: { name: command.name, instruction, effort } })
+      const ack = command.ack && this.#say(command.ack)
+      this.batcher.pushUrgent({ ...message, text, command: { name: command.name, instruction, effort } })
+      await ack
     }
   }
 
-  // Direct, model-free reply (command output). Queued behind nothing: it is short and immediate.
+  // Command output: sent ahead of any reply parts still waiting to go out.
   async #say(text) {
-    const clientId = `say:${randomUUID()}`
-    const result = await this.#sendOne({ kind: 'text', text }, clientId, { started: Date.now() })
+    const result = await this.#sendOne({ kind: 'text', text }, `say:${randomUUID()}`, { started: Date.now(), urgent: true })
     if (result) this.#sent(result.messageId, { kind: 'text', text })
   }
 
@@ -303,16 +357,20 @@ export class ChatRunner {
   decide(batch, event) {
     const address = this.#addresses(batch)
     const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
-    return this.#decide({ batch, address, event, mustReply })
+    return this.#decide({ batch, address, event, mustReply, signal: this.abort.signal })
   }
 
-  // Why this batch should not reach the model at all, if it shouldn't.
+  // Why this batch should not reach the model at all (the messages stay as context).
   #skipReason(batch, address) {
     if (batch.some(m => m.command)) return null
     if (this.muted) return 'muted'
-    if (this.mode === 'silent') return 'silent_mode'
-    if (this.mode === 'mention' && !batch.some(m => address.get(m.id).addressed === 'you')) return 'mention_only'
-    return null
+    const signals = batch.map(m => address.get(m.id))
+    switch (this.mode) {
+      case 'silent': return 'silent_mode'
+      case 'at': return signals.some(a => a.reasons.some(r => AT_REASONS.has(r))) ? null : 'at_only'
+      case 'infer': return signals.some(a => a.addressed === 'you' || a.addressed === 'maybe') ? null : 'not_for_me'
+      default: return null
+    }
   }
 
   async #run(batch, event) {
@@ -330,26 +388,27 @@ export class ChatRunner {
     }
   }
 
-  // How long model calls must wait (rate limit or open breaker), in ms.
-  #gate() {
-    return Math.max(this.rate.wait(), this.breaker.wait())
-  }
-
   // Thinking does not wait for the adapter to be able to send (e.g. a locked screen):
   // the reply waits in #sendOne instead, and is dropped if it goes stale meanwhile.
   // Returns a delay in ms when the batch was put back to wait for the rate limit / breaker.
   async #turn(batch, event) {
     const started = Date.now()
+    const urgent = batch.some(m => m.command)
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
     if (skip) return void this.#write('skipped', { reason: skip, count: batch.length })
-    const wait = this.#gate()
-    if (wait) {
-      if (!batch.length) return
-      this.counters.deferred++
-      this.batcher.requeue(batch)
-      this.#notice('deferred', { reason: this.breaker.wait() ? 'breaker_open' : 'rate_limited', waitMs: wait })
-      return wait
+    if (urgent) {
+      // Explicit requests skip the rate limit, but an open breaker means the model is down.
+      if (this.breaker.wait()) return void this.#say('模型暂时不可用，稍后再试')
+    } else {
+      const wait = Math.max(this.rate.wait(), this.breaker.wait())
+      if (wait) {
+        if (!batch.length) return
+        this.counters.deferred++
+        this.batcher.requeue(batch)
+        this.#notice('deferred', { reason: this.breaker.wait() ? 'breaker_open' : 'rate_limited', waitMs: wait })
+        return wait
+      }
     }
     if (batch.length) {
       this.#write('batch', { count: batch.length, addressed: Object.fromEntries([...address].map(([id, a]) => [id, a.addressed])) })
@@ -358,16 +417,20 @@ export class ChatRunner {
     }
     this.#setStatus('thinking')
     const mustReply = batch.some(m => address.get(m.id).addressed === 'you')
+    const turn = this.turn = { controller: new AbortController(), interrupted: null }
     let decision
     try {
-      decision = await this.#decide({ batch, address, event, mustReply })
+      decision = await this.#decide({ batch, address, event, mustReply, signal: AbortSignal.any([this.abort.signal, turn.controller.signal]) })
       this.breaker.success()
     } catch (error) {
       if (this.disposed) return
+      if (turn.interrupted) return this.#reconsider(batch, turn.interrupted)
       this.counters.modelErrors++
       const coolDown = this.breaker.failure()
       if (coolDown) this.#write('breaker_open', { coolDownMs: coolDown, reason: error.code ?? error.message })
       throw error
+    } finally {
+      this.turn = null
     }
     if (this.disposed) return
 
@@ -375,13 +438,13 @@ export class ChatRunner {
     const superseded = this.supersedes.get(batch[0]) ?? 0
     // Re-asking only helps if the newer messages can join this batch.
     const canGrow = batch.length < this.settings.maxMessages
-    if (newer && (event || (canGrow && superseded < this.settings.maxSupersede))) {
+    if (!urgent && newer && (event || (canGrow && superseded < this.settings.maxSupersede))) {
       // People kept talking while we were thinking; answer the whole conversation instead.
       if (batch.length) {
         this.supersedes.set(batch[0], superseded + 1)
         this.batcher.requeue(batch)
       }
-      return this.#write('superseded', { newer, discarded: decision.reply.length })
+      return void this.#write('superseded', { newer, discarded: decision.reply.length })
     }
 
     if (batch.length) {
@@ -390,13 +453,22 @@ export class ChatRunner {
     }
     if (!decision.reply.length) {
       this.#write('silent', {})
-      return this.emit('change')
+      return void this.emit('change')
     }
     const target = batch.find(m => m.id === decision.to)
     await this.#deliver(decision.reply, { batch, target, event, started })
   }
 
-  async #decide({ batch, address, event, mustReply }) {
+  // An interrupted batch goes back where it came from; the next turn sees the new state.
+  #reconsider(batch, reason) {
+    this.counters.interrupted++
+    this.#write('interrupted', { reason, count: batch.length })
+    const commands = batch.filter(m => m.command)
+    this.batcher.requeue(batch.filter(m => !m.command))
+    for (const message of commands.reverse()) this.batcher.pushUrgent(message, { front: true })
+  }
+
+  async #decide({ batch, address, event, mustReply, signal }) {
     const settings = this.settings
     const stickers = Object.keys(settings.stickers ?? {})
     const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers })
@@ -411,8 +483,8 @@ export class ChatRunner {
     for (;;) {
       this.rate.record()
       const output = await withDeadline(
-        signal => this.think({ chat: this.chat, system, messages, readable, effort, signal }),
-        settings.modelTimeoutMs, this.abort.signal)
+        callSignal => this.think({ chat: this.chat, system, messages, readable, effort, signal: callSignal }),
+        settings.modelTimeoutMs, signal)
       let problem
       try {
         const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers })
@@ -458,21 +530,28 @@ export class ChatRunner {
   #sent(messageId, part) {
     this.sentIds.add(messageId)
     this.stats.sent++
+    const text = part.kind === 'sticker' ? part.name : part.text
+    if (part.kind === 'text') this.echoes.push({ text, at: Date.now() })
     // The adapter's echo of this message may already have arrived and been recorded.
     if (!this.seen.has(messageId)) {
       this.#remember(messageId)
       this.#record({
         id: messageId, chatId: this.chat.id, time: Date.now(), kind: part.kind, fromSelf: true,
-        text: part.kind === 'sticker' ? part.name : part.text, sender: this.account(), mentions: [],
+        text, sender: this.account(), mentions: [],
       })
     }
     this.#write('sent', { part, messageId })
   }
 
+  // All sends go through one lane, so command output (urgent) overtakes reply parts.
+  #sendOne(content, clientId, { urgent = false, ...options }) {
+    return this.lane.run(() => this.#sendNow(content, clientId, options), { urgent })
+  }
+
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
   // it is stale, retries definite failures, and never repeats an uncertain send.
   // `blocked()` may return a reason to give up (checked again after every wait).
-  async #sendOne(content, clientId, { started, blocked = () => null }) {
+  async #sendNow(content, clientId, { started, blocked = () => null }) {
     let failures = 0
     for (;;) {
       if (this.disposed) return null
@@ -480,7 +559,11 @@ export class ChatRunner {
         const previous = this.status
         this.#setStatus('waiting')
         this.#write('waiting', { reason: 'adapter_cannot_send' })
-        await this.link.whenCanSend(this.abort.signal)
+        try {
+          await this.link.whenCanSend(this.abort.signal)
+        } catch {
+          return null
+        }
         this.#setStatus(previous)
         if (this.disposed) return null
       }
