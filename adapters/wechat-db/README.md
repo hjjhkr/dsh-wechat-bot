@@ -1,12 +1,13 @@
 # wechat-db 适配器
 
-按 [适配器协议 v1](../../docs/protocol.md) 工作的微信适配器：**收消息读微信本地数据库，发消息只输出内容 JSON**。
+按 [适配器协议 v1](../../docs/protocol.md) 工作的微信适配器：**收消息读微信本地数据库，默认发消息只输出内容 JSON；可显式接入旧隐藏桌面 worker，并通过已选独立窗口发送文字**。
 
 | 方向 | 做法 | 状态 |
 | --- | --- | --- |
-| 收 | 轮询 `db_storage/message/message_N.db` 里所服务群的 `Msg_<md5>` 表，解析成协议消息推给插件 | 已实现；在同结构测试库上验证，**真实库待登录小号后验证** |
+| 收 | 轮询 `db_storage/message/message_N.db` 里所服务会话的 `Msg_<md5>` 表，解析成协议消息推给插件 | 初号机真实加密库与浪味仙私聊已验证；△群文字收件、命令与真实模型回复已验证 |
 | 发 | 把要发的内容写成一行 JSON，追加到发件箱文件（默认 `~/.dsh/wechat-bot/wechat-outbox.jsonl`） | 已实现 |
-| 把发件箱里的 JSON 真正输入微信 | — | **未实现，不在本适配器范围内** |
+| 真正输入微信 | 可选 `--sender-config`；固定主窗或 `detachedWindow:true` 下使用已选独立窗口，数据库出站核对通过才返回微信消息 id | 初号机→浪味仙私聊模型回发已验证；△群独立窗单条真实文字发送及数据库回执已验证；不消费旧发件箱 |
+| 原生独立窗口 | 可选 `detachedWindow:true`，选择会话后双击打开或复用窗口，并把发送路由到已准备的目标独立窗口 | 单活动会话已接通；不包含多会话并行发送调度 |
 | 窗口显隐 | — | **未实现**（不声明 `window` 能力，控制台不显示开关） |
 
 ## 能读出什么
@@ -40,12 +41,15 @@ python -u main.py --plain path/to/db_storage --self wxid_bot   # 读未加密的
 | `--data-root` | 微信数据根目录，默认 `~/Documents/xwechat_files` |
 | `--account` | 账号目录名（如 `wxid_xxx_c53e`）；不填选最近有消息写入的那个 |
 | `--self` | 小号 wxid；不填从账号目录名去掉 `_xxxx` 后缀得到 |
-| `--keys` | 数据库密钥缓存文件 |
+| `--keys` | 当前账号专用的数据库密钥缓存文件；必须已存在且覆盖当前 contact/message 数据库 |
 | `--outbox` | 发件箱 JSON Lines 路径 |
+| `--sender-config` | 可选的旧隐藏桌面发送配置（下节）；启用真实文字发送，与 `--outbox` 互斥 |
 | `--poll-ms` | 轮询间隔，默认 1000 |
 | `--names` | JSON 文件 `{ "群id": "显示名" }`，覆盖微信里的群名/备注 |
 
 在 DSH 插件里使用（`cordis.patch.yml`）：
+
+真实多账号环境应显式指定相互匹配的 `--account`、`--self` 与该账号已有的 `--keys`，不要依赖最近活跃账号推断。`--self` 可覆盖目录推导身份，部署者必须核对二者及sender配置的botWxid一致；本次正式实例已按此配置并验证。
 
 ```yaml
 - id: wechat-bot
@@ -57,7 +61,9 @@ python -u main.py --plain path/to/db_storage --self wxid_bot   # 读未加密的
 
 ## 加密与密钥
 
-微信 4.x 的库是 SQLCipher 加密的。解密由 `vendor/db.py`（来自 wechatauto 项目，保留原许可证，未修改）完成：首次需要**微信已登录且在运行**，从微信进程里读出各个库的密钥，之后缓存在 `--keys` 指定的文件里，解密副本放在 `<dataDir>/wechat-db/cache/`，每次读取时增量合并 WAL，新消息一个轮询周期内可见。读不到库时适配器报告 `login_required`，后台每 5 秒重试，登录后自动接上。
+微信 4.x 的库是 SQLCipher 加密的。解密由 `vendor/db.py`（来自 wechatauto 项目，保留原许可证，未修改）完成，适配层 `ScopedWeChatDB` 只允许指定账号目录中的 `contact/contact.db` 和 `message/message_N.db`，并严格使用该账号的已有 `--keys` 缓存。缺少缓存、密钥不符或新分片缺少密钥都会明确失败，不扫描进程提取密钥，不写回密钥文件，也不尝试其他账号或其他缓存。
+
+解密副本放在 `<dataDir>/wechat-db/cache/`，每次读取时增量合并 WAL，新消息一个轮询周期内可见。读不到库时适配器报告 `login_required` 并保留具体原因，后台每 5 秒重试。缓存库可读只证明数据库读取条件满足；真实登录与发送还须通过发送 worker 的账号/进程绑定验收。
 
 ## 发件箱格式
 
@@ -70,6 +76,42 @@ python -u main.py --plain path/to/db_storage --self wxid_bot   # 读未加密的
 
 同一个 `clientId` 只写一次（重启后也不会重写）。`content` 与协议的 `message/send` 相同：`text` / `image{path}` / `sticker{path|stickerId}`。消费者负责按 `chatId` 把内容输入微信；输入成功后微信库里会出现这条消息，插件按正文把它认作回显，不会重复记录。
 
+## 可选：复用旧隐藏桌面文字发送
+
+适用于这台电脑已经有旧 `dsh-wechat-bridge` worker 与配套 Python 环境的情况。新插件逻辑不加载旧插件；适配器通过子进程调用旧 worker 的 `probe/send/close`。它仍依赖旧代码和该微信版本的控件门参数。默认不自动选择聊天；`detachedWindow:true` 开启下述原生窗口准备。
+
+配置 JSON 顶层：
+
+```json
+{
+  "command": "C:/absolute/path/to/old-python/python.exe",
+  "args": ["C:/absolute/path/to/dsh-wechat-bridge/python/worker.py"],
+  "worker": { "完整的旧 worker 配置": "见下文，不可直接使用本占位例子" }
+}
+```
+
+`worker` 是旧运行配置中的 worker 对象，必须保留 `dbRoot/stateRoot/keyCacheFile`、`botWxid/botName`、`targetWxid/targetName/conversationType`、`expectedExe/expectedVersion`、`mainWindowClass/mainWindowTitle`、`gateModule/gateRva/gateTimeoutSeconds/gateExpectedOriginalByte/gateEnabledByte`，并且必须有 `desktopName`。新适配器拒绝默认桌面发送。账号必须与 `--self`（或 `--account` 推导值）相同。默认固定 `targetWxid`；`detachedWindow:true` 时列出本账号已有会话，由 `watch/set` 选择单一活动目标，发送只允许该目标。
+
+在发送配置 JSON 顶层添加 `"detachedWindow": true` 后，控制台可搜索群聊或私聊，点击「选择此会话」会异步选中微信会话并双击打开原生独立窗口；已存在的同目标窗口复用。准备成功后，适配器保存该代窗口的类名、标题和 native worker 参数，后续发送使用该独立窗，不回退到主窗；准备期间暂缓发送，不移动默认桌面的鼠标或键盘焦点。原生发送器在独立窗 UIA 输入控件标签「输入」中写入并核对完整草稿，再触发「发送」，只有精确的数据库出站回执与控件门恢复都确认后才返回微信消息 id。接线没有增加额外的发送前整窗复核；既有账号/进程监视、焦点保护和控件门检查仍保留。该功能依赖 Windows、旧 worker 的只读账号校验及配套 wx4py 环境；不是新的窗口显隐协议。目前只支持单活动目标，不实现多会话并行调度。
+
+`stateRoot` 和 `keyCacheFile` 应指向新实例专用状态目录，不与运行中的旧实例共享写入。实际版本、账号、目标群、桌面与控件门参数应现场核对，不能照抄文档示例或历史值；配置含本机身份和路径，应留在本地。**不要同时运行两个实例操作同一个微信窗口。**
+
+```bash
+python -u main.py --account <账号目录> --sender-config <本地配置.json>
+```
+
+此模式只声明 `send: ["text"]`；图片、表情和非空 `mentions` 明确拒绝。调用前持久化并 `fsync` `<dataDir>/wechat-db/delivery.jsonl` 的 attempt，再进入旧发送器；只有精确出站回执和控件门恢复都通过才记为成功。已确认请求跨重启返回同一个微信 id；未完成或不确定的请求永不自动重发，后续不同 `clientId` 仅在 worker 正常关闭并确认恢复后继续。复用同一个 `clientId` 却更改账号、聊天或内容会报错。
+
+锁屏等桌面不可用时返回 `unavailable`，持续推送 `canSend:false`，恢复后推送 `true`，不影响读库和模型生成。worker 清理无法确认，或适配器异常退出留下未完成 attempt 时，会跨重启禁发新消息；需要先人工核对控件门和进程恢复，本版本没有自动解封入口。已经正常关闭 worker 的不确定结果只禁止重发那一条，不阻断其他新消息。发送日志有独占文件锁，第二个适配器不能同时使用；日志损坏会拒绝启动，保留原文件进行对账，**不要删除日志后重试**。正常 shutdown 或宿主 stdin 关闭时走旧 worker 的正常 close，不调用 force_close 或强杀。
+
+默认 outbox 与此模式是两条独立路径；已有发件箱不会被补发。下节记录当前版本的真实加密库与文字发送结果；锁屏及焦点变化仍需专项验证，离线测试不证明这些已通过。宿主若在发送中强行结束适配器，旧 worker 的清理仍依赖其 EOF 收尾与独立控件门 watchdog；该真实异常停机回收路径尚未验收，新适配器重启会因未完成 attempt 禁发，不能把它视为已自动恢复。
+
+### 2026-10-22 △ 独立窗口发送验收
+
+先使用独立验证适配器，通过选中的 △（9 人群）独立窗口完成一条修复测试文字发送。准备状态从 `canSend:false` 转为 `true`，日志记录「已打开微信独立窗口：△」；微信返回 messageId `5021905145363587369`，数据库证明中的同一条出站记录匹配目标群、本人发送者和 `fromSelf:true`，适配器以退出码 0 收尾。本机证据归档于 `dsh-clean/validation/20261022-triangle-send/send-result.json`，不随仓库分发。本次没有补发此前失败的请求。
+
+随后加载正式插件，新发 `/help` 的收件和帮助回复均经数据库复核；回执为 `126267775936878936`，正文哈希与生产发送日志一致。真实模型 `/ask` 后续分三段发送，三段逐条核对数据库目标、本人身份与正文哈希，生产journal全部confirmed；最终状态为 idle、backlog 0、模型/发送/内部错误均0。Python 测试 **134 passed**，Node 数据库→插件→发件箱端到端 **1 passed**；Node其余回归见项目README。群长期稳定性、多会话并行、媒体与锁屏仍须分别验收。
+
 ## 测试
 
 ```bash
@@ -81,4 +123,4 @@ node ../../plugins/dsh-wechat-bot/bin/check-adapter.js -- python -u main.py --pl
 插件侧还有一个端到端测试（数据库新消息 → 插件 → 模型 → 发件箱）：
 `WECHAT_DB_PYTHON=<python> node --test plugins/dsh-wechat-bot/test/wechat-db.test.js`。
 
-**尚未做的验证**：在真实账号的加密库上跑一遍（需要小号登录）。表结构来自 vendored `db.py` 对微信 4.x 的实测，测试库按同样的结构生成；真实库字段若有出入，需要在 `reader.py` 里调整。
+**验证边界**：真实加密库、初号机与浪味仙私聊的模型回发、△群文字收件、`/help`、真实模型三段回复及其数据库回执已通过。群长期稳定性、媒体、锁屏恢复、异常停机回收和多会话并行仍需分别验收。

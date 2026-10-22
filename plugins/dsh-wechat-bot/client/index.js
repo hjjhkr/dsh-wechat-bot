@@ -124,8 +124,8 @@ window.__ModuleLoader__.load({
       }
       return h('div', { className: 'wxb-card' },
         h('div', { className: 'wxb-row' },
-          h('input', { type: 'text', placeholder: '搜索群聊', value: query, onChange: e => setQuery(e.target.value) }),
-          h('button', { className: 'primary', disabled: !selected, onClick: save }, '服务这个群')),
+          h('input', { type: 'text', placeholder: '搜索会话', value: query, onChange: e => setQuery(e.target.value) }),
+          h('button', { className: 'primary', disabled: !selected, onClick: save }, '选择此会话')),
         error && h('div', { className: 'wxb-error' }, error),
         !chats ? h('div', { className: 'wxb-muted' }, '加载中…') : h('div', { className: 'wxb-list' },
           shown.map(c => h('label', { key: c.id },
@@ -200,11 +200,11 @@ window.__ModuleLoader__.load({
         state.account.state !== 'ready' && h(Login, { refresh }),
         state.capabilities?.window && h('div', { className: 'wxb-card' }, h(WindowToggle)),
         h('div', { className: 'wxb-row' },
-          h('h3', { style: { flex: 1 } }, '服务的群'),
-          state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : current ? '换一个群' : '选择群')),
+          h('h3', { style: { flex: 1 } }, '服务的会话'),
+          state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : current ? '切换会话' : '选择会话')),
         picking && h(ChatPicker, { current, onSaved: () => { setPicking(false); refresh() } }),
         current ? h(ChatLog, { key: current.id, chat: current, recoveries: state.recoveries, simulator: state.capabilities?.simulator, refresh })
-          : h('div', { className: 'wxb-card wxb-muted' }, '还没有选择要服务的群，点「选择群」。'),
+          : h('div', { className: 'wxb-card wxb-muted' }, '还没有选择要服务的会话，点「选择会话」。'),
         h('details', null, h('summary', { className: 'wxb-muted' }, '连接日志'),
           h('div', { className: 'wxb-log' }, [...state.log].reverse().map((e, i) =>
             h('div', { key: i, className: e.level === 'error' ? 'error' : '' }, `${new Date(e.time).toLocaleTimeString('zh-CN', { hour12: false })} ${e.message}`)))))

@@ -3,7 +3,7 @@
 插件本身不碰微信。所有"读消息、发消息、登录、窗口显隐"都通过一个**适配器进程**完成，插件和适配器之间只说这份协议。
 只要实现了这份协议，任何东西都可以当适配器：Windows 微信 4.x 的 UI 自动化、数据库读取、iPad 协议、Hook、甚至别的 IM。
 
-- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（协议完整的假微信）；[`adapters/wechat-db`](../adapters/wechat-db)（读微信本地数据库收消息、发消息写发件箱 JSON）
+- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（协议完整的假微信）；[`adapters/wechat-db`](../adapters/wechat-db)（读微信本地数据库收消息；默认写发件箱，可选旧 worker 同步发送文字）
 - 插件侧客户端：[`lib/adapter.js`](../plugins/dsh-wechat-bot/lib/adapter.js)，数据校验：[`lib/protocol.js`](../plugins/dsh-wechat-bot/lib/protocol.js)
 - 一致性检查工具：`node bin/check-adapter.js -- <你的适配器命令>`
 
@@ -177,8 +177,10 @@ result: { messageId: string }            // 这条消息在微信里的 id，用
    - `unavailable`：**现在发不了，什么都没做**（例如锁屏期间无法操作 UI）。插件等待 `event/status canSend:true` 后再试；回复超过 10 分钟（可配）就丢弃，不会把过时回复补发出去。
 3. **回显**：发出去的消息之后也应作为 `event/message`（`fromSelf: true`）推送一次。`id` 等于返回的 `messageId` 时按 id 去重；不相等时（例如适配器只是把内容排进了队列，真正发出后数据库里是另一个 id），插件在 2 分钟内按正文匹配去重。没有回显也能工作。
 
-   现有的 `adapters/wechat-db` 就是"排队"式：`message/send` 把内容 JSON 写进发件箱文件并返回 `out:<clientId>`，真正输入微信由发件箱的消费者完成（**消费者尚未实现**）。
+   `adapters/wechat-db` 默认是"排队"式：写进发件箱后返回 `out:<clientId>`，此回执只代表入箱；消费者尚未实现。显式设置 `--sender-config` 后改为同步文字发送：通过旧隐藏桌面 worker 在配置的主窗口或已准备的独立窗口中发送，真实数据库出站核对通过才返回微信 id，持久日志保证跨重启不重复；不消费或补发默认发件箱的旧记录。该路径依赖旧 `dsh-wechat-bridge`/wx4py、本机微信版本与控件门参数匹配；不支持媒体发送和非空 mentions。
 4. 命令的直接回复可能与普通回复**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
+
+当前实现的真实验收记录（2026-10-22）：初号机真实加密库、初号机与浪味仙私聊的真实模型回复已通过；△群会话选择、双击打开独立窗口、native文字发送和精确数据库回执已通过。正式 `/help` 的 incoming/outgoing 数据库 id 分别为 `4576749726552072719` 和 `126267775936878936`；`/ask` 的三段模型回复全部与数据库核对，`modelErrors`、`sendErrors` 均为0。这是当前单活动会话的短期文字收发证据，不代表群长期稳定性、多会话并行、锁屏恢复或媒体能力。
 
 ### `media/fetch`（能力 `mediaFetch`，预留给图片/表情包识别）
 
@@ -296,6 +298,8 @@ params: { level: "debug" | "info" | "warn" | "error", message: string }
 
 - 能发：保持 `canSend: true`，正常处理 `message/send`。
 - 暂时不能：发 `event/status { canSend: false, reason: "screen_locked" }`，在 `message/send` 里返回 `unavailable`；解锁后发 `canSend: true`。
+
+`screen_locked` 是已经确认锁屏时的示例原因码。数据库适配器的可选旧发送后端只能确认桌面是否可用，或是否存在未核验的 worker 恢复，因此使用 `sender_unavailable`，不把所有不可用情况都诊断成锁屏；等待和恢复仍由 `canSend` 驱动。
 
 ---
 

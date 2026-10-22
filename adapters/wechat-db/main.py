@@ -4,7 +4,7 @@
   python -u main.py --account wxid_xxx_c53e           # a specific account directory
   python -u main.py --plain path/to/db_storage --self wxid_bot   # unencrypted databases (tests)
 
-Options: --data-root DIR, --keys FILE, --outbox FILE, --poll-ms N, --names names.json
+Options: --data-root DIR, --keys FILE, --outbox FILE, --sender-config FILE, --poll-ms N, --names names.json
 (names.json maps chat ids to display names that should override WeChat's).
 """
 from __future__ import annotations
@@ -46,9 +46,14 @@ def main(argv=None):
     parser.add_argument("--keys", help="key cache file (default: <dataDir>/wechat-db/<account>.keys.json)")
     parser.add_argument("--plain", help="directory of unencrypted databases laid out like db_storage/")
     parser.add_argument("--outbox", help="where outgoing message JSON lines go (default: <dataDir>/wechat-outbox.jsonl)")
+    parser.add_argument("--sender-config", help="explicit legacy hidden-desktop sender configuration; enables real text sends")
     parser.add_argument("--poll-ms", type=int, default=1000)
     parser.add_argument("--names", help="JSON file mapping chat ids to display names")
     args = parser.parse_args(argv)
+    if args.poll_ms < 1:
+        parser.error("--poll-ms must be positive")
+    if args.sender_config and args.outbox:
+        parser.error("--sender-config and --outbox are mutually exclusive")
 
     if args.plain:
         if not args.self_id:
@@ -66,9 +71,19 @@ def main(argv=None):
             return EncryptedSource(root, account, keys, base / "cache" / account)
 
     chat_names = json.loads(Path(args.names).read_text(encoding="utf-8")) if args.names else {}
+    sender = None
+    if args.sender_config:
+        from wechat_db.legacy_sender import LegacySender
+        sender = LegacySender.from_file(args.sender_config, self_id)
     server = Server()
-    Adapter(server, open_source, self_id, poll_ms=args.poll_ms, outbox_path=args.outbox, chat_names=chat_names)
-    server.serve()
+    adapter = Adapter(server, open_source, self_id, poll_ms=args.poll_ms, outbox_path=args.outbox,
+                      chat_names=chat_names, sender=sender)
+    try:
+        server.serve()
+    finally:
+        # stdin EOF (host died) still needs a graceful worker/gate cleanup.
+        if adapter.delivery:
+            adapter.delivery.close()
 
 
 if __name__ == "__main__":
