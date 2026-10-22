@@ -169,3 +169,43 @@ test('an engagement overrides the speaking mode: in at mode the target is still 
   say(env, 'wxid_alice', '你谁啊')
   await until(() => sent(env).includes('attack→阿离:你谁啊'))
 })
+
+test('other commands keep working during an engagement, from anyone', async t => {
+  const env = await watching(t, {
+    reply: input => input.new.some(m => m.command?.name === 'ask') ? { reply: [`答:${input.new.find(m => m.command).text}`] } : engageModel(input),
+  })
+  say(env, 'wxid_carol', '/attack 阿离')
+  await until(() => sent(env).length === 2)
+  say(env, 'wxid_bob', '/status')
+  await until(() => sent(env).some(s => s.includes('正在嘲讽 阿离')), { what: '/status shows the engagement' })
+  say(env, 'wxid_bob', '/ask 一加一')
+  await until(() => sent(env).includes('答:一加一'), { what: 'an explicit /ask from someone else is still answered' })
+  say(env, 'wxid_bob', '/mode at')
+  await until(() => sent(env).some(s => s.startsWith('已执行：切换为 at')))
+  say(env, 'wxid_bob', '/help')
+  await until(() => sent(env).some(s => s.includes('/attack')))
+  say(env, 'wxid_bob', '我随便说说')
+  say(env, 'wxid_alice', '还来？')
+  await until(() => sent(env).includes('attack→阿离:还来？'), { what: 'the engagement survives the other commands' })
+  assert.ok(!sent(env).some(s => s.includes('我随便说说')))
+})
+
+test('an opening that is still being thought about is dropped when the engagement is stopped or replaced', async t => {
+  let release
+  const gate = new Promise(resolve => { release = resolve })
+  const env = await watching(t, {
+    reply: async input => {
+      if (input.new.some(m => m.command?.name === 'attack')) await gate // the /attack opening is slow
+      return engageModel(input)
+    },
+  })
+  say(env, 'wxid_carol', '/attack 阿离')
+  await until(() => env.bot.runner.status === 'thinking')
+  say(env, 'wxid_carol', '/unattack')
+  await until(() => sent(env).includes('已执行：停止嘲讽 阿离'))
+  release()
+  say(env, 'wxid_carol', '/comfort 老鲍')
+  await until(() => sent(env).includes('开场:安慰 老鲍'))
+  await sleep(200)
+  assert.ok(!sent(env).includes('开场:嘲讽 阿离'), 'no opening for an engagement that already ended')
+})

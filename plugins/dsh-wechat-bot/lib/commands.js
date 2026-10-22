@@ -89,6 +89,7 @@ const engageCommand = (style, aliases) => ({
     const replaced = previous && (previous.target.id !== target.id || previous.style !== style)
       ? `（原来的${STYLES[previous.style]} ${previous.target.name} 已结束）` : ''
     return { forward: {
+      engagement: engagement.current().id, // the opening is dropped if this engagement ends first
       text: `${STYLES[style]} ${target.name}`,
       instruction: openingInstruction(style, target),
       ack: `已执行：开始${STYLES[style]} ${target.name}${replaced}。TA 说一句我回一句，/un${style} 停止`,
@@ -168,7 +169,8 @@ export const builtinCommands = [
     run: ({ status }) => {
       const s = status()
       const muted = s.mutedUntil > Date.now() ? `，禁言中还剩 ${minutes(s.mutedUntil - Date.now())} 分钟` : ''
-      return `模式 ${s.mode}${muted}\n今天处理 ${s.today.batches} 批消息，发言 ${s.today.sent} 条\n上下文 ${s.context} 条，记住了 ${s.members} 位成员`
+      const engaged = s.engagement ? `\n正在${STYLES[s.engagement.style]} ${s.engagement.target.name}（/un${s.engagement.style} 停止）` : ''
+      return `模式 ${s.mode}${muted}${engaged}\n今天处理 ${s.today.batches} 批消息，发言 ${s.today.sent} 条\n上下文 ${s.context} 条，记住了 ${s.members} 位成员`
     },
   },
   {

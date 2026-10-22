@@ -131,7 +131,7 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
 ```bash
 cd plugins/dsh-wechat-bot
 mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"   # 开发用，指向 DSH 自带模块
-node --test test/*.test.js                  # 91 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
+node --test test/*.test.js                  # 93 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
 STRESS_SCALE=3 node --test test/stress.test.js
 cd ../../adapters/wechat-db && python -m pytest tests     # 17 项
 ```

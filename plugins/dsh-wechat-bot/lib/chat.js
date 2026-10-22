@@ -115,7 +115,7 @@ export class ChatRunner {
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
-    this.engagement = state.engagement ?? null // { style, target: {id, name}, since, lastTargetAt }
+    this.engagement = state.engagement ?? null // { id, style, target: {id, name}, since, lastTargetAt }
     this.#scheduleIdle()
     this.#armCron(0)
   }
@@ -320,6 +320,7 @@ export class ChatRunner {
         status: () => ({
           mode: this.mode, mutedUntil: this.mutedUntil, today: this.stats,
           context: this.transcript.length, members: Object.keys(this.memory.members).length,
+          engagement: this.#activeEngagement(),
         }),
         commands: this.commands.list(),
         models: this.models,
@@ -329,7 +330,7 @@ export class ChatRunner {
           current: () => this.#activeEngagement(),
           start: (style, target) => {
             const previous = this.#activeEngagement()
-            this.engagement = { style, target: { id: target.id, name: target.name }, since: Date.now(), lastTargetAt: Date.now() }
+            this.engagement = { id: randomUUID(), style, target: { id: target.id, name: target.name }, since: Date.now(), lastTargetAt: Date.now() }
             this.#write('engagement_start', { style, target: target.name })
             this.emit('change')
             return previous
@@ -366,10 +367,10 @@ export class ChatRunner {
     if (typeof result === 'string') return this.#say(result)
     if (result?.reply) return this.#say(result.reply)
     if (result?.forward) {
-      const { text = parsed.text, instruction, effort } = result.forward
+      const { text = parsed.text, instruction, effort, engagement } = result.forward
       const ackText = result.forward.ack ?? command.ack
       const ack = ackText && this.#say(ackText)
-      this.batcher.pushUrgent({ ...message, text, command: { name: command.name, instruction, effort } })
+      this.batcher.pushUrgent({ ...message, text, command: { name: command.name, instruction, effort, engagement } })
       await ack
     }
   }
@@ -476,6 +477,13 @@ export class ChatRunner {
   // Returns a delay in ms when the batch was put back to wait for the rate limit / breaker.
   async #turn(batch, event) {
     const started = Date.now()
+    // An /attack or /comfort opening whose engagement was stopped or replaced meanwhile is not wanted any more.
+    const stale = batch.filter(m => m.command?.engagement && m.command.engagement !== this.engagement?.id)
+    if (stale.length) {
+      this.#write('skipped', { reason: 'engagement_changed', count: stale.length })
+      batch = batch.filter(m => !stale.includes(m))
+      if (!batch.length && !event) return
+    }
     const urgent = batch.some(m => m.command)
     // Engaged with one member: the script decides — only their messages trigger a reply, one per batch.
     const engagement = !urgent && !event ? this.#activeEngagement() : null
@@ -544,7 +552,8 @@ export class ChatRunner {
     }
     // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
     const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
-    await this.#deliver(decision.reply, { batch, target, event, started })
+    const engagementId = event?.kind === 'engagement' ? engagement.id : batch.find(m => m.command?.engagement)?.command.engagement
+    await this.#deliver(decision.reply, { batch, target, event, started, engagementId })
   }
 
   // An interrupted batch goes back where it came from; the next turn sees the new state.
@@ -599,12 +608,14 @@ export class ChatRunner {
 
   // ── delivery ────────────────────────────────────────────────────────────
 
-  async #deliver(parts, { batch, target, event, started }) {
+  async #deliver(parts, { batch, target, event, started, engagementId }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
     const commanded = batch.some(m => m.command)
     // A /mute or /mode silent that arrives mid-reply stops the rest of it (explicit /ask etc. still finish).
-    const blocked = () => !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
+    // Likewise, /unattack or a new target stops what is left of a reply that belongs to the old engagement.
+    const blocked = () => engagementId && this.engagement?.id !== engagementId ? 'engagement_changed'
+      : !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
     for (const [index, part] of parts.entries()) {
       if (index && this.settings.typingDelay) await sleep(typingMs(part.text ?? ''))
       const content = part.kind === 'sticker'

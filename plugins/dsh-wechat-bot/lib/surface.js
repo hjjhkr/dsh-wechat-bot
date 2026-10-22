@@ -164,7 +164,8 @@ export function formatEntry(entry) {
     decision: () => entry.reply.length ? `决定回复：${entry.reply.map(p => p.text ?? `[${p.name}]`).join(' / ')}` : '决定不说话',
     sent: () => `已发送：${entry.part.text ?? `[${entry.part.name}]`}`,
     silent: () => '保持沉默',
-    skipped: () => entry.reason === 'engaged' ? `跳过 ${entry.count} 条（正在专门回应某人）` : `跳过（${entry.reason}）`,
+    skipped: () => entry.reason === 'engaged' ? `跳过 ${entry.count} 条（正在专门回应某人）`
+      : entry.reason === 'engagement_changed' ? '互动已停止或换了对象，开场白作废' : `跳过（${entry.reason}）`,
     engagement_start: () => `开始${STYLES[entry.style]} ${entry.target}`,
     engagement_end: () => `结束${STYLES[entry.style]} ${entry.target}${entry.reason === 'idle' ? '（TA 太久没说话）' : ''}`,
     idle_dropped: () => '有人开始说话了，主动发言作废',
@@ -174,7 +175,7 @@ export function formatEntry(entry) {
     mode: () => `模式切换为 ${entry.mode}`,
     mute: () => entry.until ? `禁言到 ${new Date(entry.until).toLocaleTimeString('zh-CN', { hour12: false })}` : '解除禁言',
     waiting: () => '等待可以发送（可能锁屏/断线）',
-    dropped: () => entry.reason === 'stale' ? '回复过时，已放弃' : '已禁言，剩下的不发了',
+    dropped: () => ({ stale: '回复过时，已放弃', engagement_changed: '互动已停止或换了对象，剩下的不发了' })[entry.reason] ?? '已禁言，剩下的不发了',
     overflow: () => `消息太多，较早的只作为上下文（累计 ${entry.total} 条）`,
     deferred: () => entry.reason === 'breaker_open' ? `模型熔断中，${Math.ceil(entry.waitMs / 1000)} 秒后再试` : `说话太频繁，${Math.ceil(entry.waitMs / 1000)} 秒后再处理`,
     breaker_open: () => `模型连续失败，暂停 ${Math.round(entry.coolDownMs / 1000)} 秒（${entry.reason}）`,
