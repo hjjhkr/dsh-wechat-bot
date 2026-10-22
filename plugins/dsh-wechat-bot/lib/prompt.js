@@ -75,6 +75,7 @@ function bySender(messages, view, memory = {}) {
       group = { id: message.sender.id, name: message.sender.name, ...(memory[message.sender.id] ? { memory: memory[message.sender.id] } : {}), messages: [] }
       groups.set(message.sender.id, group)
     }
+    group.name = message.sender.name // same id, latest name
     group.messages.push(view(message))
   }
   return [...groups.values()]

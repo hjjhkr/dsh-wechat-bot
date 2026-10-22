@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events'
 import { createInterface } from 'node:readline'
 import { JsonRpcPeer } from './rpc.js'
 import {
-  PROTOCOL_VERSION, ProtocolError, parseAccount, parseCapabilities, parseChat, parseMessage, parseOutgoing, parseStatus,
+  PROTOCOL_VERSION, ProtocolError, parseAccount, parseCapabilities, parseChat, parseMessage, parseOutgoing, parsePerson, parseStatus,
 } from './protocol.js'
 
 // Typed plugin-side view of an adapter. Emits:
@@ -64,7 +64,13 @@ export class AdapterClient extends EventEmitter {
 
   async members(chatId) {
     const { members } = await this.#call('chats/members', { chatId })
-    return members.map(m => ({ id: String(m.id), name: String(m.name ?? m.id) }))
+    return members.flatMap(m => {
+      try {
+        return [parsePerson({ ...m, id: m?.id == null ? m?.id : String(m.id) }, 'member')]
+      } catch {
+        return [] // one malformed entry must not hide the others
+      }
+    })
   }
 
   async history(chatId, limit) {

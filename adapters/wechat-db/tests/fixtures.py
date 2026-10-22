@@ -33,6 +33,28 @@ def at_source(*wxids: str) -> bytes:
     return zstd(f"<msgsource><atuserlist><![CDATA[{','.join(wxids)}]]></atuserlist><silence>0</silence></msgsource>")
 
 
+def _pb_varint(n: int) -> bytes:
+    out = bytearray()
+    while True:
+        byte, n = n & 0x7F, n >> 7
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _pb_bytes(field: int, value: bytes) -> bytes:
+    return _pb_varint(field << 3 | 2) + _pb_varint(len(value)) + value
+
+
+def room_data(nicknames: dict[str, str]) -> bytes:
+    """chat_room.ext_buffer: ChatRoomData { repeated Member { user_name=1, display_name=2, state=3 } = 1 },
+    with an unrelated varint field in front, as real buffers carry more than members."""
+    members = b"".join(
+        _pb_bytes(1, _pb_bytes(1, wxid.encode()) + _pb_bytes(2, nick.encode()) + _pb_varint(3 << 3) + _pb_varint(0))
+        for wxid, nick in nicknames.items())
+    return _pb_varint(2 << 3) + _pb_varint(7) + members
+
+
 class Account:
     """A fake db_storage/ directory. Messages can be appended while an adapter is watching."""
 
@@ -43,6 +65,7 @@ class Account:
         self.seq = 1000
         self.server_id = 9_000_000
         self.shards = [self.root / "message" / f"message_{i}.db" for i in range(shards)]
+        self.group_nicknames: dict[str, str] = {}
         self._contacts()
         for path in self.shards:
             with connect(path) as conn:
@@ -64,6 +87,18 @@ class Account:
             room = conn.execute("INSERT INTO chat_room (username, owner) VALUES (?, 'wxid_alice')", (GROUP,)).lastrowid
             for wxid in MEMBERS:
                 conn.execute("INSERT INTO chatroom_member VALUES (?, ?)", (room, ids[wxid]))
+
+    def set_group_nickname(self, wxid: str, nickname: str, chat: str = GROUP):
+        self.group_nicknames[wxid] = nickname
+        with connect(self.root / "contact" / "contact.db") as conn:
+            conn.execute("UPDATE chat_room SET ext_buffer = ? WHERE username = ?", (room_data(self.group_nicknames), chat))
+
+    def set_contact(self, wxid: str, **fields):
+        """Changes nick_name / remark / alias of a contact, as WeChat does when someone renames."""
+        with connect(self.root / "contact" / "contact.db") as conn:
+            for column, value in fields.items():
+                assert column in {"nick_name", "remark", "alias"}
+                conn.execute(f"UPDATE contact SET {column} = ? WHERE username = ?", (value, wxid))
 
     def add(self, chat: str, sender: str, body, *, local_type: int = 1, source=None, shard: int = 0,
             compress: bool = False, server_id: int | None = None, prefix: bool | None = None, seq: int | None = None) -> str:

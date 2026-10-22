@@ -1,8 +1,14 @@
 """Read chats, members and messages of one WeChat 4.x account, as protocol objects.
 
 Schema facts this relies on (WeChat 4.x, db_storage/):
-  contact/contact.db   contact(id, username, nick_name, remark, …), chat_room(id, username, owner),
-                       chatroom_member(room_id, member_id)
+  contact/contact.db   contact(id, username, alias, nick_name, remark, …),
+                       chat_room(id, username, owner, ext_buffer), chatroom_member(room_id, member_id)
+
+Identity is always the wxid (contact.username, which never changes). Names are
+looked up fresh (cached for NAME_TTL seconds) and attached to it: `name` is what
+the person shows in that chat — group nickname, else the account's remark for
+them, else their nickname — and `aliases` lists every other name they go by,
+including their WeChat ID (contact.alias).
   message/message_N.db Msg_<md5(chat username)>(local_id, server_id, local_type, sort_seq,
                        real_sender_id, create_time, source, message_content, compress_content)
                        Name2Id(user_name) — real_sender_id is a rowid of *this shard's* Name2Id.
@@ -14,9 +20,10 @@ import hashlib
 import time
 
 from . import content as c
+from .roomdata import group_nicknames
 
 SPECIAL = {"weixin", "newsapp", "fmessage", "medianote", "floatbottle", "filehelper", "notifymessage"}
-NAME_TTL = 60.0
+NAME_TTL = 10.0  # renames show up within this long
 
 
 def table_of(chat_id: str) -> str:
@@ -31,22 +38,61 @@ class Reader:
     def __init__(self, source, self_id: str):
         self.source = source
         self.self_id = self_id
-        self._names: dict[str, str] = {}
-        self._names_at = 0.0
+        self._contacts: dict[str, dict] = {}
+        self._contacts_at = 0.0
+        self._rooms: dict[str, tuple[float, dict[str, str]]] = {}
 
     # ── contacts ────────────────────────────────────────────────────────
 
-    def names(self) -> dict[str, str]:
-        """wxid → display name (remark, else nickname), cached briefly."""
-        if time.monotonic() - self._names_at > NAME_TTL:
+    def contacts(self) -> dict[str, dict]:
+        """wxid → {nick, remark, alias}, cached briefly."""
+        if time.monotonic() - self._contacts_at > NAME_TTL:
             conn = self.source.contact()
             try:
-                rows = conn.execute("SELECT username, nick_name, remark FROM contact").fetchall()
+                try:
+                    rows = conn.execute("SELECT username, nick_name, remark, alias FROM contact").fetchall()
+                except Exception:  # an older schema without `alias`
+                    rows = conn.execute("SELECT username, nick_name, remark, '' AS alias FROM contact").fetchall()
             finally:
                 conn.close()
-            self._names = {r["username"]: (r["remark"] or r["nick_name"] or r["username"]) for r in rows if r["username"]}
-            self._names_at = time.monotonic()
-        return self._names
+            self._contacts = {r["username"]: {"nick": r["nick_name"] or "", "remark": r["remark"] or "", "alias": r["alias"] or ""}
+                              for r in rows if r["username"]}
+            self._contacts_at = time.monotonic()
+        return self._contacts
+
+    def names(self) -> dict[str, str]:
+        """wxid → display name outside any group (remark, else nickname)."""
+        return {wxid: (x["remark"] or x["nick"] or wxid) for wxid, x in self.contacts().items()}
+
+    def group_nicknames(self, chat_id: str) -> dict[str, str]:
+        """wxid → group nickname in this group, cached briefly; empty when unreadable."""
+        if not is_group(chat_id):
+            return {}
+        cached = self._rooms.get(chat_id)
+        if cached and time.monotonic() - cached[0] <= NAME_TTL:
+            return cached[1]
+        nicknames: dict[str, str] = {}
+        try:
+            conn = self.source.contact()
+            try:
+                row = conn.execute("SELECT ext_buffer FROM chat_room WHERE username = ?", (chat_id,)).fetchone()
+            finally:
+                conn.close()
+            nicknames = group_nicknames(row["ext_buffer"] if row else None)
+        except Exception:
+            pass  # no group nicknames is fine; names fall back to remark/nickname
+        self._rooms[chat_id] = (time.monotonic(), nicknames)
+        return nicknames
+
+    def person(self, chat_id: str, wxid: str) -> dict:
+        """{id, name, aliases?} of someone as seen in this chat. The id is the key; names are labels."""
+        contact = self.contacts().get(wxid, {})
+        names = [self.group_nicknames(chat_id).get(wxid), contact.get("remark"), contact.get("nick"), contact.get("alias")]
+        unique = list(dict.fromkeys(n.strip() for n in names if n and n.strip()))
+        person = {"id": wxid, "name": unique[0] if unique else wxid}
+        if len(unique) > 1:
+            person["aliases"] = unique[1:]
+        return person
 
     def self_info(self) -> dict:
         return {"id": self.self_id, "name": self.names().get(self.self_id, self.self_id)}
@@ -87,17 +133,18 @@ class Reader:
 
     def members(self, chat_id: str) -> list[dict]:
         if not is_group(chat_id):
-            names = self.names()
-            return [{"id": chat_id, "name": names.get(chat_id, chat_id)}, self.self_info()]
+            return [self.person(chat_id, chat_id), self.person(chat_id, self.self_id)]
         conn = self.source.contact()
         try:
             rows = conn.execute(
-                "SELECT c.username, c.nick_name, c.remark FROM chat_room r "
+                "SELECT c.username FROM chat_room r "
                 "JOIN chatroom_member m ON m.room_id = r.id JOIN contact c ON c.id = m.member_id "
                 "WHERE r.username = ?", (chat_id,)).fetchall()
         finally:
             conn.close()
-        return [{"id": r["username"], "name": r["remark"] or r["nick_name"] or r["username"]} for r in rows]
+        self._rooms.pop(chat_id, None)  # a member lookup (e.g. /attack) always sees the latest names
+        self._contacts_at = 0.0
+        return [self.person(chat_id, r["username"]) for r in rows if r["username"]]
 
     # ── messages ────────────────────────────────────────────────────────
 
@@ -143,14 +190,13 @@ class Reader:
             body = c.decode(row["compress_content"])
         prefix, body = c.strip_sender(body) if is_group(chat_id) else (None, body)
         sender_id = senders.get(row["real_sender_id"] or -1) or prefix or (chat_id if not is_group(chat_id) else "")
-        names = self.names()
         message = {
             "id": str(row["server_id"]) if row["server_id"] else f"{shard}:{row['local_id']}",
             "chatId": chat_id,
             "time": int(row["create_time"] or 0) * 1000,
             "kind": kind,
             "text": "",
-            "sender": {"id": sender_id or "unknown", "name": names.get(sender_id, sender_id or "unknown")},
+            "sender": self.person(chat_id, sender_id) if sender_id else {"id": "unknown", "name": "unknown"},
             "fromSelf": sender_id == self.self_id,
             "mentions": c.mentions(row["source"]),
         }

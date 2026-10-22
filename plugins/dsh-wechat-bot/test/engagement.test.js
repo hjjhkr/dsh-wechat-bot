@@ -18,7 +18,7 @@ test('targets are resolved by script: @ first, then exact, then unique partial n
   assert.equal(resolve('二号').id, 'wxid_bob2')
   assert.equal(resolve('wxid_alice').id, 'wxid_alice')
   for (const [ref, mentions, problem] of [
-    ['', [], /要对谁/], ['小鲸鱼', [], /没找到/], ['wxid_bot', [], /不能对我自己/],
+    ['', [], /要对谁/], ['小鲸鱼', [], /不能对我自己/], ['wxid_bot', [], /不能对我自己/],
     ['鲍', [], /可能是：老鲍、老鲍二号/], ['张三', [], /没找到「张三」/], ['x', ['wxid_alice', 'wxid_bob'], /一次只能/],
   ]) {
     assert.throws(() => resolve(ref, mentions), e => e instanceof EngagementError && problem.test(e.message), ref)
@@ -208,4 +208,39 @@ test('an opening that is still being thought about is dropped when the engagemen
   await until(() => sent(env).includes('开场:安慰 老鲍'))
   await sleep(200)
   assert.ok(!sent(env).includes('开场:嘲讽 阿离'), 'no opening for an engagement that already ended')
+})
+
+test('a member is keyed by wxid and found by any of their current names', () => {
+  const members = [
+    { id: 'wxid_alice', name: '离离原上草', aliases: ['阿离', 'alice_2024'] }, // group nickname, nickname, WeChat ID
+    { id: 'wxid_bob', name: '鲍哥', aliases: ['老鲍', 'baobao'] },            // remark, nickname, WeChat ID
+    { id: 'wxid_bot', name: '群里的鲸鱼', aliases: ['小鲸鱼'] },
+  ]
+  const resolve = ref => resolveMember(ref, { members, selfId: 'wxid_bot' })
+  for (const ref of ['离离原上草', '阿离', 'ALICE_2024', '原上', 'wxid_alice']) assert.equal(resolve(ref).id, 'wxid_alice', ref)
+  assert.equal(resolve('老鲍').name, '鲍哥', 'found by nickname, shown by the name used in the group')
+  assert.throws(() => resolve('小鲸鱼'), /不能对我自己/)
+  assert.throws(() => resolve('a'), /可能是：离离原上草、鲍哥/, 'ambiguity across aliases is refused, not guessed')
+})
+
+test('renames are followed: same wxid, latest names for /attack, the prompt and the bot’s own group nickname', async t => {
+  const env = await startBot(t, { reply: engageModel, settings: { mode: 'infer' } })
+  await until(() => env.bot.ready)
+  const members = env.simulator.chats.get(GROUP).members
+  const member = id => members.find(m => m.id === id)
+  Object.assign(member('wxid_bot'), { aliases: ['群里的鲸鱼'] })
+  await env.bot.setChat(GROUP)
+  await until(() => env.bot.runner.selfNames.includes('群里的鲸鱼'))
+  say(env, 'wxid_alice', '群里的鲸鱼，在吗')
+  await until(() => sent(env).includes('普通回复'), { what: 'the bot’s group nickname counts as its name' })
+
+  Object.assign(member('wxid_alice'), { name: '离离原上草', aliases: ['阿离'] }) // she sets a group nickname
+  say(env, 'wxid_carol', '/attack 离离原上草')
+  await until(() => sent(env).some(s => s.startsWith('已执行：开始嘲讽 离离原上草')))
+  Object.assign(member('wxid_alice'), { name: '改了个名', aliases: ['阿离'] }) // and renames again mid-engagement
+  say(env, 'wxid_alice', '叫我新名字')
+  await until(() => sent(env).includes('attack→改了个名:叫我新名字'), { what: 'still the same person after a rename' })
+  assert.equal(env.bot.runner.health().engagement.target.name, '改了个名')
+  const group = env.model.calls.at(-1).raw.new.members[0]
+  assert.deepEqual([group.id, group.name], ['wxid_alice', '改了个名'])
 })

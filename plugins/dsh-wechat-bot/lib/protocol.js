@@ -43,10 +43,16 @@ function stringList(value, what) {
   return [...new Set(value)]
 }
 
-function person(value, what) {
+// A person is keyed by id (the wxid); `name` and the optional `aliases` are just labels for it.
+export function parsePerson(value, what = 'person') {
   if (!isObject(value) || !nonEmpty(value.id)) fail(what)
-  return { id: value.id, name: typeof value.name === 'string' && value.name ? value.name : value.id }
+  const name = typeof value.name === 'string' && value.name ? value.name : value.id
+  const aliases = Array.isArray(value.aliases)
+    ? [...new Set(value.aliases.filter(a => typeof a === 'string').map(a => a.trim()).filter(a => a && a !== name))]
+    : []
+  return { id: value.id, name, ...(aliases.length ? { aliases } : {}) }
 }
+const person = parsePerson
 
 export function parseChat(value) {
   if (!isObject(value) || !nonEmpty(value.id) || !['group', 'direct'].includes(value.kind)) fail('chat')

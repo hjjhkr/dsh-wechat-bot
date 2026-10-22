@@ -97,3 +97,37 @@ def test_a_message_without_server_id_gets_a_stable_shard_local_id(account, reade
     message_id = account.add(GROUP, "wxid_alice", "离线消息", server_id=0)
     assert message_id.startswith("message_0.db:")
     assert reader.history(GROUP, 1)[0]["id"] == message_id
+
+
+def test_wxid_is_the_key_and_every_current_name_maps_to_it(account, reader, monkeypatch):
+    account.set_group_nickname("wxid_alice", "离离原上草")
+    account.set_group_nickname(BOT, "群里的鲸鱼")
+    account.set_contact("wxid_alice", alias="alice_2024")
+    members = {m["id"]: m for m in reader.members(GROUP)}
+    assert members["wxid_alice"] == {"id": "wxid_alice", "name": "离离原上草", "aliases": ["阿离", "alice_2024"]}, \
+        "the group nickname is the name; nickname and WeChat ID are aliases"
+    assert members["wxid_bob"] == {"id": "wxid_bob", "name": "鲍哥", "aliases": ["老鲍"]}, "remark, then nickname"
+    assert members[BOT]["name"] == "群里的鲸鱼"
+    first = account.add(GROUP, "wxid_alice", "改名前")
+    assert reader.history(GROUP, 10)[-1]["sender"]["name"] == "离离原上草"
+
+    # Renames show up without a restart: a member lookup re-reads at once, messages within NAME_TTL.
+    account.set_group_nickname("wxid_alice", "新群昵称")
+    account.set_contact("wxid_alice", nick_name="阿离2号")
+    assert {m["id"]: m for m in reader.members(GROUP)}["wxid_alice"]["aliases"] == ["阿离2号", "alice_2024"]
+    monkeypatch.setattr("wechat_db.reader.NAME_TTL", 0.0)
+    account.add(GROUP, "wxid_alice", "改名后")
+    latest = reader.history(GROUP, 10)
+    assert latest[-1]["sender"] == {"id": "wxid_alice", "name": "新群昵称", "aliases": ["阿离2号", "alice_2024"]}
+    assert latest[-2]["id"] == first and latest[-2]["sender"]["id"] == "wxid_alice", "same person, same key"
+
+
+def test_unreadable_room_data_falls_back_to_remark_and_nickname(account, reader):
+    from wechat_db.roomdata import group_nicknames
+    from fixtures import room_data
+    assert group_nicknames(room_data({"wxid_a": "甲", "wxid_b": " "})) == {"wxid_a": "甲"}, "blank nicknames ignored"
+    assert group_nicknames(room_data({"wxid_a": "甲"})[:-3]) == {}, "a truncated buffer yields nothing, not an error"
+    assert group_nicknames(b"\xff\xff\xff") == {} and group_nicknames(None) == {}
+    with __import__("sqlite3").connect(account.root / "contact" / "contact.db") as conn:
+        conn.execute("UPDATE chat_room SET ext_buffer = X'0a05ffff'")
+    assert {m["id"]: m["name"] for m in reader.members(GROUP)}["wxid_bob"] == "鲍哥"

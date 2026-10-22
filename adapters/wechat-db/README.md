@@ -14,7 +14,9 @@
 | 协议字段 | 来源 |
 | --- | --- |
 | `id` | `server_id`（全局唯一、重启不变）；为 0 时用 `分片名:local_id` |
-| `sender.id` / `sender.name` | `real_sender_id` → **本分片**的 `Name2Id` → wxid；名字取 contact 的备注，其次昵称；群消息正文前的 `wxid:\n` 前缀会剥掉 |
+| `sender.id` | `real_sender_id` → **本分片**的 `Name2Id` → wxid（主键，改名不变）；群消息正文前的 `wxid:\n` 前缀会剥掉 |
+| `sender.name` / `aliases` | 都挂在 wxid 上：`name` = 群昵称 > 小号给 TA 的备注 > 昵称；`aliases` = 其余叫法 + 微信号（`contact.alias`）。名字缓存 10 秒，`chats/members` 每次都重新读，所以改名后最多 10 秒消息里就是新名字，`/attack 新名字` 立即可用 |
+| 群昵称 | `contact.db` 的 `chat_room.ext_buffer`（protobuf `ChatRoomData`：成员 = wxid + 群昵称）。**这个格式按开源 4.x 读库工具的解析实现，没在真实库上核对过**；读不出来时不报错，退回备注/昵称 |
 | `mentions` | `source` 列（`<msgsource><atuserlist>`，可能 zstd 压缩）；`notify@all` → `all`。**不从正文猜** |
 | `quote` | 引用消息（`local_type = 57<<32 \| 49` 的 appmsg）里的 `<refermsg>`：被引用消息的 `svrid`、发送者、内容 |
 | `kind` | 1 文字、3 图片、34 语音、43 视频、47/11000 表情、49 链接/文件、10000 系统消息；4.x 的复合类型码取低 32 位 |

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnAdapter } from '../lib/adapter.js'
 import { Bot } from '../lib/bot.js'
-import { parseAccount } from '../lib/protocol.js'
+import { parseAccount, parseMessage, parsePerson } from '../lib/protocol.js'
 import { Store } from '../lib/store.js'
 import { until } from './helpers.js'
 
@@ -98,4 +98,13 @@ test('an adapter that fails the handshake is ended, not leaked, before the next 
 test('an account reported ready must say which account it is', () => {
   assert.throws(() => parseAccount({ state: 'ready' }), { code: 'invalid_params' })
   assert.deepEqual(parseAccount({ state: 'ready', self: { id: 'wxid_bot' } }).self, { id: 'wxid_bot', name: 'wxid_bot' })
+})
+
+test('a person is an id with labels: aliases are optional, cleaned, and never required', () => {
+  const base = { id: 'm1', chatId: 'g@chatroom', time: 1, kind: 'text', text: 'hi', mentions: [], fromSelf: false }
+  assert.deepEqual(parseMessage({ ...base, sender: { id: 'wxid_a', name: '阿离' } }).sender, { id: 'wxid_a', name: '阿离' }, 'older adapters')
+  assert.deepEqual(
+    parseMessage({ ...base, sender: { id: 'wxid_a', name: '群昵称', aliases: [' 阿离 ', '群昵称', 7, '', '阿离', 'alice_id'] } }).sender,
+    { id: 'wxid_a', name: '群昵称', aliases: ['阿离', 'alice_id'] })
+  assert.deepEqual(parsePerson({ id: 'wxid_b', aliases: 'not a list' }), { id: 'wxid_b', name: 'wxid_b' })
 })

@@ -19,6 +19,7 @@
 - **命令即时执行、插队**：`/` 命令在插件运行时里直接执行，不经过模型；回复插到所有排队消息前面立即发出；改变状态的命令（切模式、禁言、忘记、清上下文、`/ask`）会打断正在思考的旧回答，旧批次按新状态重新处理。
 - **模型与思考强度可调**：`/model` 切换模型、`/think off|low|high|max` 调思考强度，切换前按 DSH 的模型目录校验，重启后保持。
 - **定时消息**：`/cron 10m 内容`、`/cron 10:00 内容`、`/cron 每天 22:00 UTC-5 内容`……本地定时库，重启不丢。
+- **身份认 wxid，名字跟着最新的走**：群昵称、昵称、备注、微信号都映射到 wxid 上；改名后按新名字也能找到同一个人，记忆和互动不受影响。
 - **记得住人**：从聊天里主动积累每个成员的背景和偏好，按微信 id 归属，`/memory` 查看、`/forget` 删除。
 - **扛得住、能自愈**：积压上限、限速、模型超时、连续失败熔断、看门狗、适配器崩溃自动重启；有压力与混沌测试。
 - **锁屏也工作**：插件不依赖桌面；发不出去就排队，过时丢弃。
@@ -131,9 +132,9 @@ docs/                          protocol.md 协议 · commands.md 命令 · hando
 ```bash
 cd plugins/dsh-wechat-bot
 mklink /J node_modules "%LOCALAPPDATA%\Programs\DSH Desktop\resources\app\node_modules"   # 开发用，指向 DSH 自带模块
-node --test test/*.test.js                  # 93 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
+node --test test/*.test.js                  # 96 项（含压力/混沌；数据库端到端需 WECHAT_DB_PYTHON）
 STRESS_SCALE=3 node --test test/stress.test.js
-cd ../../adapters/wechat-db && python -m pytest tests     # 17 项
+cd ../../adapters/wechat-db && python -m pytest tests     # 19 项
 ```
 
 | 测试文件 | 覆盖 |
@@ -147,7 +148,7 @@ cd ../../adapters/wechat-db && python -m pytest tests     # 17 项
 | `stress` | 50 人刷屏、混乱模型、适配器崩溃风暴、发送故障+锁屏抖动、看门狗、长时间运行 |
 | `dsh` | 用 DSH 真实会话服务验证「微信 · 群名」会话的流式、失败、取消、崩溃恢复 |
 | `wechat-db` | 数据库新消息 → 适配器 → 插件 → 模型 → 发件箱 JSON |
-| `adapters/wechat-db/tests` | 解析（分片、发送者映射、zstd、@、引用、表情、图片、系统消息）、子进程协议、发件箱幂等、读不到库时的恢复 |
+| `adapters/wechat-db/tests` | 解析（分片、发送者映射、群昵称/改名/微信号映射到 wxid、zstd、@、引用、表情、图片、系统消息）、子进程协议、发件箱幂等、读不到库时的恢复 |
 
 ## 许可
 

@@ -17,9 +17,12 @@ const clean = text => text.replace(/^[@＠]/, '').replace(/[\s ]+$/, '').trim(
  * @param {string} ref            what followed the command ("阿离", "@阿离", an id)
  * @param {object} o
  * @param {string[]} o.mentions   ids @-mentioned in the command message (most reliable)
- * @param {{id,name}[]} o.members known members of the group
+ * @param {{id,name,aliases?}[]} o.members known members of the group, with their current names
  * @param {string} o.selfId       the bot's own id (never a target)
  */
+// Every name a member currently goes by (display name, group nickname, nickname, remark, WeChat ID).
+const namesOf = member => [member.name, ...(member.aliases ?? [])].filter(Boolean).map(n => n.toLowerCase())
+
 export function resolveMember(ref, { mentions = [], members, selfId }) {
   const others = members.filter(m => m.id !== selfId)
   const mentioned = mentions.filter(id => id !== selfId && id !== 'all')
@@ -31,10 +34,12 @@ export function resolveMember(ref, { mentions = [], members, selfId }) {
   if (!name) throw new EngagementError('要对谁？在命令后面写昵称，或者直接 @ TA')
   if (selfId && name === selfId) throw new EngagementError('不能对我自己')
   const lower = name.toLowerCase()
-  const exact = others.filter(m => m.id === name || m.name.toLowerCase() === lower)
+  const exact = others.filter(m => m.id === name || namesOf(m).includes(lower))
   if (exact.length === 1) return exact[0]
   if (exact.length > 1) throw new EngagementError(`有 ${exact.length} 个人叫「${name}」，请直接 @ TA`)
-  const partial = others.filter(m => m.name.toLowerCase().includes(lower))
+  const self = members.find(m => m.id === selfId)
+  if (self && namesOf(self).includes(lower)) throw new EngagementError('不能对我自己')
+  const partial = others.filter(m => namesOf(m).some(n => n.includes(lower)))
   if (partial.length === 1) return partial[0]
   if (partial.length > 1) throw new EngagementError(`「${name}」可能是：${partial.slice(0, 5).map(m => m.name).join('、')}，说全一点或直接 @ TA`)
   throw new EngagementError(`群里没找到「${name}」`)

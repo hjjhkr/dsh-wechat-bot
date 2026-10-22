@@ -125,8 +125,16 @@ type Chat = { id: string, name: string, kind: "group" | "direct", memberCount?: 
 
 ```ts
 params: { chatId: string }
-result: { members: { id: string, name: string }[] }   // name 优先用群昵称
+result: { members: Person[] }
+
+type Person = {
+  id: string,          // wxid：主键，身份判断只认它，改名不变
+  name: string,        // 此人在这个聊天里显示的名字：群昵称 > 备注 > 昵称
+  aliases?: string[],  // 可选：此人其它所有叫法（昵称、备注、群昵称、微信号），按最新数据
+}
 ```
+
+名字只是挂在 id 上的标签：每次读取都应给出**当前**的名字。插件用 `name` + `aliases` 按名字找人（如 `/attack 昵称`），用 `id` 判断身份；成员列表里机器人自己的群昵称也会被当作"在叫它"。不带 `aliases` 的旧适配器照样兼容。
 
 ### `chats/history`（能力 `history`）
 
@@ -211,7 +219,7 @@ type Message = {
   time: number,             // 必填。毫秒时间戳
   kind: "text" | "image" | "sticker" | "voice" | "video" | "file" | "link" | "system" | "other",
   text?: string,            // text 必填；其他类型可放简短描述或占位（如"[图片]"）
-  sender: { id: string, name: string },  // 必填。id 是真实 wxid——身份判断只认它；name 用群昵称优先
+  sender: Person,           // 必填。id 是真实 wxid——身份判断只认它；name/aliases 同 chats/members，取发消息时的最新值
   fromSelf?: boolean,       // 小号自己发的（含插件发的回显、有人在小号的手机上发的）
   mentions?: string[],      // 这条消息 @ 了谁（wxid 列表），@所有人 用 "all"。
                             // 请从消息元数据（如 msgsource 的 atuserlist）取，不要从正文猜

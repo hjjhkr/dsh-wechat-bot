@@ -116,6 +116,8 @@ export class ChatRunner {
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
     this.engagement = state.engagement ?? null // { id, style, target: {id, name}, since, lastTargetAt }
+    this.selfNames = [] // the bot's own names in this group (e.g. its group nickname), from the member list
+    this.#members() // learn them now; best-effort
     this.#scheduleIdle()
     this.#armCron(0)
   }
@@ -203,7 +205,10 @@ export class ChatRunner {
     }
     this.counters.received++
     // Expire first: the target coming back after a long silence does not revive an engagement.
-    if (this.#activeEngagement()?.target.id === message.sender.id) this.engagement.lastTargetAt = Date.now()
+    if (this.#activeEngagement()?.target.id === message.sender.id) {
+      this.engagement.lastTargetAt = Date.now()
+      this.engagement.target.name = message.sender.name // keyed by id; the label follows renames
+    }
     this.#record(message)
     this.#write('message', { id: message.id, from: message.sender.name, text: message.text, kind: message.kind })
     this.#scheduleIdle()
@@ -396,22 +401,25 @@ export class ChatRunner {
     return engagement
   }
 
-  // Everyone the bot knows in this chat: the adapter's member list, plus whoever spoke recently.
+  // Everyone the bot knows in this chat, keyed by id with their latest names: the adapter's
+  // member list (read fresh), plus whoever spoke recently (latest message wins).
   async #members() {
     const known = new Map()
-    for (const m of this.transcript) if (!m.fromSelf) known.set(m.sender.id, { id: m.sender.id, name: m.sender.name })
+    for (const m of this.transcript) known.set(m.sender.id, { id: m.sender.id, name: m.sender.name, aliases: m.sender.aliases ?? [] })
     try {
-      for (const m of (await this.link.members?.()) ?? []) known.set(m.id, { id: m.id, name: m.name })
+      for (const m of (await this.link.members?.()) ?? []) known.set(m.id, { id: m.id, name: m.name, aliases: m.aliases ?? [] })
     } catch {
       // the transcript alone still covers everyone who has been talking
     }
+    const self = known.get(this.account()?.id)
+    if (self) this.selfNames = [self.name, ...self.aliases]
     return [...known.values()]
   }
 
   // ── model turns ─────────────────────────────────────────────────────────
 
   #names() {
-    return nameMatchers([this.account().name, ...(this.settings.aliases ?? [])])
+    return nameMatchers([this.account().name, ...this.selfNames, ...(this.settings.aliases ?? [])])
   }
 
   #addresses(batch) {
