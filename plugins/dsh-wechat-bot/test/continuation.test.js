@@ -148,3 +148,36 @@ test('/wait sets the batch timing for every mode at runtime, is kept across rest
   await until(() => reply()?.startsWith('已执行：合批等待恢复为'))
   assert.deepEqual(r.wait, { quietMs: QUIET, maxWaitMs: 400 })
 })
+
+test('in a flood a rewrite is skipped rather than pushing the batch out: the @ is still answered', async t => {
+  const { r, sent, calls } = runner(t)
+  r.batcher.maxMessages = 3
+  r.receive(message(A, '@机器人 推荐个电影', toBot))
+  await until(() => calls.length === 1)
+  r.receive(message(A, '要喜剧'))
+  r.receive(message(B, '刷屏1'))
+  r.receive(message(B, '刷屏2'))
+  await until(() => sent.length >= 1)
+  assert.equal(sent[0], '回[@机器人 推荐个电影]0', 'the draft goes out: batch + additions would not fit in one batch')
+  assert.ok(!r.log.some(e => e.type === 'continued'))
+})
+
+test('messages that were already waiting when the batch went in (a size split) are not a continuation', async t => {
+  const { r, calls } = runner(t, { slow: 30 })
+  r.batcher.maxChars = 30
+  const long = n => `${n}`.repeat(20)
+  r.receive(message(A, long(1)))
+  r.receive(message(A, long(2)))
+  await until(() => calls.length === 2 && r.status === 'idle')
+  await sleep(QUIET * 2)
+  assert.deepEqual(calls, [[long(1)], [long(2)]], 'each message is thought about once')
+})
+
+test('/wait applies to a batch that is already collecting', async t => {
+  const { r, sent } = runner(t)
+  r.setWait({ quietMs: 5000, maxWaitMs: 20_000 })
+  r.receive(message(A, '@机器人 在吗', toBot))
+  await sleep(50)
+  r.setWait({ quietMs: 500, maxWaitMs: 1000 })
+  await until(() => sent.length === 1, { timeoutMs: 1500, what: 'the shorter wait took effect' })
+})

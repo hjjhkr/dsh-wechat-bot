@@ -138,3 +138,15 @@ test('an urgent batch does not leave the pending batch without its max wait', as
   assert.ok(normal.at - start < 500, `flushed by its max wait (${normal.at - start}ms)`)
   batcher.clear()
 })
+
+test('a requeued batch is never the part that overflows; newer waiting messages go first', () => {
+  const overflowed = []
+  const batcher = new Batcher({ quietMs: 1000, maxWaitMs: 5000, maxMessages: 3 }, () => {}, m => overflowed.push(m.id))
+  for (const id of ['n1', 'n2', 'n3']) batcher.push({ id, text: id })
+  batcher.clear()
+  for (const id of ['n1', 'n2']) batcher.push({ id, text: id })
+  batcher.requeue([{ id: 'old1', text: 'x' }, { id: 'old2', text: 'x' }])
+  assert.deepEqual(overflowed, ['n1'])
+  assert.deepEqual(batcher.peek().map(m => m.id), ['old1', 'old2', 'n2'])
+  batcher.clear()
+})

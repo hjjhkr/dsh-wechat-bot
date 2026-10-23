@@ -70,10 +70,27 @@ export class Batcher {
   }
 
   // Put an unprocessed batch back in front (e.g. it has to wait for the rate limit).
+  // Requeued messages were already due; under a flood the newer waiting ones overflow instead.
   requeue(messages) {
     if (!this.#pending.length) this.#firstAt = Date.now()
     this.#pending.unshift(...messages)
-    this.#cap()
+    this.#cap(messages.length)
+  }
+
+  // Whether these messages would make up a single batch (count and size limits).
+  fits(messages) {
+    let chars = 0
+    for (const message of messages) chars += message.text.length
+    return messages.length <= this.maxMessages && chars <= this.maxChars
+  }
+
+  // Changes the timing; a batch already collecting is re-timed (its max wait still counts from its first message).
+  retime({ quietMs, maxWaitMs }) {
+    Object.assign(this, { quietMs, maxWaitMs })
+    if (this.#quietTimer || this.#maxTimer) {
+      this.#disarm()
+      if (this.#pending.length && !this.#busy) this.#full() ? this.#flush() : this.#arm()
+    }
   }
 
   // Mark the consumer busy with work that did not come from a batch (e.g. an idle check).
@@ -110,8 +127,12 @@ export class Batcher {
     this.#urgent = []
   }
 
-  #cap() {
-    while (this.#pending.length > this.maxMessages) this.onOverflow(this.#pending.shift())
+  // Keeps at most maxMessages waiting; the oldest go to onOverflow, except the first `keep`.
+  #cap(keep = 0) {
+    while (this.#pending.length > this.maxMessages) {
+      const index = this.#pending.length > keep ? Math.min(keep, this.#pending.length - 1) : 0
+      this.onOverflow(this.#pending.splice(index, 1)[0])
+    }
   }
 
   #full() {

@@ -111,7 +111,7 @@ export class ChatRunner {
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
     // Whom the bot answered recently, one entry per member: their next message may be a follow-up.
-    this.lastBotTurns = state.lastBotTurns ?? (state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : [])
+    this.lastBotTurns = Array.isArray(state.lastBotTurns) ? state.lastBotTurns : state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : []
     // Messages of members who used /forget: never evidence for a note again.
     this.forgottenEvidence = new Set(state.forgottenEvidence ?? [])
     // Only a mode chosen explicitly (console, /mode, tool) is persisted; otherwise config decides.
@@ -137,8 +137,8 @@ export class ChatRunner {
     this.notices = {}
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
     // Batch timing set with /wait (the same for every mode); otherwise config decides.
-    this.waitOverride = validWait(state.wait) ? state.wait : undefined
-    if (this.waitOverride) Object.assign(this.batcher, this.waitOverride)
+    this.waitOverride = validWait(state.wait) ? { quietMs: state.wait.quietMs, maxWaitMs: state.wait.maxWaitMs } : undefined
+    if (this.waitOverride) this.batcher.retime(this.waitOverride)
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
     this.engagement = state.engagement ?? null // { id, style, target: {id, name}, since, lastTargetAt }
@@ -224,7 +224,7 @@ export class ChatRunner {
   setWait(wait) {
     if (wait && !validWait(wait)) throw new Error('invalid wait')
     this.waitOverride = wait ? { quietMs: wait.quietMs, maxWaitMs: wait.maxWaitMs } : undefined
-    Object.assign(this.batcher, this.waitOverride ?? { quietMs: this.settings.quietMs, maxWaitMs: this.settings.maxWaitMs })
+    this.batcher.retime(this.waitOverride ?? { quietMs: this.settings.quietMs, maxWaitMs: this.settings.maxWaitMs })
     this.#write('wait', this.wait)
     this.emit('change')
   }
@@ -673,11 +673,21 @@ export class ChatRunner {
   }
 
   // A waiting message from someone who spoke in this batch, received within one quiet window
-  // (quietMs) of the batch being handed over: the same person finishing their thought. Anyone
-  // else, or anything later, is the next batch. Commands never wait here.
+  // (quietMs) after the batch was handed over: the same person finishing their thought. Anyone
+  // else, or anything later, is the next batch. Commands never wait here. Only when the batch
+  // and everything up to that message still fit in one batch: otherwise a rewrite could push
+  // the batch itself out (a busy group) or come back with the same split (size limits).
   #continuation(batch, handedOver) {
     const authors = new Set(batch.map(m => m.sender.id))
-    return this.batcher.peek().find(m => authors.has(m.sender.id) && (this.arrivedAt.get(m) ?? Infinity) - handedOver <= this.batcher.quietMs)
+    const waiting = this.batcher.peek()
+    const index = waiting.findIndex(m => {
+      const at = this.arrivedAt.get(m)
+      return authors.has(m.sender.id) && at >= handedOver && at - handedOver <= this.batcher.quietMs
+    })
+    if (index < 0) return undefined
+    // Nothing may overflow on the way back, and the addition must land in the same batch.
+    if (batch.length + waiting.length > this.batcher.maxMessages || !this.batcher.fits([...batch, ...waiting.slice(0, index + 1)])) return undefined
+    return waiting[index]
   }
 
   // An interrupted batch goes back where it came from; the next turn sees the new state.

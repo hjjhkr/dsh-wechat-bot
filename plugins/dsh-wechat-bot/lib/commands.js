@@ -118,12 +118,13 @@ export const builtinCommands = [
     name: 'help',
     aliases: ['帮助'],
     summary: '列出所有命令',
-    run: ({ commands, mode }) => [
+    run: ({ commands, mode, wait }) => [
       '可用命令（直接执行，不排队）：',
-      ...commands.map(c => `${c.usage ?? '/' + c.name}${c.aliases?.length ? `（/${c.aliases[0]}）` : ''}  ${c.summary}`),
+      ...commands.map(c => `${c.usage ?? '/' + c.name}${c.aliases?.length ? `（${c.aliases.map(a => '/' + a).join(' ')}）` : ''}  ${c.summary}`),
       '',
       `发言模式（当前 ${mode}）：`,
       ...Object.entries(MODES).map(([name, text]) => `${name}  ${text}`),
+      ...(wait ? ['', `合批：群里静默 ${wait.current().quietMs / 1000} 秒算一批，最多等 ${wait.current().maxWaitMs / 1000} 秒（/wait 调整）`] : []),
     ].join('\n'),
   },
   {
@@ -154,7 +155,7 @@ export const builtinCommands = [
         return `已执行：合批等待恢复为 ${show(wait.current())}`
       }
       const quiet = Number(args[0])
-      const max = args[1] === undefined ? Math.max(wait.current().maxWaitMs / 1000, quiet) : Number(args[1])
+      const max = args[1] === undefined ? Math.min(Math.max(wait.current().maxWaitMs / 1000, quiet), 120) : Number(args[1])
       if (!Number.isFinite(quiet) || quiet < 0.5 || quiet > 30) return '没改成：静默秒数要在 0.5 到 30 之间'
       if (!Number.isFinite(max) || max < quiet || max > 120) return '没改成：上限秒数要不小于静默秒数，且不超过 120'
       wait.set({ quietMs: Math.round(quiet * 1000), maxWaitMs: Math.round(max * 1000) })

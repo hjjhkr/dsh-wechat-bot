@@ -171,7 +171,7 @@ cd ../../adapters/wechat-db && python -m pytest tests     # 当前适配器 190 
 python -m pytest native-runtime/tests/python             # 已迁入 worker 90 项
 ```
 
-2026-10-23 实测：Node **139 passed / 0 skipped**、适配器 **190 passed**、迁入 worker **90 passed**。Node 覆盖群接话、后台学习、成员缓存和会话重连；命令用临时 `--import` hook 只读解析本次干净 DSH Web 的宿主依赖，并设置 `WECHAT_DB_PYTHON`；未在源码检出安装依赖。直接运行仍需先满足 peerDependencies。真实模型以合成用例验证自然记忆、两位作者的玩笑约定、爸爸/爷爷称呼归属和第三方转述保护；未发微信。称呼输出曾在复跑中波动，不把一次通过视为模型永远正确；无请求的记忆删除建议由程序拒绝。
+最近一次交付复核（2026-10-22）：Node **152 passed / 0 skipped**（含数据库端到端；`node_modules` 以目录联接指向 DSH 自带依赖，`WECHAT_DB_PYTHON` 指向装好 `requirements.txt` 的 Python），`STRESS_SCALE=3` 压力测试 6 项通过，适配器 **190 passed**。迁入 worker 在复核用的临时环境里 **87 passed / 3 failed**，3 项都是缺 `pywin32`（`win32file`）的环境问题；协作者在装好 `native-runtime/python/requirements.txt` 的环境中为 90 passed。直接运行 Node 测试需先满足 peerDependencies（或像上面那样联接 DSH 依赖）。真实模型以合成用例验证自然记忆、两位作者的玩笑约定、爸爸/爷爷称呼归属和第三方转述保护；未发微信。称呼输出曾在复跑中波动，不把一次通过视为模型永远正确；无请求的记忆删除建议由程序拒绝。
 
 | 测试文件 | 覆盖 |
 | --- | --- |
@@ -180,6 +180,10 @@ python -m pytest native-runtime/tests/python             # 已迁入 worker 90 �
 | `commands` | 四种模式各自放行哪些消息、命令插队、打断旧回答、`/ask` 越过限速、刷命令限流 |
 | `models` | 模型/思考强度切换的校验、持久化、`/ask` 降级、聊天里的 `/model` `/think` |
 | `engagement` | 找人（@ 优先、精确、唯一模糊、重名/找不到/自己）、按人分组的模型输入、开场、只回目标、一批一回、目标沉默不发、替换与停止、禁言暂停、超时结束、重启保持、必须回复 |
+| `continuation` | 续发重写（同一人一个静默期内补充 → 重写一次；别人、更晚、命令不触发；每条最多一次；多条回复发完；互动中只认目标）、`/wait` 设置/校验/持久化/恢复 |
+| `addressing-context` `conversation-quality` | 按成员保存接话、人与人转向不算接话、引用按 id 找作者；后台记忆学习（不回复也能学、慢 learner 不拖回复、`/forget` 取消且不复活、独立限速、失败重试一次）、成员名册超时与缓存、耗时日志 |
+| `prompt-identity` `memory-learning` | 每人按 id 标当前名字/别名、只列被提到的成员、引用作者、记忆规则随 learner 开关；记忆学习输入的体积上限与过滤、输出格式校验、不能凭第三方转述写/删别人的记忆 |
+| `client-sender-status` | 控制台的独立窗口准备状态、重试与显隐开关（离线） |
 | `cron` | 时间解析（相对、钟点、日期、每天、时区、DST）、非法输入、定时库限额与只取一次、到点发送、重启补发/错过、不执行命令、锁屏 |
 | `stress` | 50 人刷屏、混乱模型、适配器崩溃风暴、发送故障+锁屏抖动、看门狗、长时间运行 |
 | `dsh` | 用 DSH 真实会话服务验证「微信 · 群名」会话的流式、失败、取消、崩溃恢复 |

@@ -134,9 +134,12 @@ function mentionedMembers(turn, identities) {
     for (const id of m.mentions ?? []) ids.add(id)
     if (m.quote?.senderId) ids.add(m.quote.senderId)
   }
-  const text = messages.map(m => m.text ?? '').join('\n')
+  // Names typed in the text; "@昵称" tokens are already covered by the mention ids.
+  const text = messages.map(m => (m.text ?? '').replace(/[@＠][^\s\u2005]+/gu, ' ')).join('\n').toLowerCase()
+  const selfNames = new Set([turn.self.name, ...(turn.aliases ?? [])].filter(Boolean).map(n => n.toLowerCase()))
   for (const person of turn.members ?? []) {
-    if ([person.name, ...(person.aliases ?? [])].some(name => typeof name === 'string' && name.length >= 2 && text.includes(name))) ids.add(person.id)
+    const names = [person.name, ...(person.aliases ?? [])].filter(n => typeof n === 'string' && n.length >= 2).map(n => n.toLowerCase())
+    if (names.some(name => !selfNames.has(name) && text.includes(name))) ids.add(person.id)
   }
   return [...ids].filter(id => id !== turn.self.id && !speakers.has(id) && identities.has(id)).map(id => identities.get(id))
 }

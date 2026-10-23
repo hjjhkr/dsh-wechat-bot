@@ -347,7 +347,8 @@ export class MemoryLearner {
       if (this.disposed || epoch !== this.#epoch) return
       const { applied, rejected } = this.apply(parseMemoryDecision(raw), request.evidence.filter(m => !this.forgotten(m.id)))
       this.write('memory_learning', { count: batch.length, applied, rejected })
-      if (applied.length) await this.saved()
+      // Saving is not learning: a failed save must not send the same messages to the model again.
+      if (applied.length) await this.saved().catch(error => this.write('error', { message: `保存记忆失败：${error.message}` }))
     } catch (error) {
       if (this.disposed || epoch !== this.#epoch) return
       this.write('memory_error', { code: error.code ?? error.name })

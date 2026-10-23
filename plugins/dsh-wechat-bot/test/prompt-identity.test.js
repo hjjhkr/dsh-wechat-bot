@@ -130,3 +130,17 @@ test('the rules tie authorship and memory to ids, and drop the memory format whe
   assert.doesNotMatch(withLearner, /memory：|"memory"/, 'the reply model is not asked for notes nobody uses')
   assert.match(withLearner, /\{"to":"你回应的那条消息 id，或 null","reply":\["第一条","第二条"\]\}/)
 })
+
+test('an "@昵称" in the text or the bot’s own name does not list extra members', () => {
+  const input = buildInput({
+    members: [
+      { id: 'wxid_speaker', name: '说话者' },
+      { id: 'wxid_wang', name: '王大锤' },
+      { id: 'wxid_dachui', name: '大锤' },
+      { id: 'wxid_fish', name: '鲸鱼' },
+    ],
+    recent: [],
+    batch: [message('new-1', { id: 'wxid_speaker', name: '说话者' }, '@王大锤 @小鲸鱼 晚上吃啥', { mentions: ['wxid_wang', 'wxid_bot'] })],
+  })
+  assert.deepEqual(input.chat.mentioned, [{ id: 'wxid_wang', name: '王大锤' }], 'only the @-ed member, by id')
+})
