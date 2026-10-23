@@ -33,6 +33,8 @@ export const Config = z.object({
     idleMinutes: z.natural().default(0).description('Quiet minutes before the bot may speak first in a group; 0 = never.'),
     staleMinutes: z.natural().min(1).default(10),
     typingDelay: z.boolean().default(true),
+    memoryLearning: z.boolean().default(true).description('Learn evidenced member notes in the background even when no reply is needed.'),
+    memoryCallsPerMinute: z.natural().min(1).max(2).default(2).description('Separate per-chat limit for background memory calls; these never block replies.'),
     cronZone: z.string().default('+08:00').description('Default time zone of /cron, e.g. +08:00, UTC-5 or Asia/Tokyo.'),
   }).default({}),
   guard: z.object({

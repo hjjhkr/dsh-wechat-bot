@@ -7,6 +7,7 @@ work.  The default desktop remains the user's input desktop.
 from __future__ import annotations
 
 import argparse
+import copy
 import ctypes
 from ctypes import wintypes
 import importlib
@@ -34,6 +35,11 @@ _BINDING_FIELDS = (
 _CLOSED = {"closed": True, "gateActive": False, "gateRestored": True}
 _UNCONFIRMED_CLOSE = {"closed": False, "gateActive": None, "gateRestored": False}
 _DESKTOP_CLOSE_UNCONFIRMED = {"closed": False, "gateActive": False, "gateRestored": True}
+_PREPARATION_REASONS = frozenset({
+    "prepare_cancelled", "prepare_failed", "target_not_found", "target_ambiguous",
+    "header_mismatch", "draft_not_empty", "desktop_unavailable", "monitor_unavailable",
+    "gate_preflight", "gate_restore", "cleanup_unconfirmed",
+})
 _SAFE_PROCESS_BINDING_MESSAGES = frozenset({
     "configured account is not bound to exactly one Weixin process",
     "Weixin executable version could not be verified",
@@ -148,6 +154,7 @@ def watchdog_main_with_diagnostics(
     *,
     gate_module: Any,
     legacy_root: str | Path,
+    memory_factory: Callable[[dict[str, Any]], Any] | None = None,
 ) -> int:
     """Run the legacy watchdog choreography and persist a redacted failure trace."""
     path = Path(lease_path)
@@ -171,7 +178,7 @@ def watchdog_main_with_diagnostics(
     try:
         lease = json.loads(path.read_text(encoding="utf-8"))
         stage = "open_process_memory"
-        memory = gate_module.Win32ProcessMemory(lease)
+        memory = (memory_factory or gate_module.Win32ProcessMemory)(lease)
         stage = "verify_initial_byte"
         if memory.read_byte(lease) != lease["originalByte"]:
             raise gate_module.GateError("gate was not original when watchdog armed")
@@ -274,9 +281,11 @@ def run_watchdog_on_desktop(
         if root_text not in sys.path:
             sys.path.insert(0, root_text)
         from dsh_wechat_bridge import gate as legacy_gate_module
+        from wechat_db.native_binding import make_native_memory_factory
 
         watchdog_main = lambda path: watchdog_main_with_diagnostics(
-            path, diagnostic_root, gate_module=legacy_gate_module, legacy_root=root
+            path, diagnostic_root, gate_module=legacy_gate_module, legacy_root=root,
+            memory_factory=make_native_memory_factory(legacy_gate_module),
         )
     # The handle belongs to this thread until process exit. Do not call
     # CloseDesktop while it remains the thread's assigned desktop.
@@ -624,6 +633,66 @@ class NativeWindowRuntime:
         class DesktopBoundRuntimeMixin:
             monitor = None
 
+            def probe(self, current_config):
+                if "preparedBinding" not in current_config:
+                    return super().probe(current_config)
+                if self._binding is not None or self._db is not None:
+                    raise runtime_module.RuntimeScopeError("runtime already owns a process binding")
+
+                from wechat_db.native_binding import NativeBindingError
+
+                try:
+                    # The factory is bound to the exact prepared snapshot. It revalidates
+                    # PID, HWND, DLL and account scope without a process-wide window scan.
+                    binding = self._binding_factory(current_config)
+                    db = self._db_factory(current_config, binding["accountName"])
+                    self_info = db.get_self_info()
+                    self_name = self_info.get("remark") or self_info.get("nick_name") or ""
+                    if (self_info.get("username") != current_config["botWxid"]
+                            or self_name != current_config["botName"]):
+                        raise runtime_module.RuntimeScopeError(
+                            "configured bot wxid and exact display name do not match"
+                        )
+                    runtime_module.verify_target_contact(
+                        db, current_config["targetWxid"], current_config["targetName"]
+                    )
+                    if runtime_module.is_group(current_config):
+                        runtime_module.group_members(
+                            db, current_config["targetWxid"], current_config["botWxid"]
+                        )
+                except (NativeBindingError, runtime_module.DbScopeError) as exc:
+                    raise runtime_module.RuntimeScopeError(str(exc)) from exc
+
+                self._binding = binding
+                self._db = db
+                # preparedBinding is nested mutable data; own a deep snapshot so later
+                # in-place config edits cannot mutate the session's comparison baseline.
+                self._config = copy.deepcopy(current_config)
+                return {
+                    "selfId": current_config["botWxid"],
+                    "targetId": current_config["targetWxid"],
+                    "binding": dict(binding),
+                }
+
+            def verify(self, current_config, session):
+                if "preparedBinding" not in current_config:
+                    return super().verify(current_config, session)
+                if self._binding is None or self._db is None or self._config != current_config:
+                    raise runtime_module.RuntimeScopeError(
+                        "runtime session is not bound to this configuration"
+                    )
+                if not isinstance(session, dict) or session.get("selfId") != current_config["botWxid"]:
+                    raise runtime_module.RuntimeScopeError("runtime session identity changed")
+
+                from wechat_db.native_binding import NativeBindingError, resolve_prepared_binding
+
+                try:
+                    # Per-operation verification is always against the original owned
+                    # snapshot; failures propagate and never rediscover another window.
+                    resolve_prepared_binding(current_config, self._binding)
+                except NativeBindingError as exc:
+                    raise runtime_module.RuntimeScopeError(str(exc)) from exc
+
             def require_monitor(self):
                 monitor = self.monitor
                 if monitor is None:
@@ -684,10 +753,14 @@ class NativeWindowRuntime:
                 return gate_module.TemporaryByteGate(
                     lease,
                     gate_config["stateRoot"],
+                    memory_factory=importlib.import_module("wechat_db.native_binding").make_native_memory_factory(gate_module),
                     watchdog_factory=lambda path: DesktopBoundWatchdog(path),
                 )
 
         runtime_type = type("NativeDesktopWindowsRuntime", (DesktopBoundRuntimeMixin, runtime_module.WindowsRuntime), {})
+        if "preparedBinding" in config:
+            from wechat_db.native_binding import resolve_prepared_binding
+            return runtime_type(binding_factory=lambda current: resolve_prepared_binding(current, current["preparedBinding"]))
         return runtime_type()
 
     @staticmethod
@@ -923,6 +996,30 @@ class NativeWindowRuntime:
         return result
 
 
+def _preparation_failure(exc: BaseException) -> dict[str, Any]:
+    """Carry only bounded reason codes and explicit gate evidence across JSONL."""
+    result = {"reasonCode": "prepare_failed", "gateActive": None, "gateRestored": False}
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        reason = getattr(current, "reason_code", None)
+        if (result["reasonCode"] == "prepare_failed" and isinstance(reason, str)
+                and reason in _PREPARATION_REASONS):
+            result["reasonCode"] = reason
+        state = getattr(current, "state", None)
+        if isinstance(state, dict):
+            active, restored = state.get("gateActive"), state.get("gateRestored")
+            if (active is None or type(active) is bool) and type(restored) is bool:
+                result["gateActive"], result["gateRestored"] = active, restored
+                # The nearest owner's restoration evidence takes precedence over causes.
+                return result
+        current = current.__cause__ if current.__cause__ is not None else (
+            None if current.__suppress_context__ else current.__context__
+        )
+    return result
+
+
 def _response_for_request(worker: Any, request: Any, validate_config: Callable[[Any], dict[str, Any]]) -> dict[str, Any]:
     if not isinstance(request, dict):
         return {"error": {"code": "invalid_request", "message": "request must be an object"}}
@@ -938,8 +1035,9 @@ def _response_for_request(worker: Any, request: Any, validate_config: Callable[[
                 raise NativeWindowError("native preparation cancellation path is required")
             result = worker.runtime.prepare_window(config, cancel_path)
             return {"result": result}
-        except Exception:
-            return {"error": {"code": "prepare_failed", "message": "native window preparation failed"}}
+        except Exception as exc:
+            return {"error": {"code": "prepare_failed", "message": "native window preparation failed",
+                              **_preparation_failure(exc)}}
     if method == "close":
         try:
             response = worker.handle(request)
@@ -998,6 +1096,11 @@ def main(argv: list[str] | None = None) -> int:
     legacy_root = Path(options.legacy_root).resolve()
     if not (legacy_root / "worker.py").is_file():
         parser.error("--legacy-root must contain worker.py")
+    # The watchdog is launched by filename too, so it needs the overlay package
+    # available before entering the watchdog branch.
+    project_root = str(Path(__file__).resolve().parents[1])
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     if options.watchdog_desktop is not None:
         try:
             return run_watchdog_on_desktop(
@@ -1013,9 +1116,6 @@ def main(argv: list[str] | None = None) -> int:
     root_text = str(legacy_root)
     if root_text not in sys.path:
         sys.path.insert(0, root_text)
-    project_root = str(Path(__file__).resolve().parents[1])
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
     from dsh_wechat_bridge.worker import Worker, validate_config
 
     serve_jsonl(

@@ -186,43 +186,103 @@ class DetachedWindowPreparer:
         self._lock = threading.RLock()
 
     def prepare(self, cancel_event):
-        from .legacy_sender import _JsonlChild
+        from .legacy_sender import PreparationError, _JsonlChild
         with self._lock:
             if self._closed or cancel_event.is_set():
-                raise RuntimeError("native preparation was cancelled")
-            marker = Path(self.worker["stateRoot"]) / "window-preparations" / (uuid.uuid4().hex + ".cancel")
-            marker.parent.mkdir(parents=True, exist_ok=True)
+                raise PreparationError(
+                    "prepare_cancelled", {"gateActive": False, "gateRestored": True}, True,
+                )
+            marker = None
             finished = threading.Event()
-            def observe_cancel():
-                while not finished.wait(0.05):
-                    if cancel_event.is_set():
-                        try:
-                            with marker.open("x", encoding="ascii") as stream:
-                                stream.write("cancel\n")
-                        except FileExistsError:
-                            pass
-                        return
-            observer = threading.Thread(target=observe_cancel, daemon=True)
-            observer.start()
-            self._child = _JsonlChild(self.command, self.args)
+            observer = None
+            child = None
+            result = None
+            reason_code = "prepare_failed"
+            reported_gate_state = {"gateActive": None, "gateRestored": False}
+            failed = False
+            cleanup_confirmed = False
             try:
-                self._child.start()
-                frame = self._child.request("prepareWindow", {"config": self.worker, "cancelPath": str(marker)}, 65)
-                result = frame.get("result")
-                if (not isinstance(result, dict) or result.get("gateActive") is not False
-                        or result.get("gateRestored") is not True or result.get("opened") is not True):
-                    raise RuntimeError("native window preparation failed")
+                marker = (Path(self.worker["stateRoot"]) / "window-preparations"
+                          / (uuid.uuid4().hex + ".cancel"))
+                marker.parent.mkdir(parents=True, exist_ok=True)
+
+                def observe_cancel():
+                    while not finished.wait(0.05):
+                        if cancel_event.is_set():
+                            try:
+                                with marker.open("x", encoding="ascii") as stream:
+                                    stream.write("cancel\n")
+                            except FileExistsError:
+                                pass
+                            return
+
+                observer = threading.Thread(target=observe_cancel, daemon=True)
+                observer.start()
+                child = _JsonlChild(self.command, self.args)
+                self._child = child
+                child.start()
+                frame = child.request(
+                    "prepareWindow", {"config": self.worker, "cancelPath": str(marker)}, 65,
+                )
+                error = frame.get("error")
+                if isinstance(error, dict):
+                    reason_code = error.get("reasonCode", "prepare_failed")
+                    active = error.get("gateActive")
+                    restored = error.get("gateRestored")
+                    reported_gate_state = {
+                        "gateActive": active if type(active) is bool or active is None else None,
+                        "gateRestored": restored if type(restored) is bool else False,
+                    }
+                    failed = True
+                else:
+                    result = frame.get("result")
+                    if isinstance(result, dict):
+                        active = result.get("gateActive")
+                        restored = result.get("gateRestored")
+                        reported_gate_state = {
+                            "gateActive": active if type(active) is bool or active is None else None,
+                            "gateRestored": restored if type(restored) is bool else False,
+                        }
+                    if (not isinstance(result, dict) or result.get("gateActive") is not False
+                            or result.get("gateRestored") is not True or result.get("opened") is not True):
+                        failed = True
+                    elif cancel_event.is_set():
+                        reason_code = "prepare_cancelled"
+                        failed = True
+            except PreparationError as error:
+                reason_code = error.reason_code
+                reported_gate_state = dict(error.gate_state)
+                failed = True
+            except Exception:
                 if cancel_event.is_set():
-                    raise RuntimeError("native preparation was cancelled")
-                return result
+                    reason_code = "prepare_cancelled"
+                failed = True
             finally:
                 finished.set()
-                observer.join(1)
-                if self._child.close_normally(5):
-                    self._child = None
-                    marker.unlink(missing_ok=True)
+                if observer is not None and observer.ident is not None:
+                    observer.join(1)
+                if child is None:
+                    cleanup_confirmed = True
                 else:
-                    raise RuntimeError("native preparation cleanup is unconfirmed")
+                    try:
+                        cleanup_confirmed = child.close_normally(5) is True
+                    except Exception:
+                        cleanup_confirmed = False
+                if cleanup_confirmed:
+                    self._child = None
+                    if marker is not None:
+                        try:
+                            marker.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+
+            if failed or not cleanup_confirmed:
+                if cleanup_confirmed:
+                    reported_gate_state = {"gateActive": False, "gateRestored": True}
+                elif not failed:
+                    reason_code = "cleanup_unconfirmed"
+                raise PreparationError(reason_code, reported_gate_state, cleanup_confirmed) from None
+            return result
 
     def close(self):
         with self._lock:

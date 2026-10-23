@@ -230,6 +230,36 @@ def test_database_recovery_does_not_override_locked_sender_status(tmp_path):
         adapter.on_shutdown({})
 
 
+@pytest.mark.parametrize("stage,recovery,reason", [
+    ("preparing", False, "sender_preparing"),
+    ("failed", False, "sender_prepare_failed"),
+    ("failed", True, "sender_recovery_required"),
+])
+def test_preparation_stage_and_error_are_visible_without_enabling_send(tmp_path, stage, recovery, reason):
+    sender = Sender()
+    sender.ready = False
+    sender.preparation_status = {
+        "state": stage, "recoveryRequired": recovery,
+        "error": "独立窗口准备失败；原因码：target_not_found。" if stage == "failed" else None,
+    }
+    adapter, _, stream = setup_adapter(tmp_path, sender)
+    try:
+        adapter._publish_status()
+        statuses = [frame["params"] for frame in map(json.loads, stream.getvalue().splitlines())
+                    if frame.get("method") == "event/status"]
+        assert statuses[-1]["reason"] == reason
+        assert statuses[-1]["canSend"] is False
+        assert statuses[-1]["detail"]
+        if stage == "failed":
+            assert "target_not_found" in statuses[-1]["detail"]
+        sender.ready = True
+        sender.preparation_status = {"state": "ready", "recoveryRequired": False, "error": None}
+        adapter._publish_status()
+        assert adapter.last_status == {"connection": "connected", "canSend": True}
+    finally:
+        adapter.on_shutdown({})
+
+
 def test_detached_watch_prepares_asynchronously_and_unwatch_invalidates_before_delivery(tmp_path):
     sender = PreparingSender()
     adapter, _, stream = setup_adapter(tmp_path, sender)

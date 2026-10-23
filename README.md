@@ -2,12 +2,15 @@
 
 让一个微信小号像普通群友一样在**一个群**里聊天的 [DeepSeek Harness（DSH）](https://github.com/anywhere-labs/deepseek-harness-desktop) 插件。
 
-> **当前状态（2026-10-22 实测）**
+> **当前状态（2026-10-23）**
 > - ✅ 初号机真实加密库、与浪味仙私聊的真实入站、真实模型生成及微信回发已通过。
 > - ✅ △ 群已通过会话选择、双击打开独立窗口、按选中窗口走 native 文字发送，并以精确数据库回执确认一条真实发送。正式 `/help` 的数据库记录为 incoming `4576749726552072719`、outgoing `126267775936878936`。
 > - ✅ 正式 `/ask` 使用真实模型生成三段且三段都已确认发送；结束时 backlog 为 0，`modelErrors`、`sendErrors` 均为 0。
-> - ℹ️ 默认发送方式仍是写入 JSON 发件箱；只有显式提供本机 `--sender-config` 才启用同步真实文字发送。该路径依赖旧 `dsh-wechat-bridge`/wx4py 隐藏桌面 worker，且微信版本、Weixin.dll 与控件门参数必须和本机配置匹配；其他版本未验收。
-> - ⏳ 当前只验收单活动目标；多会话并行、群聊长期稳定性、锁屏发送恢复、媒体收发/识别及窗口显隐尚未验收。
+> - ✅ 新加入的另一群已完成初始化、正式 `/help` 和模型回复；窗口绑定与恢复修复为通用流程，不按群名或群 ID 加特例。
+> - ✅ 必需的 Windows worker 源码及其测试、第三方许可证、固定依赖清单已迁入 `adapters/wechat-db/native-runtime`，新版无需从旧项目目录加载源码。
+> - ✅ 插件预留的 `window/get|set` 已接通：显示小号专用桌面、正常扫码登录、点击返回主桌面；微信保留在后台。
+> - ℹ️ 默认发送方式仍是写入 JSON 发件箱；只有显式提供本机 `--sender-config` 才启用同步真实文字发送。微信版本、Weixin.dll 与控件门参数必须和本机配置匹配；其他版本未验收。
+> - ⏳ 当前只验收单活动目标；多会话并行、群聊长期稳定性、锁屏发送恢复和媒体收发/识别尚未验收。
 
 ## 能做什么
 
@@ -19,7 +22,7 @@
 - **模型与思考强度可调**：`/model` 切换模型、`/think off|low|high|max` 调思考强度，切换前按 DSH 的模型目录校验，重启后保持。
 - **定时消息**：`/cron 10m 内容`、`/cron 10:00 内容`、`/cron 每天 22:00 UTC-5 内容`……本地定时库，重启不丢。
 - **身份认 wxid，名字跟着最新的走**：群昵称、昵称、备注、微信号都映射到 wxid 上；改名后按新名字也能找到同一个人，记忆和互动不受影响。
-- **记得住人**：从聊天里主动积累每个成员的背景和偏好，按微信 id 归属，`/memory` 查看、`/forget` 删除。
+- **记得住人**：主回复和独立后台学习从自述中积累背景与偏好，无需说“记住”；`infer` 跳过回复的消息也可学习。后台每群最多 2 次/分钟，不阻塞发送；按微信 id 和可见消息证据校验，`/memory` 查看、`/forget` 删除并阻止迟到结果写回。玩笑称呼只记录本人自称或互动约定。
 - **扛得住、能自愈**：积压上限、限速、模型超时、连续失败熔断、看门狗、适配器崩溃自动重启；有压力与混沌测试。
 - **收消息与处理不依赖桌面窗口**：适配器从本地数据库读取，插件按状态处理；可选真实发送后端需要可用的微信桌面窗口，锁屏发送恢复尚未验收。
 - **在 DSH 里看得见**：右侧栏控制台（连接、群、模式、日志、健康指标）；工作区里的「微信 · 群名」会话实时显示模型收到了什么、输出了什么；`/wechat eval` 用真实模型评测"该不该说话、在跟谁说"。
@@ -38,7 +41,7 @@ plugins/dsh-wechat-bot/        DSH 插件（安装的就是这个目录）
     session.js  model.js       「微信 · 群名」会话镜像、模型调用
     bot.js                     适配器连接与自动重启、所服务的群、看门狗
     chat.js                    一个群的流水线：命令 → 合批 → 模式 → 对象判断 → 模型 → 记忆 → 发送
-    batcher.js addressing.js prompt.js decision.js memory.js
+    batcher.js addressing.js prompt.js decision.js memory.js memory-learning.js
     commands.js cron.js        命令（含 /cron）
     engagement.js              /attack /comfort：按昵称或 @ 找人（脚本完成，不交给模型）
     models.js                  /model /think：模型与思考强度切换（按 DSH 模型目录校验）
@@ -48,7 +51,8 @@ plugins/dsh-wechat-bot/        DSH 插件（安装的就是这个目录）
   client/index.js              右侧栏控制台
   bin/simulator.js  bin/check-adapter.js
   personas/  test/
-adapters/wechat-db/            微信数据库适配器（Python）：读库收消息；默认发件箱，可选旧 worker 真实文字发送
+adapters/wechat-db/            微信数据库适配器（Python）：读库收消息；默认发件箱，可选内置 worker 真实文字发送
+  native-runtime/             已迁入的 Windows worker 源码、测试、许可证和依赖清单
   main.py                       参数入口（含可选 --sender-config）
   wechat_db/source.py           加密库范围约束与读取
   wechat_db/adapter.py          协议、监听及 outbox/delivery 分流
@@ -56,6 +60,8 @@ adapters/wechat-db/            微信数据库适配器（Python）：读库收�
   wechat_db/legacy_sender.py    旧 worker 子进程及会话目标选择
   wechat_db/detached_window.py 双击打开/复用目标独立窗口
   wechat_db/native_window_worker.py 隐藏桌面窗口准备、验证与派发
+  wechat_db/native_binding.py  已绑定 HWND 的进程/窗口/DLL 身份复核
+  wechat_db/desktop_control.py 插件预留显隐接口、专用桌面登录与返回按钮
   wechat_db/native_send.py      选中窗口的文字发送和数据库回执
 docs/                          protocol.md 协议 · commands.md 命令 · handoff.md 交接与对比
 ```
@@ -85,7 +91,7 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
       args: [-u, C:/path/to/dsh-wechat-bot/adapters/wechat-db/main.py, --account, wxid_xxx_c53e]
 ```
 
-以上示例使用默认发件箱。需要启用可选真实文字发送时，才在参数中增加 `--sender-config <本机配置文件路径>`；它与显式 `--outbox` 互斥，且只开放文字发送。账号目录、密钥缓存、旧 worker 路径和控件门配置都属于本机私有配置，不要写入仓库。适配器参数、配置结构和故障处理见 [adapters/wechat-db/README.md](adapters/wechat-db/README.md)。
+以上示例使用默认发件箱。需要启用真实文字发送时，在参数中增加 `--sender-config <本机配置文件路径>`；它与显式 `--outbox` 互斥，且只开放文字发送。按 [native-runtime/README.md](adapters/wechat-db/native-runtime/README.md) 安装发送依赖，将发送配置指向仓库内的 worker。账号目录、密钥缓存和控件门配置留在本地。适配器参数、显隐开关和故障处理见 [adapters/wechat-db/README.md](adapters/wechat-db/README.md)。
 
 ## 配置
 
@@ -100,6 +106,8 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
 | `behavior.quietMs` / `maxWaitMs` | 2000 / 8000 | 合批：静默多久 / 最多等多久 |
 | `behavior.maxMessages` | 20 | 一批最多几条；排队超过的更早消息转为上下文 |
 | `behavior.maxParts` | 3 | 一次最多发几条 |
+| `behavior.memoryLearning` | true | 由独立后台学习器写入记忆；关闭时使用主回复的记忆建议 |
+| `behavior.memoryCallsPerMinute` | 2 | 后台学习独立限速，允许 1–2 次/分钟/群 |
 | `behavior.idleMinutes` | 0 | 冷场多久后可以主动说话（仅 free 模式），0 = 不主动 |
 | `behavior.staleMinutes` | 10 | 发不出去的回复多久后丢弃 |
 | `behavior.cronZone` | `+08:00` | `/cron` 默认时区 |
@@ -136,12 +144,16 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
    {"to": 消息id, "reply": ["短句", …], "memory": [...]}
      不合格→纠正一次；有人找它却沉默→提醒一次
             ▼
-    记忆写入（证据须来自本批且属于该成员）→ 发送通道（按 canSend 等待；过时丢弃）
+    发送通道（按 canSend 等待；过时丢弃）；独立后台学习并行评估记忆
             ▼
     adapter.message/send
       ├ 默认：wechat-db 写一行内容 JSON 到发件箱
-      └ 配置 --sender-config：旧隐藏桌面 worker 在选中的主窗/独立窗发送文字，以精确数据库回执确认
+      └ 配置 --sender-config：仓库内的隐藏桌面 worker 在选中的主窗/独立窗发送文字，以精确数据库回执确认
 ```
+
+接话状态按成员分别保存最近回复；其他人插话不会覆盖原成员的接话机会。明确转为人与人 @/引用后，普通跟进不再被当作找机器人。模型输入保留当前名册、别名、原始消息 id、@ 对象和引用作者 id。
+
+后台记忆与回复并行合批，最多保留 20 条待评估消息、序列化输入不超过 18,000 字符；依次舍弃旧上下文、部分旧笔记和别名以控制体积，当前证据正文不截断。模型失败最多重试一次，停止、`/reset`、`/forget` 会取消在途学习。日志分别显示记忆结果和排队、模型、发送耗时。
 
 ## 测试
 
@@ -149,10 +161,11 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
 cd plugins/dsh-wechat-bot
 node --test test/*.test.js                  # 独立检出需要 DSH Host 依赖；见下方本轮实测说明
 STRESS_SCALE=3 node --test test/stress.test.js
-cd ../../adapters/wechat-db && python -m pytest tests     # 当前全套 134 项
+cd ../../adapters/wechat-db && python -m pytest tests     # 当前适配器 190 项
+python -m pytest native-runtime/tests/python             # 已迁入 worker 90 项
 ```
 
-2026-10-22 实测：Python 适配器全套 **134 passed**；Node 数据库→插件→默认发件箱定向端到端 **1 passed**。Node 全量测试在当前源码检出直接运行时 **91 passed，另有 `dsh.test.js` 因缺少 `@deepseek-ai/cordis` 等 DSH Host 依赖而失败**；随后用只读解析现有 DSH Web Host 依赖的临时 Node hook 单独运行 `dsh.test.js`，**5 passed**。96 项覆盖来自两次运行，不是原始全量命令一次干净通过。
+2026-10-23 实测：Node **139 passed / 0 skipped**、适配器 **190 passed**、迁入 worker **90 passed**。Node 覆盖群接话、后台学习、成员缓存和会话重连；命令用临时 `--import` hook 只读解析本次干净 DSH Web 的宿主依赖，并设置 `WECHAT_DB_PYTHON`；未在源码检出安装依赖。直接运行仍需先满足 peerDependencies。真实模型以合成用例验证自然记忆、两位作者的玩笑约定、爸爸/爷爷称呼归属和第三方转述保护；未发微信。称呼输出曾在复跑中波动，不把一次通过视为模型永远正确；无请求的记忆删除建议由程序拒绝。
 
 | 测试文件 | 覆盖 |
 | --- | --- |

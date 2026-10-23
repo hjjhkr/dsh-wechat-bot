@@ -8,7 +8,7 @@
 | 发 | 把要发的内容写成一行 JSON，追加到发件箱文件（默认 `~/.dsh/wechat-bot/wechat-outbox.jsonl`） | 已实现 |
 | 真正输入微信 | 可选 `--sender-config`；固定主窗或 `detachedWindow:true` 下使用已选独立窗口，数据库出站核对通过才返回微信消息 id | 初号机→浪味仙私聊模型回发已验证；△群独立窗单条真实文字发送及数据库回执已验证；不消费旧发件箱 |
 | 原生独立窗口 | 可选 `detachedWindow:true`，选择会话后双击打开或复用窗口，并把发送路由到已准备的目标独立窗口 | 单活动会话已接通；不包含多会话并行发送调度 |
-| 窗口显隐 | — | **未实现**（不声明 `window` 能力，控制台不显示开关） |
+| 窗口显隐 | 可选 | `desktopControl:true` 接通插件预留的 `window/get|set`，显示专用桌面及返回按钮 |
 
 ## 能读出什么
 
@@ -76,17 +76,19 @@ python -u main.py --plain path/to/db_storage --self wxid_bot   # 读未加密的
 
 同一个 `clientId` 只写一次（重启后也不会重写）。`content` 与协议的 `message/send` 相同：`text` / `image{path}` / `sticker{path|stickerId}`。消费者负责按 `chatId` 把内容输入微信；输入成功后微信库里会出现这条消息，插件按正文把它认作回显，不会重复记录。
 
-## 可选：复用旧隐藏桌面文字发送
+## 可选：内置 Windows 隐藏桌面文字发送
 
-适用于这台电脑已经有旧 `dsh-wechat-bridge` worker 与配套 Python 环境的情况。新插件逻辑不加载旧插件；适配器通过子进程调用旧 worker 的 `probe/send/close`。它仍依赖旧代码和该微信版本的控件门参数。默认不自动选择聊天；`detachedWindow:true` 开启下述原生窗口准备。
+发送所需的 worker 源码已迁入 [native-runtime](native-runtime/README.md)，无需旧项目目录或旧版 JavaScript 插件。先按该目录说明安装 Windows Python 依赖，适配器通过子进程调用仓库内 worker 的 `probe/send/close`。仍须现场核对微信版本与控件门参数。`detachedWindow:true` 开启原生窗口准备。
 
 配置 JSON 顶层：
 
 ```json
 {
-  "command": "C:/absolute/path/to/old-python/python.exe",
-  "args": ["C:/absolute/path/to/dsh-wechat-bridge/python/worker.py"],
-  "worker": { "完整的旧 worker 配置": "见下文，不可直接使用本占位例子" }
+  "command": "C:/path/to/checkout/.venv/Scripts/pythonw.exe",
+  "args": ["C:/path/to/checkout/adapters/wechat-db/native-runtime/python/worker.py"],
+  "detachedWindow": true,
+  "desktopControl": true,
+  "worker": { "完整的 worker 配置": "见下文，不可直接使用本占位例子" }
 }
 ```
 
@@ -95,6 +97,14 @@ python -u main.py --plain path/to/db_storage --self wxid_bot   # 读未加密的
 在发送配置 JSON 顶层添加 `"detachedWindow": true` 后，控制台可搜索群聊或私聊，点击「选择此会话」会异步选中微信会话并双击打开原生独立窗口；已存在的同目标窗口复用。准备成功后，适配器保存该代窗口的类名、标题和 native worker 参数，后续发送使用该独立窗，不回退到主窗；准备期间暂缓发送，不移动默认桌面的鼠标或键盘焦点。原生发送器在独立窗 UIA 输入控件标签「输入」中写入并核对完整草稿，再触发「发送」，只有精确的数据库出站回执与控件门恢复都确认后才返回微信消息 id。接线没有增加额外的发送前整窗复核；既有账号/进程监视、焦点保护和控件门检查仍保留。该功能依赖 Windows、旧 worker 的只读账号校验及配套 wx4py 环境；不是新的窗口显隐协议。目前只支持单活动目标，不实现多会话并行调度。
 
 `stateRoot` 和 `keyCacheFile` 应指向新实例专用状态目录，不与运行中的旧实例共享写入。实际版本、账号、目标群、桌面与控件门参数应现场核对，不能照抄文档示例或历史值；配置含本机身份和路径，应留在本地。**不要同时运行两个实例操作同一个微信窗口。**
+
+新入群后，在控制台选择本账号的目标会话即可，不需要为每个群修改发送配置。初次绑定仍要求精确且唯一的主窗口；绑定后的 gate 和独立 watchdog 复核该 HWND 的所属进程、启动时间、版本、窗口属性及 DLL 身份，不再因另一个窗口临时同名而重新选择主窗口。窗口选择仍要求唯一目标、匹配抬头及空草稿；未在微信列表中物化的会话或重名目标会明确失败。
+
+准备状态通过 `event/status.reason/detail` 显示在控制台。可恢复失败提供“重新准备”：只在上次 worker 正常关闭、gate 恢复及退出码 0 已确认后，显式重新选择同一会话才会开始下一次准备；准备中或已就绪的重复选择不重放操作。恢复未知时继续禁发，不能通过按钮或重复选择解封。
+
+准备成功时还会发布内部 `preparedBinding` 快照。后续每条发送的 probe/verify 只核对原 PID、启动时间、可执行文件/版本、精确 HWND、DLL 和唯一账号目录及数据库句柄；DB 自号/昵称、精确目标联系人和群成员校验仍保留。绑定失效停发，不重新扫描或回退主窗。初次准备仍使用完整发现流程。只读现场对比：完整 probe 10.750 秒（全机扫描 9.906 秒），已绑定 probe 0.969 秒；此测量未发送消息。
+
+`desktopControl:true` 仅允许与 `detachedWindow:true` 一起开启。它声明 `window` 能力，复用控制台已有显隐接口：显示时进入小号专用桌面，缺少小号进程时先启动登录窗口及“返回主桌面”工具栏；隐藏时返回 Default，保留小号进程。显示前必须确认返回工具栏就绪，不切换锁屏或无关桌面，不结束工作微信。后台发送不调用显隐控制；显示小号期间按既有桌面可用性约束暂缓发送。完成登录并返回后，可点“重新准备”重新绑定目标。窗口控制状态独立保存在 `worker.stateRoot/desktop-control`，进程按 PID、启动时间与可执行文件核验。
 
 ```bash
 python -u main.py --account <账号目录> --sender-config <本地配置.json>
@@ -113,6 +123,8 @@ python -u main.py --account <账号目录> --sender-config <本地配置.json>
 随后加载正式插件，新发 `/help` 的收件和帮助回复均经数据库复核；回执为 `126267775936878936`，正文哈希与生产发送日志一致。真实模型 `/ask` 后续分三段发送，三段逐条核对数据库目标、本人身份与正文哈希，生产journal全部confirmed；最终状态为 idle、backlog 0、模型/发送/内部错误均0。Python 测试 **134 passed**，Node 数据库→插件→发件箱端到端 **1 passed**；Node其余回归见项目README。群长期稳定性、多会话并行、媒体与锁屏仍须分别验收。
 
 ## 测试
+
+当前适配器 **190 passed**，迁入 worker **90 passed**；Node 最新结果见根 README。覆盖已绑定 HWND 遇到额外同名窗、身份漂移拒绝、准备失败及安全重试、显隐协议与返回工具栏前置条件。真实新群通过 `/help` 与模型文字回发；2026-10-23 通过插件显示登录窗口、用户完成登录并返回后，△群重新准备成功，迁入 worker 的两段模型回复均以数据库目标、本人和正文哈希确认。此前额外关闭空窗后新建的辅助验证未完成，不计为成功。
 
 ```bash
 pip install -r requirements-dev.txt

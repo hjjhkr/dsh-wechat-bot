@@ -3,7 +3,7 @@
 插件本身不碰微信。所有"读消息、发消息、登录、窗口显隐"都通过一个**适配器进程**完成，插件和适配器之间只说这份协议。
 只要实现了这份协议，任何东西都可以当适配器：Windows 微信 4.x 的 UI 自动化、数据库读取、iPad 协议、Hook、甚至别的 IM。
 
-- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（协议完整的假微信）；[`adapters/wechat-db`](../adapters/wechat-db)（读微信本地数据库收消息；默认写发件箱，可选旧 worker 同步发送文字）
+- 参考实现：[`plugins/dsh-wechat-bot/lib/simulator.js`](../plugins/dsh-wechat-bot/lib/simulator.js)（协议完整的假微信）；[`adapters/wechat-db`](../adapters/wechat-db)（读微信本地数据库收消息；默认写发件箱，可选仓库内 Windows worker 同步发送文字）
 - 插件侧客户端：[`lib/adapter.js`](../plugins/dsh-wechat-bot/lib/adapter.js)，数据校验：[`lib/protocol.js`](../plugins/dsh-wechat-bot/lib/protocol.js)
 - 一致性检查工具：`node bin/check-adapter.js -- <你的适配器命令>`
 
@@ -154,6 +154,8 @@ result: { watching: string[] }
 
 **基线语义**：只推送调用之后**新到达**的消息（不要把旧消息当新消息推）。适配器重启后插件会再调一次。
 
+`wechat-db` 的独立窗口模式在安全准备失败后，显式重复设置同一目标可重新准备窗口；准备中或已就绪时重复设置保持幂等。此前 gate 或 worker 清理未确认则仍拒绝重试，不改变发送日志的去重语义。
+
 ### `message/send`
 
 ```ts
@@ -177,7 +179,7 @@ result: { messageId: string }            // 这条消息在微信里的 id，用
    - `unavailable`：**现在发不了，什么都没做**（例如锁屏期间无法操作 UI）。插件等待 `event/status canSend:true` 后再试；回复超过 10 分钟（可配）就丢弃，不会把过时回复补发出去。
 3. **回显**：发出去的消息之后也应作为 `event/message`（`fromSelf: true`）推送一次。`id` 等于返回的 `messageId` 时按 id 去重；不相等时（例如适配器只是把内容排进了队列，真正发出后数据库里是另一个 id），插件在 2 分钟内按正文匹配去重。没有回显也能工作。
 
-   `adapters/wechat-db` 默认是"排队"式：写进发件箱后返回 `out:<clientId>`，此回执只代表入箱；消费者尚未实现。显式设置 `--sender-config` 后改为同步文字发送：通过旧隐藏桌面 worker 在配置的主窗口或已准备的独立窗口中发送，真实数据库出站核对通过才返回微信 id，持久日志保证跨重启不重复；不消费或补发默认发件箱的旧记录。该路径依赖旧 `dsh-wechat-bridge`/wx4py、本机微信版本与控件门参数匹配；不支持媒体发送和非空 mentions。
+   `adapters/wechat-db` 默认是"排队"式：写进发件箱后返回 `out:<clientId>`，此回执只代表入箱；消费者尚未实现。显式设置 `--sender-config` 后改为同步文字发送：通过仓库内 `native-runtime` 的隐藏桌面 worker 在配置的主窗口或已准备的独立窗口中发送，真实数据库出站核对通过才返回微信 id，持久日志保证跨重启不重复；不消费或补发默认发件箱的旧记录。该路径依赖 wx4py、本机微信版本与控件门参数匹配，不依赖旧项目目录；不支持媒体发送和非空 mentions。
 4. 命令的直接回复可能与普通回复**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
 
 当前实现的真实验收记录（2026-10-22）：初号机真实加密库、初号机与浪味仙私聊的真实模型回复已通过；△群会话选择、双击打开独立窗口、native文字发送和精确数据库回执已通过。正式 `/help` 的 incoming/outgoing 数据库 id 分别为 `4576749726552072719` 和 `126267775936878936`；`/ask` 的三段模型回复全部与数据库核对，`modelErrors`、`sendErrors` 均为0。这是当前单活动会话的短期文字收发证据，不代表群长期稳定性、多会话并行、锁屏恢复或媒体能力。
@@ -192,11 +194,13 @@ result: { path: string, mime: string, width?: number, height?: number }   // 解
 ### `window/get` / `window/set`（能力 `window`）
 
 ```ts
-window/get  params: {}                    result: { visible: boolean }
-window/set  params: { visible: boolean }  result: { visible: boolean }
+window/get  params: {}                    result: { visible: boolean, running?: boolean }
+window/set  params: { visible: boolean }  result: { visible: boolean, running?: boolean }
 ```
 
-控制台的"小号聊天窗口"开关。**要求：切换时不能抢用户的前台焦点**，隐藏状态下收发照常工作。实现思路见 [handoff.md](handoff.md#窗口显隐)。
+控制台已有的显隐开关。`wechat-db` 在本地发送配置启用 `desktopControl:true` 时声明此能力：用户主动显示会进入小号专用桌面，缺少进程时启动登录窗口；切换前必须备好返回工具栏。用户点击“返回主桌面”或 `visible:false` 时返回 Default，小号继续后台运行。后台收发不会自行切换输入桌面；显示期间发送按桌面可用性约束等待。锁屏或无关输入桌面返回 `unavailable`，非法 visible 返回 `invalid_params`。
+
+`preparedBinding` 是适配器内部窗口快照，不是协议字段。选择会话、准备状态及 `message/send` 的幂等/回执语义保持不变；失效的绑定不能通过显隐接口绕过恢复门禁。
 
 ### `shutdown`
 
@@ -258,6 +262,8 @@ params: {
 
 状态变化时发（不用定时发）。`canSend: false` 时插件**照常收消息、照常思考**，回复排队等待；变回 `true` 后发送，过时的丢弃。
 从不发 `event/status` 的适配器，登录后被视为 `connected, canSend: true`；发过的以适配器说的为准。
+
+`wechat-db` 真实发送模式使用以下原因码，均保持 `canSend:false`：`sender_preparing` 表示独立窗口准备中；`sender_prepare_failed` 表示已安全清理的准备失败，可由用户重新准备；`sender_recovery_required` 表示恢复未确认，禁止重试。`detail` 为可公开显示的固定说明或经过筛选的原因码，不包含本机密钥、路径或原始异常文本。
 
 ### `event/account`
 

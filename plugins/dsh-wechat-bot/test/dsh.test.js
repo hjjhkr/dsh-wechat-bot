@@ -156,3 +156,27 @@ test('reopening restores the history and closes a turn interrupted by a crash', 
   assert.ok(events.some(e => e.type === 'turn/end'), 'interrupted turn was closed on reopen')
   assert.equal(reopened.turn, 1)
 })
+
+test('reconnecting to an occupied mirror creates a new writable session without taking over the old one', async t => {
+  const { ctx, root, open } = await fixture(t)
+  const original = await open()
+  t.after(() => original.dispose())
+  const next = await ChatSession.openAvailable(ctx, { id: original.id, cwd: root, title: '微信 · 测试群', route: ROUTE })
+  t.after(() => next.dispose())
+  assert.notEqual(next.id, original.id)
+  assert.equal(original.disposed, undefined)
+  await next.run('新的微信消息', async () => '新的回复')
+  assert.equal(next.session.snapshotEvents().filter(e => e.type === 'turn/start').length, 1)
+  assert.equal(original.session.snapshotEvents().filter(e => e.type === 'turn/start').length, 0)
+  assert.match(ctx.sessionTitle.get(next.session).title, /续接/)
+})
+
+test('an available recorded mirror id is restored rather than creating another session', async t => {
+  const { ctx, root, open } = await fixture(t)
+  const first = await open()
+  const id = first.id
+  await first.dispose()
+  const restored = await ChatSession.openAvailable(ctx, { id, cwd: root, title: '微信 · 测试群', route: ROUTE })
+  t.after(() => restored.dispose())
+  assert.equal(restored.id, id)
+})

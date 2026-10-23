@@ -7,6 +7,7 @@ import { DecisionError, parseDecision } from './decision.js'
 import { ENGAGEMENT_IDLE_MS, STYLES } from './engagement.js'
 import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
 import { MemoryBook } from './memory.js'
+import { hasMemoryCandidate, memoryInput, parseMemoryDecision } from './memory-learning.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
 
@@ -36,6 +37,14 @@ export const chatDefaults = Object.freeze({
   echoWindowMs: 2 * 60_000,    // how long a sent text may take to come back from the adapter
   cronZone: '+08:00',          // time zone of /cron times without an explicit zone
   engagementIdleMs: ENGAGEMENT_IDLE_MS, // /attack, /comfort end after the target is silent this long
+  memoryLearning: true,
+  memoryQuietMs: 2000,
+  memoryMaxWaitMs: 15_000,
+  memoryCallsPerMinute: 2,
+  memoryRateWindowMs: 60_000,
+  memoryTimeoutMs: 30_000,
+  memberLookupTimeoutMs: 1500,
+  memberCacheTtlMs: 5000,
 })
 
 const LOG_LIMIT = 300
@@ -78,13 +87,14 @@ export class ChatRunner {
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, account, link, think, commands, emit, persist, models }) {
+  constructor({ chat, state = {}, settings, persona, account, link, think, learn, commands, emit, persist, models }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona
     this.account = account
     this.link = link
     this.think = think
+    this.learn = learn
     this.commands = commands ?? new CommandRegistry()
     this.emit = emit ?? (() => {})
     this.persist = persist ?? (async () => {})
@@ -93,6 +103,17 @@ export class ChatRunner {
     this.memory = new MemoryBook(state.memory)
     this.log = state.log ?? []
     this.lastBotTurn = state.lastBotTurn
+    this.lastBotTurns = state.lastBotTurns ?? (state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : [])
+    this.memberCache = state.memberCache
+    this.memberCacheAt = state.memberCacheAt ?? 0
+    this.forgottenEvidence = new Set(state.forgottenEvidence ?? [])
+    this.learningPending = new Map()
+    this.learningEpoch = 0
+    this.learningRate = new RateWindow(Math.min(2, this.settings.memoryCallsPerMinute), this.settings.memoryRateWindowMs)
+    this.learningTimes = (state.learningTimes ?? []).filter(time => Number.isFinite(time)
+      && time <= Date.now() && Date.now() - time < this.settings.memoryRateWindowMs).slice(-2)
+    for (const time of this.learningTimes) this.learningRate.record(time)
+    this.learningRetries = new Map()
     // Only a mode chosen explicitly (console, /mode, tool) is persisted; otherwise config decides.
     this.modeOverride = MODES[state.mode] ? state.mode : undefined
     this.mutedUntil = state.mutedUntil ?? 0
@@ -128,6 +149,8 @@ export class ChatRunner {
       status: this.status, mode: this.mode, mutedUntil: this.mutedUntil,
       backlog: this.batcher.size, busyMs: this.stuckFor(now),
       breaker: this.breaker.view(now), turnsLastMinute: this.rate.used, counters: { ...this.counters },
+      members: { count: this.memberCache?.length ?? 0, refreshedAt: this.memberCacheAt,
+        refreshing: Boolean(this.memberLookupPending) },
       engagement: this.engagement && now - this.engagement.lastTargetAt <= this.settings.engagementIdleMs
         ? { style: this.engagement.style, target: this.engagement.target } : null,
     }
@@ -139,6 +162,10 @@ export class ChatRunner {
       memory: this.memory.toJSON(),
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurn: this.lastBotTurn,
+      lastBotTurns: this.lastBotTurns,
+      forgottenEvidence: [...this.forgottenEvidence].slice(-SEEN_LIMIT),
+      learningTimes: this.learningTimes.filter(time => Date.now() - time < this.settings.memoryRateWindowMs),
+      memberCache: this.memberCache, memberCacheAt: this.memberCacheAt,
       mode: this.modeOverride,
       mutedUntil: this.mutedUntil,
       stats: this.stats,
@@ -154,6 +181,7 @@ export class ChatRunner {
   dispose() {
     this.disposed = true
     this.abort.abort()
+    this.#cancelLearning()
     this.batcher.clear()
     clearTimeout(this.idleTimer)
     clearTimeout(this.cronTimer)
@@ -316,11 +344,18 @@ export class ChatRunner {
         mute: ms => this.mute(ms),
         memory: {
           recall: id => this.memory.recall([id])[id] ?? {},
-          forget: (id, topic) => this.memory.forget(id, topic),
+          forget: (id, topic) => {
+            this.#cancelLearning()
+            for (const m of this.transcript) if (m.sender.id === id) this.forgottenEvidence.add(m.id)
+            while (this.forgottenEvidence.size > SEEN_LIMIT) this.forgottenEvidence.delete(this.forgottenEvidence.values().next().value)
+            return this.memory.forget(id, topic)
+          },
         },
         resetContext: () => {
+          this.#cancelLearning()
           this.transcript = []
           this.lastBotTurn = undefined
+          this.lastBotTurns = []
         },
         status: () => ({
           mode: this.mode, mutedUntil: this.mutedUntil, today: this.stats,
@@ -330,7 +365,7 @@ export class ChatRunner {
         commands: this.commands.list(),
         models: this.models,
         selfId: this.account().id,
-        members: () => this.#members(),
+        members: () => this.#members({ fresh: true }),
         engagement: {
           current: () => this.#activeEngagement(),
           start: (style, target) => {
@@ -403,13 +438,39 @@ export class ChatRunner {
 
   // Everyone the bot knows in this chat, keyed by id with their latest names: the adapter's
   // member list (read fresh), plus whoever spoke recently (latest message wins).
-  async #members() {
-    const known = new Map()
-    for (const m of this.transcript) known.set(m.sender.id, { id: m.sender.id, name: m.sender.name, aliases: m.sender.aliases ?? [] })
-    try {
-      for (const m of (await this.link.members?.()) ?? []) known.set(m.id, { id: m.id, name: m.name, aliases: m.aliases ?? [] })
-    } catch {
-      // the transcript alone still covers everyone who has been talking
+  async #members({ fresh = false } = {}) {
+    let pending = this.memberLookupPending
+    if (!pending && (fresh || !this.memberCache || Date.now() - this.memberCacheAt >= this.settings.memberCacheTtlMs)) {
+      pending = this.memberLookupPending = Promise.resolve().then(() => this.link.members?.() ?? []).then(members => {
+        if (!this.disposed) {
+          this.memberCache = members
+          this.memberCacheAt = Date.now()
+          this.emit('change')
+        }
+        return members
+      }).catch(error => {
+        if (!this.disposed) this.#notice('members_unavailable', { code: error.code ?? error.name })
+        throw error
+      }).finally(() => {
+        if (this.memberLookupPending === pending) this.memberLookupPending = undefined
+        if (this.memberLookupTimedOut === pending) this.memberLookupTimedOut = undefined
+      })
+      pending.catch(() => {}) // refreshes with a valid cache are deliberately not awaited
+    }
+    if ((!this.memberCache || fresh) && pending && this.memberLookupTimedOut !== pending) {
+      try { await withDeadline(() => pending, this.settings.memberLookupTimeoutMs, this.abort.signal) }
+      catch (error) {
+        if (this.memberLookupPending === pending) {
+          this.memberLookupTimedOut = pending
+          if (!this.disposed && !this.memberCache) this.#notice('members_pending', {})
+        }
+      }
+    }
+    const known = new Map((this.memberCache ?? []).map(m => [m.id, { id: m.id, name: m.name, aliases: m.aliases ?? [] }]))
+    for (const m of this.transcript) {
+      if (!known.has(m.sender.id) || m.time >= this.memberCacheAt) {
+        known.set(m.sender.id, { id: m.sender.id, name: m.sender.name, aliases: m.sender.aliases ?? [] })
+      }
     }
     const self = known.get(this.account()?.id)
     if (self) this.selfNames = [self.name, ...self.aliases]
@@ -423,8 +484,13 @@ export class ChatRunner {
   }
 
   #addresses(batch) {
-    const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(), lastBotTurn: this.lastBotTurn }
-    return new Map(batch.map(m => [m.id, m.command ? { addressed: 'you', reasons: ['command'] } : addressOf(this.#withQuoteSender(m), context)]))
+    const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(), lastBotTurns: this.lastBotTurns }
+    return new Map(batch.map(m => {
+      const index = this.transcript.findIndex(item => item.id === m.id)
+      const recent = index < 0 ? this.transcript.filter(item => item.time <= m.time) : this.transcript.slice(0, index)
+      return [m.id, m.command ? { addressed: 'you', reasons: ['command'] }
+        : addressOf(this.#withQuoteSender(m), { ...context, recent })]
+    }))
   }
 
   // Adapters may identify a quoted message only by id; look its sender up locally.
@@ -497,6 +563,7 @@ export class ChatRunner {
     const engagement = !urgent && !event ? this.#activeEngagement() : null
     if (engagement) {
       const fromTarget = batch.filter(m => m.sender.id === engagement.target.id)
+      this.#queueLearning(batch.filter(m => m.sender.id !== engagement.target.id))
       if (!fromTarget.length) return void this.#write('skipped', { reason: 'engaged', count: batch.length })
       if (this.muted || this.mode === 'silent') return void this.#write('skipped', { reason: 'muted', count: batch.length })
       batch = fromTarget
@@ -504,7 +571,12 @@ export class ChatRunner {
     }
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
-    if (skip) return void this.#write('skipped', { reason: skip, count: batch.length })
+    if (skip) {
+      this.#queueLearning(batch)
+      return void this.#write('skipped', { reason: skip, count: batch.length,
+        addressed: Object.fromEntries([...address].map(([id, a]) => [id, a.addressed])),
+        why: Object.fromEntries([...address].map(([id, a]) => [id, a.reasons])) })
+    }
     if (urgent) {
       // Explicit requests skip the rate limit, but an open breaker means the model is down.
       if (this.breaker.wait()) return void this.#say('模型暂时不可用，稍后再试')
@@ -551,8 +623,14 @@ export class ChatRunner {
     if (event?.kind === 'idle' && this.batcher.arrived) return void this.#write('idle_dropped', { newer: this.batcher.arrived })
 
     if (batch.length) {
-      const { applied, rejected } = this.memory.apply(decision.memory, batch)
-      if (applied.length || rejected.length) this.#write('memory', { applied, rejected })
+      if (this.learn && this.settings.memoryLearning) {
+        // A persona may misread third-party claims as the speaker's own facts.
+        // The independent learner must inspect the raw evidence before writing.
+        this.#queueLearning(batch)
+      } else {
+        const { applied, rejected } = this.#applyMemory(decision.memory, decision.memoryEvidence ?? batch)
+        if (applied.length || rejected.length) this.#write('memory', { applied, rejected })
+      }
     }
     if (!decision.reply.length) {
       this.#write('silent', {})
@@ -561,7 +639,11 @@ export class ChatRunner {
     // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
     const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
     const engagementId = event?.kind === 'engagement' ? engagement.id : batch.find(m => m.command?.engagement)?.command.engagement
+    const sendStarted = Date.now()
     await this.#deliver(decision.reply, { batch, target, event, started, engagementId })
+    this.#write('latency', { modelMs: decision.modelMs, sendMs: Date.now() - sendStarted,
+      queueMs: batch.length ? Math.max(0, started - Math.min(...batch.map(m => m.time))) : 0,
+      totalMs: batch.length ? Math.max(0, Date.now() - Math.min(...batch.map(m => m.time))) : Date.now() - started })
   }
 
   // An interrupted batch goes back where it came from; the next turn sees the new state.
@@ -574,12 +656,15 @@ export class ChatRunner {
   }
 
   async #decide({ batch, address, event, mustReply, signal }) {
+    const modelStarted = Date.now()
     const settings = this.settings
     const stickers = Object.keys(settings.stickers ?? {})
     const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers })
+    const recent = this.#recent(batch).map(m => this.#withQuoteSender(m))
+    const members = await this.#members()
     const input = turnInput({
       chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],
-      recent: this.#recent(batch), batch, address, memory: this.#memoryFor(batch), event,
+      members, recent, batch: batch.map(m => this.#withQuoteSender(m)), address, memory: this.#memoryFor(batch), event,
     })
     const messages = [{ role: 'user', text: input }]
     const readable = event?.kind === 'idle' ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address, event)
@@ -599,7 +684,12 @@ export class ChatRunner {
             : 'new 里有 addressed=you 的消息，有人在直接找你，reply 不能为空')
         } else {
           this.#write('decision', { to: decision.to, reply: decision.reply, raw: output })
-          return decision
+          const refs = new Map(recent.map((m, i) => [`r${i + 1}`, m.id]))
+          const originalIds = new Set([...recent, ...batch].map(m => m.id))
+          decision.memory = decision.memory.map(update => update && typeof update === 'object'
+            && !originalIds.has(update.evidence) && refs.has(update.evidence)
+            ? { ...update, evidence: refs.get(update.evidence) } : update)
+          return { ...decision, memoryEvidence: [...recent, ...batch], modelMs: Date.now() - modelStarted }
         }
       } catch (error) {
         if (!(error instanceof DecisionError)) throw error
@@ -611,6 +701,101 @@ export class ChatRunner {
         throw problem
       }
       messages.push({ role: 'assistant', text: output }, { role: 'user', text: `上一次输出不符合要求：${problem.hint}。请重新输出完整 JSON。` })
+    }
+  }
+
+  #applyMemory(updates, evidence) {
+    return this.memory.apply(updates, evidence.filter(m => !this.forgottenEvidence.has(m.id)))
+  }
+
+  #cancelLearning() {
+    this.learningEpoch++
+    clearTimeout(this.learningTimer)
+    this.learningTimer = undefined
+    this.learningPending.clear()
+    this.learningRetries.clear()
+    this.learningFirstAt = 0
+    this.learningController?.abort(new Interrupted('memory_cancelled'))
+  }
+
+  #queueLearning(batch) {
+    if (!this.learn || !this.settings.memoryLearning || this.disposed) return
+    for (const m of batch) {
+      if (this.forgottenEvidence.has(m.id) || !hasMemoryCandidate([m])) continue
+      if (m.text.length > Math.min(6000, this.settings.maxChars)) {
+        this.#notice('memory_input_too_long', { id: m.id })
+        continue
+      }
+      if (!this.learningPending.size) this.learningFirstAt = Date.now()
+      this.learningPending.set(m.id, m)
+    }
+    const limit = Math.min(20, this.settings.maxMessages)
+    while (this.learningPending.size > limit) {
+      this.learningPending.delete(this.learningPending.keys().next().value)
+      this.#notice('memory_overflow', { limit })
+    }
+    this.#scheduleLearning()
+  }
+
+  #scheduleLearning() {
+    clearTimeout(this.learningTimer)
+    if (!this.learningPending.size || this.learningController || this.disposed) return
+    const wait = Math.max(this.learningRate.wait(), Math.min(this.settings.memoryQuietMs,
+      Math.max(0, this.learningFirstAt + this.settings.memoryMaxWaitMs - Date.now())))
+    this.learningTimer = setTimeout(() => this.#flushLearning(), wait)
+    this.learningTimer.unref?.()
+  }
+
+  async #flushLearning() {
+    if (this.disposed || this.learningController || !this.learningPending.size) return
+    if (this.learningRate.wait()) return this.#scheduleLearning()
+    const controller = this.learningController = new AbortController()
+    const epoch = this.learningEpoch
+    const batch = []
+    let chars = 0
+    for (const [id, m] of this.learningPending) {
+      if (chars + m.text.length > Math.min(6000, this.settings.maxChars)) break
+      batch.push(m)
+      chars += m.text.length
+      this.learningPending.delete(id)
+    }
+    try {
+      const recent = []
+      let contextChars = chars
+      for (const m of this.#recent(batch).reverse()) {
+        if (this.forgottenEvidence.has(m.id) || !hasMemoryCandidate([m])
+            || contextChars + m.text.length > 9000) continue
+        recent.unshift(m)
+        contextChars += m.text.length
+        if (recent.length === 20) break
+      }
+      const request = memoryInput({ chat: this.chat, self: this.account(), members: await this.#members(),
+        batch, recent, memory: this.#memoryFor(batch) })
+      if (!request.evidence.length || epoch !== this.learningEpoch) return
+      this.learningRate.record()
+      this.learningTimes = [...this.learningTimes.filter(time => Date.now() - time < this.settings.memoryRateWindowMs), Date.now()].slice(-2)
+      this.emit('change')
+      const raw = await withDeadline(signal => this.learn({ chat: this.chat, system: request.system,
+        messages: [{ role: 'user', text: request.input }], readable: `${this.chat.name}：后台记忆学习`,
+        effort: 'off', signal }), this.settings.memoryTimeoutMs, controller.signal)
+      if (this.disposed || epoch !== this.learningEpoch) return
+      const { applied, rejected } = this.#applyMemory(parseMemoryDecision(raw), request.evidence)
+      this.#write('memory_learning', { count: batch.length, applied, rejected })
+      if (applied.length) {
+        this.emit('change')
+        await this.persist()
+      }
+    } catch (error) {
+      if (!this.disposed && epoch === this.learningEpoch) {
+        this.#write('memory_error', { code: error.code ?? error.name })
+        const retry = batch.filter(m => !this.forgottenEvidence.has(m.id) && (this.learningRetries.get(m.id) ?? 0) < 1)
+        for (const m of retry) this.learningRetries.set(m.id, 1)
+        while (this.learningRetries.size > SEEN_LIMIT) this.learningRetries.delete(this.learningRetries.keys().next().value)
+        this.#queueLearning(retry)
+      }
+    } finally {
+      if (this.learningController === controller) this.learningController = undefined
+      this.#scheduleLearning()
     }
   }
 
@@ -632,8 +817,12 @@ export class ChatRunner {
       const result = await this.#sendOne(content, `${turnId}:${index}`, { started, blocked, ownsStatus: true })
       if (!result) return
       this.#sent(result.messageId, part)
+      if (target?.sender.id) {
+        this.lastBotTurn = { time: Date.now(), toSenderId: target.sender.id, sourceTime: target.time }
+        this.lastBotTurns = [...this.lastBotTurns.filter(turn => turn.toSenderId !== target.sender.id
+          && Date.now() - turn.time <= 3 * 60_000), this.lastBotTurn].slice(-COMMAND_SENDERS_LIMIT)
+      }
     }
-    this.lastBotTurn = { time: Date.now(), toSenderId: target?.sender.id }
   }
 
   #sent(messageId, part) {

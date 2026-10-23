@@ -1,0 +1,14 @@
+beautifulsoup4==4.15.0
+cffi==2.1.1
+comtypes==1.4.17
+cryptography==50.0.2
+Markdown==3.11.2
+pillow==13.0.0
+psutil==7.2.2
+pycparser==3.12
+pyperclip==1.11.0
+pywin32==312
+soupsieve==3.0.4
+typing_extensions==4.16.0
+wx4py==0.2.1
+zstandard==0.25.0

@@ -32,9 +32,9 @@ export class Bot extends EventEmitter {
   #queue = Promise.resolve()
   #watchFailures = 0
 
-  constructor({ createAdapter, store, persona, settings = {}, think, dataDir, commands = new CommandRegistry(), models }) {
+  constructor({ createAdapter, store, persona, settings = {}, think, learn, dataDir, commands = new CommandRegistry(), models }) {
     super()
-    Object.assign(this, { createAdapter, store, persona, think, dataDir, commands, models })
+    Object.assign(this, { createAdapter, store, persona, think, learn, dataDir, commands, models })
     this.settings = { ...botDefaults, ...settings }
     store.onError = error => this.note('error', `保存状态失败：${error.message}`)
   }
@@ -244,6 +244,7 @@ export class Bot extends EventEmitter {
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),
+      learn: this.learn && (args => this.learn(args)),
       link: {
         send: (content, clientId) => this.adapter.send(chat.id, clientId, content),
         members: () => this.adapter.members(chat.id),

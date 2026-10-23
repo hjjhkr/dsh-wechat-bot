@@ -62,6 +62,7 @@ window.__ModuleLoader__.load({
 .wxb-log .error,.wxb-log .send_error,.wxb-log .invalid_output{color:var(--dsw-alias-state-error-primary)}
 .wxb-log .sent{color:var(--dsw-alias-state-business-primary)}
 .wxb-log details{color:var(--dsw-alias-label-tertiary)}
+.wxb-sender.warn{border-color:var(--dsw-alias-state-warn-primary)}.wxb-sender.err{border-color:var(--dsw-alias-state-error-primary)}
 .wxb-switch{position:relative;width:34px;height:20px;border-radius:10px;border:none!important;padding:0!important;background:var(--dsw-alias-border-l4)!important}
 .wxb-switch[aria-checked=true]{background:var(--dsw-alias-brand-primary)!important}
 .wxb-switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
@@ -71,6 +72,11 @@ window.__ModuleLoader__.load({
 
     const MODES = [['free', '自由'], ['infer', '推断'], ['at', '只回@'], ['silent', '静音']]
     const CONNECTION = { connected: ['ok', '已连接'], degraded: ['warn', '不稳定'], disconnected: ['err', '未连接'], adapter_down: ['err', '适配器未运行'], starting: ['warn', '启动中'] }
+    const SENDER_PREPARATION = {
+      sender_preparing: ['warn', '独立微信窗口准备中'],
+      sender_prepare_failed: ['err', '独立微信窗口准备失败'],
+      sender_recovery_required: ['err', '独立微信窗口恢复待确认'],
+    }
 
     function Status({ state }) {
       const [tone, label] = CONNECTION[state.connection.state] ?? ['warn', state.connection.state]
@@ -82,6 +88,37 @@ window.__ModuleLoader__.load({
           h('span', { className: 'wxb-muted' }, cannotSend ? `${label}，暂不能发送${state.connection.reason ? `（${state.connection.reason}）` : ''}` : label)),
         h('div', { className: 'wxb-muted' },
           `适配器 ${state.adapter ? `${state.adapter.name} ${state.adapter.version}` : '—'}${state.capabilities?.simulator ? '（模拟器）' : ''} · 模型 ${state.model.model} · 思考 ${state.model.reasoningEffort}`))
+    }
+
+    function SenderPreparation({ connection, chat, refresh }) {
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(null)
+      const status = SENDER_PREPARATION[connection.reason]
+      if (!status) return null
+
+      const [tone, label] = status
+      const canRetry = connection.reason === 'sender_prepare_failed' && Boolean(chat?.id)
+      const failed = connection.reason === 'sender_prepare_failed'
+      const retry = async () => {
+        if (!canRetry || busy) return
+        setBusy(true)
+        setError(null)
+        try {
+          await api.act('watch', { chatId: chat.id })
+          refresh()
+        } catch (e) {
+          setError(e.message)
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      return h('div', { className: `wxb-card wxb-sender ${tone}`, role: failed ? 'alert' : 'status', 'aria-live': failed ? 'assertive' : 'polite' },
+        h('div', { className: 'wxb-row' }, h('span', { className: `wxb-dot ${tone}` }), h('strong', null, label)),
+        connection.detail && h('div', { className: 'wxb-muted' }, connection.detail),
+        canRetry && h('div', { className: 'wxb-row' },
+          h('button', { className: 'primary', disabled: busy, onClick: retry }, busy ? '准备中…' : '重新准备')),
+        error && h('div', { className: 'wxb-error' }, `重新准备失败：${error}`))
     }
 
     function Login({ refresh }) {
@@ -101,13 +138,24 @@ window.__ModuleLoader__.load({
     function WindowToggle() {
       const [visible, setVisible] = useState(null)
       const [error, setError] = useState(null)
-      useEffect(() => { api.act('windowState').then(s => setVisible(s.visible), e => setError(e.message)) }, [])
+      const [busy, setBusy] = useState(false)
+      useEffect(() => {
+        let active = true
+        const refresh = () => api.act('windowState').then(s => {
+          if (active) { setVisible(s.visible); setError(null) }
+        }, e => { if (active) setError(e.message) })
+        refresh()
+        const timer = setInterval(refresh, 2000)
+        return () => { active = false; clearInterval(timer) }
+      }, [])
       const toggle = async () => {
+        setBusy(true)
         try { setVisible((await api.act('window', { visible: !visible })).visible) } catch (e) { setError(e.message) }
+        finally { setBusy(false) }
       }
       return h('div', { className: 'wxb-row' },
-        h('span', null, '小号聊天窗口'),
-        h('button', { className: 'wxb-switch', role: 'switch', 'aria-checked': visible === true, disabled: visible === null, onClick: toggle, title: visible ? '隐藏' : '显示' }),
+        h('span', null, '小号微信'),
+        h('button', { role: 'switch', 'aria-checked': visible === true, disabled: busy || visible === null, onClick: toggle }, visible ? '返回主桌面' : '显示小号 / 登录'),
         h('span', { className: 'wxb-muted' }, visible === null ? '' : visible ? '显示中' : '后台运行'),
         error && h('span', { className: 'wxb-error' }, error))
     }
@@ -158,6 +206,7 @@ window.__ModuleLoader__.load({
       const items = [['收到', c.received], ['积压', chat.backlog], ['溢出转上下文', c.overflow], ['限速延后', c.deferred],
         ['模型失败', c.modelErrors], ['熔断', c.breakerTrips], ['发送失败', c.sendErrors], ['自动恢复', recoveries], ['近 1 分钟调用', chat.turnsLastMinute]]
       return h('div', { className: 'wxb-row wxb-muted', style: { fontSize: 12 } },
+        chat.members && h('span', null, `成员 ${chat.members.count} 人${chat.members.refreshing ? '（更新中）' : ''}`),
         chat.engagement && h('span', null, `正在${chat.engagement.style === 'attack' ? '嘲讽' : '安慰'} ${chat.engagement.target.name}`),
         chat.breaker.open && h('span', { className: 'wxb-error' }, `模型熔断中，${new Date(chat.breaker.until).toLocaleTimeString('zh-CN', { hour12: false })} 后重试`),
         items.map(([label, value]) => h('span', { key: label }, `${label} ${value}`)))
@@ -197,6 +246,7 @@ window.__ModuleLoader__.load({
       const current = state.chat
       return h('div', { className: 'wxb' },
         h(Status, { state }),
+        h(SenderPreparation, { connection: state.connection, chat: current, refresh }),
         state.account.state !== 'ready' && h(Login, { refresh }),
         state.capabilities?.window && h('div', { className: 'wxb-card' }, h(WindowToggle)),
         h('div', { className: 'wxb-row' },

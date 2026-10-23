@@ -106,19 +106,65 @@ def test_unconfirmed_gate_never_publishes_prepared_window(monkeypatch, tmp_path,
     assert prep.close() is True
 
 
+def test_prepare_error_preserves_safe_cause_and_normal_close_confirmation(monkeypatch, tmp_path):
+    import wechat_db.legacy_sender as sender
+    from wechat_db.legacy_sender import PreparationError
+
+    class Child:
+        def __init__(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+        def request(self, *args):
+            return {"error": {
+                "code": "prepare_failed",
+                "message": "private runtime path must not escape",
+                "reasonCode": "target_ambiguous",
+                "gateActive": None,
+                "gateRestored": False,
+            }}
+
+        def close_normally(self, timeout):
+            return True
+
+    monkeypatch.setattr(sender, "_JsonlChild", Child)
+    prep = _module().DetachedWindowPreparer(
+        sys.executable, [str(tmp_path / "worker.py")],
+        {"botWxid": "bot", "stateRoot": str(tmp_path)}, "bot",
+    )
+
+    with pytest.raises(RuntimeError) as failure:
+        prep.prepare(threading.Event())
+
+    assert isinstance(failure.value, PreparationError)
+    assert failure.value.reason_code == "target_ambiguous"
+    assert failure.value.cleanup_confirmed is True
+    assert failure.value.gate_state == {"gateActive": False, "gateRestored": True}
+    assert "private runtime path" not in str(failure.value)
+    assert prep.close() is True
+
+
 def test_failed_normal_close_rejects_ready_result_and_keeps_cleanup_retryable(monkeypatch, tmp_path):
     import wechat_db.legacy_sender as sender
+    from wechat_db.legacy_sender import PreparationError
+
     class Child:
         def __init__(self, *args): self.attempts = 0
         def start(self): pass
         def request(self, *args):
-            return {"result": {"binding": {"hwnd": 21}, "opened": True,
-                               "gateActive": False, "gateRestored": True}}
+            return {"error": {"code": "prepare_failed", "reasonCode": "gate_restore",
+                               "gateActive": None, "gateRestored": False}}
         def close_normally(self, timeout):
             self.attempts += 1
             return self.attempts > 1
     monkeypatch.setattr(sender, "_JsonlChild", Child)
     prep = _module().DetachedWindowPreparer(sys.executable, [str(tmp_path / "worker.py")], {"botWxid": "bot", "stateRoot": str(tmp_path)}, "bot")
-    with pytest.raises(RuntimeError, match="cleanup"):
+    with pytest.raises(RuntimeError) as failure:
         prep.prepare(threading.Event())
+    assert isinstance(failure.value, PreparationError)
+    assert failure.value.reason_code == "gate_restore"
+    assert failure.value.cleanup_confirmed is False
+    assert failure.value.gate_state == {"gateActive": None, "gateRestored": False}
     assert prep.close() is True

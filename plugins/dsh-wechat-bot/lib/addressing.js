@@ -21,24 +21,74 @@ export function nameMatchers(names) {
   return { vocative: text => vocative.test(text), mentioned: text => mentioned.test(text) }
 }
 
-// `context`: { chatKind, self: {id}, names: matchers, lastBotTurn?: {time, toSenderId} }
+function isFollowUpTime(messageTime, turn) {
+  if (!Number.isFinite(messageTime) || !Number.isFinite(turn?.time)) return false
+  if (turn.sourceTime !== undefined) {
+    if (!Number.isFinite(turn.sourceTime) || turn.sourceTime > turn.time
+        || messageTime < turn.sourceTime || messageTime > turn.time + FOLLOW_UP_MS) return false
+    return true
+  }
+  return messageTime >= turn.time && messageTime - turn.time <= FOLLOW_UP_MS
+}
+
+function quotedSenderId(message, recent = []) {
+  if (typeof message.quote?.senderId === 'string' && message.quote.senderId) return message.quote.senderId
+  const messageId = message.quote?.messageId
+  const history = Array.isArray(recent) ? recent : []
+  return messageId ? history.find(item => item?.id === messageId)?.sender?.id : undefined
+}
+
+function refersToAnotherMember(message, authorId, selfId, recent) {
+  if ((message.mentions ?? []).some(id => id && id !== 'all' && id !== selfId && id !== authorId)) return true
+  const quoted = quotedSenderId(message, recent)
+  return Boolean(quoted && quoted !== selfId && quoted !== authorId)
+}
+
+function refersToMember(message, memberId, recent) {
+  return (message.mentions ?? []).includes(memberId) || quotedSenderId(message, recent) === memberId
+}
+
+function humanConversationAfterTurn(message, turn, context) {
+  const recent = Array.isArray(context.recent) ? context.recent : []
+  const memberId = message.sender.id
+  const selfId = context.self.id
+  return recent.some(item => {
+    if (!item || item.id === message.id || item.fromSelf === true
+        || !Number.isFinite(item.time) || item.time <= turn.time || item.time > message.time) return false
+    const authorId = item.sender?.id
+    if (!authorId || authorId === selfId) return false
+    if (authorId === memberId) return refersToAnotherMember(item, authorId, selfId, recent)
+    return refersToMember(item, memberId, recent)
+  })
+}
+
+// `context`: { chatKind, self: {id}, names: matchers, lastBotTurns?: [{time, toSenderId, sourceTime?}], recent?: Message[] }
 export function addressOf(message, context) {
   const reasons = []
   const { self, names } = context
+  const quoted = quotedSenderId(message, context.recent)
   if (context.chatKind === 'direct') return { addressed: 'you', reasons: ['direct_chat'] }
   if (message.mentions.includes(self.id)) reasons.push('at_you')
-  if (message.quote?.senderId === self.id) reasons.push('quotes_you')
+  if (quoted === self.id) reasons.push('quotes_you')
   if (names.vocative(message.text)) reasons.push('calls_your_name')
   if (reasons.length) return { addressed: 'you', reasons }
 
   const others = message.mentions.filter(id => id !== self.id && id !== 'all')
   if (others.length) reasons.push('at_someone_else')
-  if (message.quote?.senderId && message.quote.senderId !== self.id) reasons.push('quotes_someone_else')
+  if (quoted && quoted !== self.id) reasons.push('quotes_someone_else')
   if (reasons.length) return { addressed: 'other', reasons }
 
   if (names.mentioned(message.text)) return { addressed: 'maybe', reasons: ['mentions_your_name'] }
-  const last = context.lastBotTurn
-  if (last && message.time - last.time <= FOLLOW_UP_MS && (!last.toSenderId || last.toSenderId === message.sender.id)) {
+  const last = context.lastBotTurns === undefined
+    ? context.lastBotTurn
+    : (Array.isArray(context.lastBotTurns) ? context.lastBotTurns : [])
+      .filter(turn => turn?.toSenderId === message.sender.id && Number.isFinite(turn.time))
+      .reduce((latest, turn) => !latest || turn.time > latest.time ? turn : latest, null)
+  if (last && isFollowUpTime(message.time, last)
+      && last.toSenderId === message.sender.id) {
+    if (humanConversationAfterTurn(message, last, context)) {
+      return { addressed: 'none', reasons: ['human_conversation_after_reply'] }
+    }
     return { addressed: 'maybe', reasons: ['follows_your_reply'] }
   }
   if (message.mentions.includes('all')) return { addressed: 'none', reasons: ['at_all'] }

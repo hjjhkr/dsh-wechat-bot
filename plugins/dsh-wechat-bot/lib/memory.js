@@ -5,6 +5,11 @@
 const SENSITIVE = /密码|口令|验证码|api[\s_-]*key|私钥|助记词|身份证|银行卡|病史|确诊|password|secret|token|sk-[a-z0-9]{8,}|\b\d{15,19}\b/i
 const MAX_TOPIC = 30
 const MAX_NOTE = 120
+const FORGET_REQUEST = /忘(?:了|掉|记)|删(?:掉|除)?|别(?:再)?记|不要(?:再)?记|不用记|\b(?:forget|delete|remove)\b/i
+
+export function isSensitiveMemoryContent(value) {
+  return SENSITIVE.test(String(value ?? ''))
+}
 
 export class MemoryBook {
   constructor({ members = {} } = {}, { maxNotesPerMember = 20 } = {}) {
@@ -73,7 +78,8 @@ export class MemoryBook {
     if (!source) return 'evidence_not_in_batch'
     if (source.fromSelf) return 'evidence_from_bot'
     if (update.who !== source.sender.id) return 'evidence_from_someone_else'
-    if (SENSITIVE.test(`${update.topic} ${update.note ?? ''} ${source.text}`)) return 'sensitive'
+    if (update.note === null && !FORGET_REQUEST.test(source.text)) return 'forget_not_requested'
+    if (isSensitiveMemoryContent(`${update.topic} ${update.note ?? ''} ${source.text}`)) return 'sensitive'
     return null
   }
 }

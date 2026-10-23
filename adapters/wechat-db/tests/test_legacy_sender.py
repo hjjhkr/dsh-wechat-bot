@@ -12,7 +12,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from wechat_db.rpc import ProtocolError  # noqa: E402
-from wechat_db.legacy_sender import LegacySender  # noqa: E402
+from wechat_db.legacy_sender import LegacySender, PreparationError  # noqa: E402
 
 
 BOT = "wxid_test_bot"
@@ -61,6 +61,40 @@ def _read_trace(path: Path) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@pytest.mark.parametrize(
+    ("reported_reason", "expected_reason"),
+    [("target_ambiguous", "target_ambiguous"), ("target_ambiguous;private", "prepare_failed")],
+)
+def test_jsonl_child_preserves_only_allowlisted_prepare_error_state(reported_reason, expected_reason):
+    import io
+    from types import SimpleNamespace
+
+    from wechat_db.legacy_sender import _JsonlChild
+
+    child = _JsonlChild(sys.executable, [])
+    child.process = SimpleNamespace(stdin=io.BytesIO(), stdout=object())
+    child._frames.put(json.dumps({
+        "id": 1,
+        "error": {
+            "code": "prepare_failed",
+            "message": "private executable path and secret",
+            "reasonCode": reported_reason,
+            "gateActive": None,
+            "gateRestored": False,
+        },
+    }).encode("utf-8"))
+
+    frame = child.request("prepareWindow", {}, 1)
+
+    assert frame == {"error": {
+        "code": "prepare_failed",
+        "reasonCode": expected_reason,
+        "gateActive": None,
+        "gateRestored": False,
+    }}
+    assert "private executable path" not in str(frame)
 
 
 _DETACHED_BINDING = {
@@ -133,6 +167,100 @@ def _wait_until(predicate, timeout=2.0):
             return True
         time.sleep(0.01)
     return bool(predicate())
+
+
+def test_detached_preparation_status_is_a_detached_snapshot(tmp_path, monkeypatch):
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    preparers = _install_fake_preparer(monkeypatch, blocked=True)
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+
+    initial = {"state": "unbound", "recoveryRequired": False, "error": None}
+    assert sender.preparation_status == initial
+    stale_snapshot = sender.preparation_status
+    stale_snapshot.update({"state": "failed", "recoveryRequired": True, "error": "forged"})
+    assert sender.preparation_status == initial
+
+    sender.prepare_target(GROUP)
+    assert _wait_until(lambda: preparers[0].started.is_set())
+    assert sender.preparation_status == {
+        "state": "preparing", "recoveryRequired": False, "error": None,
+    }
+    sender.prepare_target(GROUP)
+    assert len(preparers) == 1, "repeated watch/set while preparing must stay idempotent"
+
+    preparers[0].release.set()
+    assert _wait_until(sender.available)
+    assert sender.preparation_status == {
+        "state": "ready", "recoveryRequired": False, "error": None,
+    }
+    assert sender.invalidate_target() is True
+    assert sender.preparation_status == initial
+    sender.close()
+
+
+def test_retry_waits_for_failed_preparation_thread_to_finish_cleanup(tmp_path, monkeypatch):
+    import threading
+    import types
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    cleanup_entered = threading.Event()
+    release_cleanup = threading.Event()
+    instances = []
+
+    class SlowCleanupPreparer:
+        def __init__(self, command, args, worker, self_id):
+            self.first = not instances
+            self.closed = False
+            instances.append(self)
+
+        def prepare(self, _cancel_event):
+            if self.first:
+                raise PreparationError(
+                    "target_ambiguous",
+                    {"gateActive": False, "gateRestored": True},
+                    True,
+                )
+            return {
+                "opened": True,
+                "binding": dict(_DETACHED_BINDING),
+                "gateActive": False,
+                "gateRestored": True,
+            }
+
+        def close(self):
+            self.closed = True
+            if self.first:
+                cleanup_entered.set()
+                release_cleanup.wait(timeout=2)
+            return True
+
+    monkeypatch.setitem(sys.modules, "wechat_db.detached_window", types.SimpleNamespace(
+        DetachedWindowPreparer=SlowCleanupPreparer,
+    ))
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+
+    sender.prepare_target(GROUP)
+    assert cleanup_entered.wait(1)
+    assert sender.preparation_status["state"] == "failed"
+    sender.prepare_target(GROUP)
+    retry_status = sender.preparation_status
+    release_cleanup.set()
+    assert _wait_until(
+        lambda: sender._prepare_thread is None or not sender._prepare_thread.is_alive()
+    )
+    try:
+        assert retry_status["state"] == "failed", "a live failed preparation thread must block retries"
+        assert len(instances) == 1
+        sender.prepare_target(GROUP)
+        assert _wait_until(sender.available)
+        assert len(instances) == 2
+    finally:
+        sender.close()
 
 
 class _BoundProbeChild:
@@ -208,6 +336,7 @@ def test_detached_sender_preparation_routes_send_to_prepared_native_window(tmp_p
     expected_config = dict(sender._worker)
     expected_config["mainWindowClass"] = _DETACHED_BINDING["mainWindowClass"]
     expected_config["mainWindowTitle"] = _DETACHED_BINDING["mainWindowTitle"]
+    expected_config["preparedBinding"] = dict(_DETACHED_BINDING)
     assert child_args == [expected_args]
     assert child.methods == ["probe", "send", "close"]
     assert child.configs == [expected_config, expected_config]
@@ -235,6 +364,7 @@ def test_detached_send_uses_prepared_binding_without_full_probe_binding_comparis
     expected_config = dict(sender._worker)
     expected_config["mainWindowClass"] = _DETACHED_BINDING["mainWindowClass"]
     expected_config["mainWindowTitle"] = _DETACHED_BINDING["mainWindowTitle"]
+    expected_config["preparedBinding"] = dict(_DETACHED_BINDING)
     assert child.configs == [expected_config, expected_config]
     assert sender.available() is True
     sender.close()
@@ -279,6 +409,7 @@ def test_select_target_updates_legacy_worker_and_rebuilds_preparer_for_one_chat(
     expected_config = dict(sender._worker)
     expected_config["mainWindowClass"] = _DETACHED_BINDING["mainWindowClass"]
     expected_config["mainWindowTitle"] = _DETACHED_BINDING["mainWindowTitle"]
+    expected_config["preparedBinding"] = dict(_DETACHED_BINDING)
     assert child_args == [expected_args]
     assert child.configs == [expected_config, expected_config]
     sender.close()
@@ -331,7 +462,7 @@ def test_clearing_watch_invalidates_prepared_send_route(tmp_path, monkeypatch):
     assert preparers[0].closed
 
 
-def test_known_detached_ui_failure_is_logged_and_not_retried_until_watch_is_cleared(tmp_path, monkeypatch):
+def test_known_detached_ui_failure_can_retry_with_explicit_same_target_watch(tmp_path, monkeypatch):
     import wechat_db.legacy_sender as module
 
     config_path, _trace = _sender_file(tmp_path, detached_window=True)
@@ -346,26 +477,141 @@ def test_known_detached_ui_failure_is_logged_and_not_retried_until_watch_is_clea
 
     sender.prepare_target(GROUP)
     assert _wait_until(lambda: sender.preparation_error is not None)
+    assert _wait_until(
+        lambda: sender._prepare_thread is None or not sender._prepare_thread.is_alive()
+    )
+    failed_status = sender.preparation_status
+    assert failed_status["state"] == "failed"
+    assert failed_status["recoveryRequired"] is False
+    assert failed_status["error"] == sender.preparation_error
     assert sender.available() is False, "a clean preparation failure must not enable main-window sends"
     with pytest.raises(ProtocolError) as send_error:
         sender.send(GROUP, {"kind": "text", "text": "must not fall back"}, "client-prepare-failed")
     assert send_error.value.code == "unavailable"
     assert "nothing was sent" in str(send_error.value)
     assert child_args == []
-    sender.prepare_target(GROUP)
-    time.sleep(0.05)
-    assert len(preparers) == 1, "repeated watch/set must not replay native UI side effects"
-    assert state_changes[-1][0] == "warn"
 
-    assert sender.invalidate_target() is True
-    assert sender.available() is False
     sender.prepare_target(GROUP)
     assert _wait_until(sender.available)
-    assert len(preparers) == 2
+    assert len(preparers) == 2, "an explicit same-target watch retries a safely cleaned failure"
+    sender.prepare_target(GROUP)
+    assert len(preparers) == 2, "repeated watch/set while ready stays idempotent"
     assert sender.send(GROUP, {"kind": "text", "text": "prepared retry"}, "client-prepare-retry") == "9001"
     assert len(child_args) == 1
     sender.close()
     assert all(preparer.closed for preparer in preparers)
+
+
+@pytest.mark.parametrize(
+    ("reported_gate_state", "reported_cleanup"),
+    [
+        ({"gateActive": False, "gateRestored": True}, True),
+        ({"gateActive": None, "gateRestored": False}, False),
+    ],
+)
+def test_normal_close_confirmation_allows_retry_from_explicit_same_target_watch(
+    tmp_path, monkeypatch, reported_gate_state, reported_cleanup,
+):
+    import threading
+    import types
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    instances = []
+
+    class SafeFailurePreparer:
+        def __init__(self, command, args, worker, self_id):
+            self.worker = dict(worker)
+            self.started = threading.Event()
+            self.closed = False
+            self.fail = not instances
+            instances.append(self)
+
+        def prepare(self, _cancel_event):
+            self.started.set()
+            if self.fail:
+                raise PreparationError(
+                    "target_ambiguous",
+                    reported_gate_state,
+                    reported_cleanup,
+                )
+            return {
+                "opened": True,
+                "binding": dict(_DETACHED_BINDING),
+                "gateActive": False,
+                "gateRestored": True,
+            }
+
+        def close(self):
+            self.closed = True
+            return True
+
+    monkeypatch.setitem(sys.modules, "wechat_db.detached_window", types.SimpleNamespace(
+        DetachedWindowPreparer=SafeFailurePreparer,
+    ))
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+    state_changes = []
+    sender.set_state_callback(lambda level, message: state_changes.append((level, message)))
+
+    sender.prepare_target(GROUP)
+    assert _wait_until(lambda: sender.preparation_error is not None)
+    assert _wait_until(
+        lambda: sender._prepare_thread is None or not sender._prepare_thread.is_alive()
+    )
+    assert sender.available() is False, "a failed preparation must never enable sending"
+    assert sender.recovery_required is False, "normal close confirmed gate restoration"
+    assert "target_ambiguous" in sender.preparation_error
+    assert instances[0].closed
+    assert sender.preparation_status["state"] == "failed"
+
+    sender.prepare_target(GROUP)
+    assert _wait_until(sender.available)
+    assert len(instances) == 2, "explicit same-target watch retries after confirmed cleanup"
+    sender.prepare_target(GROUP)
+    assert len(instances) == 2, "repeated watch/set while ready stays idempotent"
+    assert state_changes[-1] == ("info", "已打开微信独立窗口：Test Group")
+    sender.close()
+
+
+def test_unconfirmed_prepare_close_keeps_sender_locked(tmp_path, monkeypatch):
+    import types
+    import wechat_db.legacy_sender as module
+
+    config_path, trace = _sender_file(tmp_path, detached_window=True)
+
+    class UnsafePreparer:
+        def __init__(self, *args):
+            self.closed = False
+
+        def prepare(self, _cancel_event):
+            raise PreparationError(
+                "gate_restore", {"gateActive": None, "gateRestored": False}, False,
+            )
+
+        def close(self):
+            self.closed = True
+            return False
+
+    monkeypatch.setitem(sys.modules, "wechat_db.detached_window", types.SimpleNamespace(
+        DetachedWindowPreparer=UnsafePreparer,
+    ))
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+
+    sender.prepare_target(GROUP)
+
+    assert _wait_until(lambda: sender.preparation_error is not None)
+    assert sender.available() is False
+    assert sender.recovery_required is True
+    assert "gate 恢复状态未确认" in sender.preparation_error
+    with pytest.raises(ProtocolError) as send_error:
+        sender.send(GROUP, {"kind": "text", "text": "must stay disabled"}, "client-unconfirmed-prepare")
+    assert send_error.value.code == "unavailable"
+    assert sender.invalidate_target() is False
+    sender.prepare_target(GROUP)
+    assert sender.recovery_required is True
+    assert _read_trace(trace) == []
 
 
 def test_unknown_preparation_gate_state_keeps_legacy_sender_fail_closed(tmp_path, monkeypatch):
@@ -379,6 +625,13 @@ def test_unknown_preparation_gate_state_keeps_legacy_sender_fail_closed(tmp_path
     sender.prepare_target(GROUP)
 
     assert _wait_until(lambda: sender.preparation_error is not None)
+    assert _wait_until(
+        lambda: sender._prepare_thread is None or not sender._prepare_thread.is_alive()
+    )
+    failed_status = sender.preparation_status
+    assert failed_status["state"] == "failed"
+    assert failed_status["recoveryRequired"] is True
+    assert failed_status["error"] == sender.preparation_error
     assert sender.available() is False, "an exception leaves gate state unconfirmed"
     assert sender.recovery_required is True
     with pytest.raises(ProtocolError) as send_error:
@@ -386,6 +639,8 @@ def test_unknown_preparation_gate_state_keeps_legacy_sender_fail_closed(tmp_path
     assert send_error.value.code == "unavailable"
     assert _read_trace(trace) == []
     assert preparers[0].closed
+    sender.prepare_target(GROUP)
+    assert len(preparers) == 1, "unknown recovery must never retry from a same-target watch"
     with pytest.raises(ProtocolError) as error:
         sender.close()
     assert error.value.code == "unavailable"
