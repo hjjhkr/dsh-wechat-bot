@@ -13,8 +13,9 @@ import { ErrorCode } from './protocol.js'
 
 export const chatDefaults = Object.freeze({
   mode: 'infer',
-  quietMs: 2000,
-  maxWaitMs: 8000,
+  quietMs: 3000,               // a batch closes after this long without new messages…
+  holdMs: 6000,                // …or this long when the last message looks unfinished ("在吗", "问个事", "，")
+  maxWaitMs: 12_000,           // and never later than this after its first message
   maxMessages: 20,
   maxChars: 6000,
   recentLimit: 30,

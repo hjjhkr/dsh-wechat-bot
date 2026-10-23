@@ -25,8 +25,9 @@ export const Config = z.object({
   stickers: z.dict(z.string()).default({}).description('Sticker name → image path the model may send.'),
   behavior: z.object({
     mode: z.union(['free', 'infer', 'at', 'silent']).default('infer').description('free: model sees every batch; infer: only batches that seem addressed to the bot; at: only @/quote; silent: never speaks.'),
-    quietMs: z.natural().default(2000),
-    maxWaitMs: z.natural().default(8000),
+    quietMs: z.natural().default(3000).description('Close a batch after this long without new messages.'),
+    holdMs: z.natural().default(6000).description('Wait this long instead when the last message looks unfinished (在吗 / 问个事 / trailing comma / an image).'),
+    maxWaitMs: z.natural().default(12000).description('Never hold a batch longer than this after its first message.'),
     maxMessages: z.natural().min(1).default(20),
     recentLimit: z.natural().min(1).default(30),
     maxParts: z.natural().min(1).default(3),

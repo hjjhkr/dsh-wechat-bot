@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { addressOf, nameMatchers } from '../lib/addressing.js'
-import { Batcher } from '../lib/batcher.js'
+import { Batcher, looksUnfinished } from '../lib/batcher.js'
 import { DecisionError, parseDecision } from '../lib/decision.js'
 import { MemoryBook } from '../lib/memory.js'
 import { parseMessage } from '../lib/protocol.js'
@@ -137,4 +137,36 @@ test('an urgent batch does not leave the pending batch without its max wait', as
   assert.ok(normal, 'the pending batch was flushed during the chatter')
   assert.ok(normal.at - start < 500, `flushed by its max wait (${normal.at - start}ms)`)
   batcher.clear()
+})
+
+test('the script recognises a message that probably has more coming', () => {
+  const m = (text, kind = 'text') => ({ text, kind })
+  for (const text of ['在吗', '在吗？', '@小鲸鱼 在吗', '问个事', '问你一个问题', '跟你说个事', '有个问题', '对了', '我想问一下，', '这个方案：', '我觉得然后'])
+    assert.equal(looksUnfinished(m(text)), true, text)
+  for (const text of ['在吗你看到消息了没有', '今天吃什么？', '好的~', '哈哈哈', '明天十点开会。', '/help', ''])
+    assert.equal(looksUnfinished(m(text)), false, text)
+  assert.equal(looksUnfinished(m('', 'image')), true, 'a picture is usually followed by what it is about')
+  assert.equal(looksUnfinished(m('[表情]', 'sticker')), false, 'a sticker is a complete reaction')
+})
+
+test('a lead-in holds the batch open for the rest of the thought, within the max wait', async () => {
+  const batches = []
+  const batcher = new Batcher({ quietMs: 30, holdMs: 120, maxWaitMs: 400 }, b => { batches.push(b.map(m => m.text)); batcher.release() })
+  const say = text => batcher.push({ id: text, text, kind: 'text' })
+  say('在吗')
+  await sleep(70) // longer than quietMs: a plain message would already have gone
+  say('问你个事，')
+  await sleep(70)
+  say('周末去哪玩比较好')
+  await sleep(80)
+  assert.deepEqual(batches, [['在吗', '问你个事，', '周末去哪玩比较好']], 'one batch for one thought')
+
+  say('今天天气不错')
+  await sleep(60)
+  assert.deepEqual(batches.at(-1), ['今天天气不错'], 'a complete sentence still goes after quietMs')
+
+  const start = Date.now()
+  for (let i = 0; i < 5; i++) { say(`然后${i}，`); await sleep(90) }
+  await sleep(200)
+  assert.ok(batches.length >= 3 && Date.now() - start < 1000, 'maxWaitMs caps a speaker who never finishes')
 })
