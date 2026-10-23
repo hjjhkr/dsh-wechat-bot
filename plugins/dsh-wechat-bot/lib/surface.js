@@ -2,6 +2,7 @@ import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { MODES } from './commands.js'
 import { STYLES } from './engagement.js'
+import { disposeInReverseOrder, registerPageLifetimeRoute } from './page-lifetime.js'
 
 // The DSH-facing surface of WeChatBotApp: console HTTP routes, the `/wechat`
 // command and the `wechat_bot` agent tool. Each is a thin adapter over the
@@ -9,20 +10,22 @@ import { STYLES } from './engagement.js'
 
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'cache-control': 'no-store' } })
 
-export function registerRoutes(ctx, app) {
-  ctx.connection.fetch.register({
+export function registerRoutes(ctx, app, pageLifetime) {
+  const disposers = []
+  const register = route => { disposers.push(ctx.connection.fetch.register(route)) }
+  register({
     path: '/api/wechat-bot.state', methods: ['GET'], requestBody: 'buffered',
     fetch: async request => {
       const session = new URL(request.url).searchParams.get('session')
       const workspace = session && ctx.workspaceRegistry.list().find(w => w.sessionIds.includes(session))?.path
-      return json({ ...app.state(), here: { session, workspace } })
+      return json({ ...app.state(), here: { session, workspace }, pageLifetime: pageLifetime.snapshot() })
     },
   })
-  ctx.connection.fetch.register({
+  register({
     path: '/api/wechat-bot.log', methods: ['GET'], requestBody: 'buffered',
     fetch: async () => json({ entries: app.chatLog().map(entry => ({ ...entry, text: formatEntry(entry) })) }),
   })
-  ctx.connection.fetch.register({
+  register({
     path: '/api/wechat-bot.action', methods: ['POST'], requestBody: 'buffered',
     fetch: async request => {
       let body
@@ -38,6 +41,13 @@ export function registerRoutes(ctx, app) {
       }
     },
   })
+  disposers.push(registerPageLifetimeRoute(ctx.connection.fetch, pageLifetime))
+  let disposal
+  return () => {
+    if (disposal) return disposal
+    disposal = disposeInReverseOrder(disposers)
+    return disposal
+  }
 }
 
 function runAction(app, { action, ...args }) {
@@ -182,7 +192,7 @@ export function formatEntry(entry) {
     wait: () => `合批等待：静默 ${entry.quietMs / 1000} 秒、最多 ${entry.maxWaitMs / 1000} 秒`,
     mute: () => entry.until ? `禁言到 ${new Date(entry.until).toLocaleTimeString('zh-CN', { hour12: false })}` : '解除禁言',
     waiting: () => '等待可以发送（可能锁屏/断线）',
-    dropped: () => ({ stale: '回复过时，已放弃', engagement_changed: '互动已停止或换了对象，剩下的不发了' })[entry.reason] ?? '已禁言，剩下的不发了',
+    dropped: () => ({ stale: '回复过时，已放弃', engagement_changed: '互动已停止或换了对象，剩下的不发了', shutdown: '关停中，剩余内容未发送' })[entry.reason] ?? '已禁言，剩下的不发了',
     continued: () => `${entry.from} 等人又说了话，合并后重新回复`,
     overflow: () => `消息太多，较早的只作为上下文（累计 ${entry.total} 条）`,
     deferred: () => entry.reason === 'breaker_open' ? `模型熔断中，${Math.ceil(entry.waitMs / 1000)} 秒后再试` : `说话太频繁，${Math.ceil(entry.waitMs / 1000)} 秒后再处理`,

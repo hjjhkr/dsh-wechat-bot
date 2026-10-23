@@ -502,6 +502,81 @@ def test_known_detached_ui_failure_can_retry_with_explicit_same_target_watch(tmp
     assert all(preparer.closed for preparer in preparers)
 
 
+def test_lifecycle_reprepare_rebinds_the_same_target_once_after_safe_cleanup(tmp_path, monkeypatch):
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    preparers = _install_fake_preparer(monkeypatch)
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+    try:
+        sender.prepare_target(GROUP)
+        assert _wait_until(sender.available)
+        assert sender.reprepare_target(GROUP) == "started"
+        assert _wait_until(sender.available)
+        assert len(preparers) == 2
+        assert preparers[0].closed
+        assert sender.preparation_status["state"] == "ready"
+    finally:
+        sender.close()
+
+
+def test_lifecycle_reprepare_defers_while_sender_lock_is_owned(tmp_path, monkeypatch):
+    import threading
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    preparers = _install_fake_preparer(monkeypatch)
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+    lock_held = threading.Event()
+    release_lock = threading.Event()
+
+    def hold_sender_lock():
+        with sender._lock:
+            lock_held.set()
+            release_lock.wait(2)
+
+    holder = threading.Thread(target=hold_sender_lock)
+    try:
+        sender.prepare_target(GROUP)
+        assert _wait_until(sender.available)
+        holder.start()
+        assert lock_held.wait(1)
+        assert sender.reprepare_target(GROUP) == "deferred"
+        assert len(preparers) == 1
+        release_lock.set()
+        holder.join(1)
+        assert sender.reprepare_target(GROUP) == "started"
+        assert _wait_until(sender.available)
+        assert len(preparers) == 2
+    finally:
+        release_lock.set()
+        holder.join(1)
+        sender.close()
+
+
+def test_lifecycle_reprepare_does_not_clear_unconfirmed_cleanup(tmp_path, monkeypatch):
+    import wechat_db.legacy_sender as module
+
+    config_path, _trace = _sender_file(tmp_path, detached_window=True)
+    preparers = _install_fake_preparer(monkeypatch)
+    monkeypatch.setattr(module, "_desktop_available", lambda: True)
+    sender = LegacySender.from_file(config_path, BOT)
+    try:
+        sender.prepare_target(GROUP)
+        assert _wait_until(sender.available)
+        with sender._lock:
+            sender._prepare_cleanup_failed = True
+        assert sender.reprepare_target(GROUP) == "blocked"
+        assert len(preparers) == 1
+        assert sender.preparation_status["recoveryRequired"] is True
+    finally:
+        with sender._lock:
+            sender._prepare_cleanup_failed = False
+        sender.close()
+
+
 @pytest.mark.parametrize(
     ("reported_gate_state", "reported_cleanup"),
     [

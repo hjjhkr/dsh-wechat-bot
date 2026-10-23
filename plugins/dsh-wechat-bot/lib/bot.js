@@ -26,6 +26,11 @@ export class Bot extends EventEmitter {
   recoveries = 0
   #restarts = 0
   #disposed = false
+  #disposePromise = null
+  #connectPromise = null
+  #initializedAdapters = new WeakSet()
+  #transportClosedAdapters = new WeakSet()
+  #cleanedAdapters = new WeakSet()
   #canSendWaiters = new Set()
   #statusSeen = false
   #lastSelf
@@ -46,20 +51,57 @@ export class Bot extends EventEmitter {
     await this.#connect()
   }
 
-  async dispose() {
+  dispose() {
+    if (this.#disposePromise) return this.#disposePromise
+    this.#disposePromise = this.#dispose()
+    return this.#disposePromise
+  }
+
+  async #dispose() {
     this.#disposed = true
     clearTimeout(this.restartTimer)
     clearTimeout(this.watchRetryTimer)
     clearInterval(this.watchdog)
-    const runner = this.runner
-    this.runner = null
-    runner?.dispose()
     for (const waiter of this.#canSendWaiters) waiter.reject(new Error('bot_disposed'))
+    let failure
+    const runner = this.runner
     try {
+      await runner?.quiesce()
       if (runner) this.store.saveChatLater(this.chat.id, runner.snapshot())
-      await this.store.flush()
+    } catch (error) {
+      failure ??= error
     } finally {
-      await this.adapter?.shutdown()
+      runner?.dispose()
+      this.runner = null
+    }
+    try {
+      await this.#connectPromise
+    } catch (error) {
+      failure ??= error
+    }
+    try {
+      await this.store.flush()
+    } catch (error) {
+      failure ??= error
+    }
+    const adapter = this.adapter
+    if (!failure && adapter && this.#initializedAdapters.has(adapter) && !this.#cleanedAdapters.has(adapter)) {
+      if (this.#transportClosedAdapters.has(adapter)) {
+        failure = new Error('adapter transport closed before shutdown acknowledgement')
+      } else {
+        try {
+          await adapter.waitForSends()
+          await adapter.shutdown({ strict: true })
+          this.#cleanedAdapters.add(adapter)
+        } catch (error) {
+          failure = error
+        }
+      }
+    }
+    if (failure) {
+      this.connection = { state: 'shutdown_failed', canSend: false, reason: 'shutdown_failed', detail: failure.message }
+      this.#changed()
+      throw failure
     }
   }
 
@@ -92,7 +134,19 @@ export class Bot extends EventEmitter {
 
   // ── adapter connection ──────────────────────────────────────────────────
 
-  async #connect() {
+  #connect() {
+    if (this.#disposed) return Promise.resolve()
+    if (this.#connectPromise) return this.#connectPromise
+    const connecting = this.#connectOnce()
+    this.#connectPromise = connecting
+    const clear = () => {
+      if (this.#connectPromise === connecting) this.#connectPromise = null
+    }
+    connecting.then(clear, clear)
+    return connecting
+  }
+
+  async #connectOnce() {
     if (this.#disposed) return
     let adapter
     this.#statusSeen = false
@@ -102,29 +156,57 @@ export class Bot extends EventEmitter {
       adapter.on('status', status => this.#onStatus(status))
       adapter.on('account', account => this.#onAccount(account))
       adapter.on('message', message => {
-        if (message.chatId === this.chat?.id) this.runner?.receive(message)
+        if (!this.#disposed && message.chatId === this.chat?.id) this.runner?.receive(message)
       })
       adapter.once('close', () => this.#onClose(adapter))
       const info = await adapter.initialize({ dataDir: this.dataDir, client: { name: 'dsh-wechat-bot', version: '1' } })
+      this.#initializedAdapters.add(adapter)
       this.note('info', `已连接适配器 ${info.name} ${info.version}`)
       this.#restarts = 0
       await this.#onAccount(await adapter.accountStatus())
     } catch (error) {
       this.note('error', `适配器启动失败：${error.message}`)
       // Ends the process too; the resulting 'close' schedules the next attempt.
-      await adapter?.shutdown()
+      if (adapter) {
+        if (this.#initializedAdapters.has(adapter)) {
+          try {
+            await adapter.waitForSends()
+            await adapter.shutdown({ strict: true })
+            this.#cleanedAdapters.add(adapter)
+          } catch (cleanupError) {
+            clearTimeout(this.restartTimer)
+            this.connection = { state: 'shutdown_failed', canSend: false, reason: 'shutdown_failed', detail: cleanupError.message }
+            this.note('error', `适配器关闭确认失败：${cleanupError.message}`)
+            this.#changed()
+            throw cleanupError
+          }
+        } else {
+          await adapter.shutdown()
+          this.#transportClosedAdapters.add(adapter)
+        }
+      }
     }
   }
 
   #onClose(adapter) {
-    if (adapter !== this.adapter || this.#disposed) return
+    this.#transportClosedAdapters.add(adapter)
+    if (adapter !== this.adapter || this.#disposed || this.connection.state === 'shutdown_failed') return
     this.connection = { state: 'adapter_down', canSend: false }
     // A fresh adapter process knows nothing; force re-login check and re-watch.
     this.account = { state: 'offline' }
     this.#changed()
     const delay = BACKOFF_MS[Math.min(this.#restarts++, BACKOFF_MS.length - 1)]
     this.note('warn', `适配器已断开，${delay / 1000} 秒后重连`)
-    this.restartTimer = setTimeout(() => this.#connect(), delay)
+    this.restartTimer = setTimeout(() => {
+      this.#connect().catch(error => {
+        clearTimeout(this.restartTimer)
+        this.restartTimer = undefined
+        const detail = error instanceof Error ? error.message : String(error)
+        this.connection = { state: 'shutdown_failed', canSend: false, reason: 'shutdown_failed', detail }
+        this.note('error', `适配器重连失败：${detail}`)
+        this.#changed()
+      })
+    }, delay)
     this.restartTimer.unref?.()
   }
 

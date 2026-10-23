@@ -47,12 +47,19 @@ class PreparingSender(Sender):
         self.invalidations = 0
         self.state_callback = None
         self.preparation_error = None
+        self.lifecycle_repreparations = []
+        self.reprepare_error = None
 
     def available(self):
         return self.ready and not self.preparing
 
     def set_state_callback(self, callback):
         self.state_callback = callback
+
+    @property
+    def preparation_status(self):
+        state = "preparing" if self.preparing else "failed" if self.preparation_error else "ready"
+        return {"state": state, "recoveryRequired": False, "error": self.preparation_error}
 
     def select_target(self, chat):
         self.selections.append(dict(chat))
@@ -68,6 +75,14 @@ class PreparingSender(Sender):
         self.invalidations += 1
         self.preparing = False
         self.preparation_error = None
+
+    def reprepare_target(self, chat_id):
+        self.lifecycle_repreparations.append(chat_id)
+        if self.reprepare_error is not None:
+            raise self.reprepare_error
+        self.invalidate_target()
+        self.prepare_target(chat_id)
+        return "started"
 
     def finish_preparation(self, *, failed=False):
         self.preparing = False
@@ -90,6 +105,32 @@ def setup_adapter(tmp_path, sender, *, extra_chats=()):
     adapter = Adapter(server, lambda _: PlainSource(account.root), BOT, sender=sender, poll_ms=20)
     info = adapter.on_initialize({"protocolVersion": 1, "dataDir": str(tmp_path)})
     return adapter, info, stream
+
+
+class LifecycleDesktop:
+    def __init__(self, pid=100, started_at=1.0):
+        self.identity = {"pid": pid, "startedAt": started_at}
+        self.visible = False
+        self.locked = False
+        self.identity_error = None
+        self.lifecycle_error = None
+
+    def process_identity(self):
+        if self.identity_error is not None:
+            raise self.identity_error
+        return dict(self.identity) if self.identity else None
+
+    def state(self):
+        return {"visible": self.visible, "running": self.identity is not None}
+
+    def lifecycle_state(self):
+        if self.lifecycle_error is not None:
+            raise self.lifecycle_error
+        return {**self.state(), "returned": not self.visible and not self.locked}
+
+    def set_visible(self, visible):
+        self.visible = visible
+        return self.state()
 
 
 def test_live_backend_confirms_actual_message_id_and_never_queues_in_outbox(tmp_path):
@@ -286,6 +327,224 @@ def test_detached_watch_prepares_asynchronously_and_unwatch_invalidates_before_d
     finally:
         adapter.on_shutdown({})
     assert sender.closed
+
+
+def test_bot_process_change_reprepares_only_after_returning_from_bot_desktop(tmp_path):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, stream = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+
+        # Showing an already-running bot process is not a lifecycle restart.
+        adapter.on_window_set({"visible": True})
+        adapter.on_window_set({"visible": False})
+        time.sleep(0.08)
+        assert sender.lifecycle_repreparations == []
+
+        # A new process identity while the bot desktop is visible arms one
+        # reprepare, but it must wait for the user to return to Default.
+        desktop.identity = {"pid": 101, "startedAt": 2.0}
+        adapter.on_window_set({"visible": True})
+        time.sleep(0.05)
+        assert sender.lifecycle_repreparations == []
+        adapter._publish_status()
+        assert adapter.last_status["canSend"] is False
+        with pytest.raises(ProtocolError) as error:
+            adapter.on_message_send({
+                "chatId": GROUP, "clientId": "must-wait-for-window-reprepare",
+                "content": {"kind": "text", "text": "不可发送"},
+            })
+        assert error.value.code == "unavailable"
+        assert sender.calls == []
+        assert not (tmp_path / "wechat-db" / "delivery.jsonl").exists()
+        desktop.visible = False  # toolbar returns directly to Default, outside the adapter RPC
+        deadline = time.monotonic() + 1
+        while not sender.lifecycle_repreparations and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert sender.lifecycle_repreparations == [GROUP]
+        assert sender.preparations == [GROUP, GROUP]
+        sender.finish_preparation()
+        assert adapter.last_status["canSend"] is True
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_login_action_reprepares_same_target_after_toolbar_return(tmp_path):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, _ = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+        login = adapter.on_account_login({})
+        assert desktop.visible is True
+        assert sender.lifecycle_repreparations == []
+        assert "自动重新打开当前监听会话的独立窗口" in login["instructions"]
+
+        desktop.visible = False  # the return toolbar does not call adapter code
+        deadline = time.monotonic() + 1
+        while not sender.lifecycle_repreparations and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert sender.lifecycle_repreparations == [GROUP]
+        assert sender.preparations == [GROUP, GROUP]
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_login_instructions_require_a_target_only_when_none_is_watched(tmp_path):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, _ = setup_adapter(tmp_path, sender)
+    try:
+        result = adapter.on_account_login({})
+        assert "选择要监听的服务会话" in result["instructions"]
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_generic_sender_unavailable_does_not_trigger_window_reprepare(tmp_path):
+    sender = PreparingSender()
+    sender.ready = False
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, _ = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        desktop.visible = True
+        desktop.visible = False
+        time.sleep(0.08)
+        assert sender.lifecycle_repreparations == []
+        assert sender.preparations == [GROUP]
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_locked_desktop_is_not_mistaken_for_returning_to_default(tmp_path):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, _ = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+        desktop.visible = True
+        adapter._observe_desktop_lifecycle()
+
+        desktop.identity = {"pid": 101, "startedAt": 2.0}
+        adapter._observe_desktop_lifecycle()
+        desktop.visible = False
+        desktop.locked = True
+        adapter._observe_desktop_lifecycle()
+        assert sender.lifecycle_repreparations == []
+
+        desktop.locked = False
+        adapter._observe_desktop_lifecycle()
+        assert sender.lifecycle_repreparations == [GROUP]
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_lifecycle_prepare_failure_is_not_retried_on_each_status_poll(tmp_path):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, _ = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+        desktop.visible = True
+        desktop.identity = {"pid": 101, "startedAt": 2.0}
+        adapter._observe_desktop_lifecycle()
+        desktop.visible = False
+        adapter._observe_desktop_lifecycle()
+        assert sender.lifecycle_repreparations == [GROUP]
+
+        sender.finish_preparation(failed=True)
+        # Keep this fake unavailable after the reprepare attempt; production
+        # preparation failure must not be mistaken for a ready binding.
+        sender.ready = False
+        time.sleep(0.08)
+        assert sender.lifecycle_repreparations == [GROUP]
+        assert adapter.last_status["canSend"] is False
+        assert adapter.last_status["reason"] == "sender_prepare_failed"
+        assert "独立窗口准备失败" in adapter.last_status["detail"]
+    finally:
+        adapter.on_shutdown({})
+
+
+@pytest.mark.parametrize("failure_field", ["identity_error", "lifecycle_error"])
+def test_lifecycle_read_failure_is_logged_and_blocks_sending_until_reads_recover(tmp_path, failure_field):
+    sender = PreparingSender()
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, stream = setup_adapter(tmp_path, sender)
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+        setattr(desktop, failure_field, RuntimeError("synthetic lifecycle read failure"))
+        with pytest.raises(RuntimeError, match="synthetic lifecycle read failure"):
+            adapter._observe_desktop_lifecycle()
+        adapter._publish_status()
+        assert adapter.last_status["canSend"] is False
+        assert adapter.last_status["reason"] == "sender_recovery_required"
+        with pytest.raises(ProtocolError) as error:
+            adapter.on_message_send({
+                "chatId": GROUP, "clientId": "lifecycle-read-failed",
+                "content": {"kind": "text", "text": "不可发送"},
+            })
+        assert error.value.code == "unavailable"
+        assert sender.calls == []
+        assert not (tmp_path / "wechat-db" / "delivery.jsonl").exists()
+
+        setattr(desktop, failure_field, None)
+        adapter._observe_desktop_lifecycle()
+        adapter._publish_status()
+        assert adapter.last_status["canSend"] is True
+        logs = [frame["params"] for frame in map(json.loads, stream.getvalue().splitlines())
+                if frame.get("method") == "event/log"]
+        assert any("synthetic lifecycle read failure" in item["message"] for item in logs)
+    finally:
+        adapter.on_shutdown({})
+
+
+def test_lifecycle_reprepare_protocol_error_is_exposed_and_not_retried(tmp_path):
+    sender = PreparingSender()
+    sender.reprepare_error = ProtocolError("invalid_params", "watched target binding mismatch")
+    desktop = LifecycleDesktop()
+    sender.desktop_control = desktop
+    adapter, _, stream = setup_adapter(tmp_path, sender)
+    adapter.poll_s = 0.02
+    try:
+        adapter.on_watch_set({"chatIds": [GROUP]})
+        sender.finish_preparation()
+        desktop.visible = True
+        desktop.identity = {"pid": 101, "startedAt": 2.0}
+        adapter._observe_desktop_lifecycle()
+        desktop.visible = False
+        deadline = time.monotonic() + 1
+        while not sender.lifecycle_repreparations and time.monotonic() < deadline:
+            time.sleep(0.01)
+        time.sleep(0.08)
+
+        assert sender.lifecycle_repreparations == [GROUP]
+        assert adapter.status_thread.is_alive()
+        assert adapter.last_status["canSend"] is False
+        assert adapter.last_status["reason"] == "sender_recovery_required"
+        logs = [frame["params"] for frame in map(json.loads, stream.getvalue().splitlines())
+                if frame.get("method") == "event/log"]
+        assert any("watched target binding mismatch" in item["message"] for item in logs)
+    finally:
+        adapter.on_shutdown({})
 
 
 def test_detached_prepare_failure_is_logged_then_uses_legacy_send_availability(tmp_path):

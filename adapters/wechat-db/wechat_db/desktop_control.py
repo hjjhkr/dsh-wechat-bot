@@ -10,6 +10,7 @@ import ctypes
 from ctypes import wintypes as w
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -67,6 +68,21 @@ def session_running(spec, session, process_reader=_process):
             or abs(current['start'] - session['startedAt']) > 0.01):
         raise DesktopControlError('bot process identity changed; refusing to adopt another process')
     return True
+
+
+def session_identity(spec, session, process_reader=_process):
+    """Return the verified process instance recorded for this bot, if it is running."""
+    if session is None:
+        return None
+    if (not isinstance(session, dict)
+            or type(session.get('pid')) is not int or session['pid'] <= 0
+            or not isinstance(session.get('startedAt'), (int, float))
+            or isinstance(session.get('startedAt'), bool)
+            or not math.isfinite(session['startedAt'])):
+        raise DesktopControlError('bot session process identity is invalid')
+    if not session_running(spec, session, process_reader):
+        return None
+    return {'pid': session['pid'], 'startedAt': float(session['startedAt'])}
 
 
 def _publish(path, data):
@@ -134,6 +150,9 @@ class _WindowsBackend:
         session = _read(self.spec.root / 'session.json')
         return session_running(self.spec, session) if session else False
 
+    def process_identity(self):
+        return session_identity(self.spec, _read(self.spec.root / 'session.json'))
+
     def _toolbar_ready(self):
         toolbar = _read(self.spec.root / 'toolbar.json')
         if not toolbar or toolbar.get('desktop') != self.spec.desktop:
@@ -176,7 +195,19 @@ class DesktopController:
         self.backend = backend or _WindowsBackend(self.spec, python_command or sys.executable)
 
     def state(self):
-        return {'visible': self.backend.input_desktop() == self.spec.desktop, 'running': self.backend.running()}
+        lifecycle = self.lifecycle_state()
+        return {'visible': lifecycle['visible'], 'running': lifecycle['running']}
+
+    def lifecycle_state(self):
+        current = self.backend.input_desktop()
+        return {
+            'visible': current == self.spec.desktop,
+            'returned': current == 'Default',
+            'running': self.backend.running(),
+        }
+
+    def process_identity(self):
+        return self.backend.process_identity()
 
     def set_visible(self, visible):
         if type(visible) is not bool:

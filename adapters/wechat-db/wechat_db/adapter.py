@@ -21,6 +21,7 @@ RETRY_OPEN_S = 5.0
 # After a restart within this window, polling resumes where it left off (nothing is missed);
 # after a longer outage it starts from "now" instead of replaying stale messages as new.
 RESUME_WINDOW_S = 10 * 60
+_UNSET_IDENTITY = object()
 
 
 class Cursor:
@@ -77,6 +78,13 @@ class Adapter:
         self.status_lock = threading.Lock()
         self.last_status = None
         self.last_sender_error = None
+        self.desktop_lifecycle_lock = threading.RLock()
+        self.desktop_process_identity = None
+        self.desktop_identity_initialized = False
+        self.desktop_reprepare_generation = 0
+        self.desktop_reprepare_pending = None
+        self.desktop_lifecycle_error = None
+        self.last_desktop_lifecycle_error = None
         if self.sender is not None:
             set_callback = getattr(self.sender, "set_state_callback", None)
             if callable(set_callback):
@@ -102,6 +110,7 @@ class Adapter:
             self.outbox = Outbox(self.outbox_path or self.data_dir / "wechat-outbox.jsonl")
         self._try_open()
         if self.sender is not None:
+            self._initialize_desktop_identity()
             self._publish_status()
             self.status_thread = threading.Thread(target=self._monitor_status, daemon=True)
             self.status_thread.start()
@@ -126,7 +135,11 @@ class Adapter:
 
     def _publish_status(self):
         """Database health must never turn a locked sender back on."""
-        can_send = self.reader is not None and (self.delivery is None or self.delivery.available())
+        with self.desktop_lifecycle_lock:
+            lifecycle_pending = self.desktop_reprepare_pending is not None
+            lifecycle_error = self.desktop_lifecycle_error
+        can_send = (self.reader is not None and not lifecycle_pending and lifecycle_error is None
+                    and (self.delivery is None or self.delivery.available()))
         sender_error = getattr(self.sender, "preparation_error", None) if self.sender is not None else None
         status = {"connection": "connected" if self.healthy and self.reader else "degraded",
                   "canSend": can_send}
@@ -137,16 +150,25 @@ class Adapter:
         elif not can_send:
             status["reason"] = "sender_unavailable"
             preparation = getattr(self.sender, "preparation_status", None)
-            if isinstance(preparation, dict):
+            if lifecycle_error is not None:
+                status["reason"] = "sender_recovery_required"
+                status["detail"] = lifecycle_error["detail"]
+            elif isinstance(preparation, dict):
                 if preparation["recoveryRequired"] is True:
                     status["reason"] = "sender_recovery_required"
                     status["detail"] = preparation["error"] or "窗口控制资源恢复尚未确认，发送已暂停。"
+                elif lifecycle_pending:
+                    status["reason"] = "sender_preparing"
+                    status["detail"] = "小号微信窗口身份已变化，等待返回主桌面后重新打开当前会话独立窗口。"
                 elif preparation["state"] == "preparing":
                     status["reason"] = "sender_preparing"
                     status["detail"] = "正在打开并绑定微信独立窗口，完成后即可发送。"
                 elif preparation["state"] == "failed":
                     status["reason"] = "sender_prepare_failed"
                     status["detail"] = preparation["error"] or "独立窗口准备失败，可重新准备。"
+            elif lifecycle_pending:
+                status["reason"] = "sender_preparing"
+                status["detail"] = "小号微信窗口身份已变化，等待返回主桌面后重新打开当前会话独立窗口。"
         with self.status_lock:
             if status != self.last_status:
                 self.server.notify("event/status", status)
@@ -171,7 +193,172 @@ class Adapter:
 
     def _monitor_status(self):
         while not self.server.closing.wait(self.poll_s):
+            try:
+                self._observe_desktop_lifecycle()
+            except Exception as error:
+                self._record_desktop_lifecycle_error(error, permanent=False)
             self._publish_status()
+
+    def _dynamic_desktop_sender(self) -> bool:
+        return (self.desktop_control is not None and self.sender is not None
+                and self._dynamic_sender_target())
+
+    def _read_desktop_identity(self):
+        identity = self.desktop_control.process_identity()
+        if identity is None:
+            return None
+        started_at = identity.get("startedAt") if isinstance(identity, dict) else None
+        pid = identity.get("pid") if isinstance(identity, dict) else None
+        if (type(pid) is not int or pid <= 0
+                or not isinstance(started_at, (int, float)) or isinstance(started_at, bool)):
+            raise ProtocolError("unavailable", "无法确认小号微信进程身份，发送已暂停")
+        return pid, float(started_at)
+
+    def _initialize_desktop_identity(self):
+        if not self._dynamic_desktop_sender():
+            return
+        identity = self._read_desktop_identity()
+        with self.desktop_lifecycle_lock:
+            self.desktop_process_identity = identity
+            self.desktop_identity_initialized = True
+
+    def _desktop_reprepare_is_pending(self) -> bool:
+        with self.desktop_lifecycle_lock:
+            return self.desktop_reprepare_pending is not None
+
+    def _record_desktop_lifecycle_error(self, error, *, permanent):
+        detail = f"无法确认或重新绑定小号微信窗口，发送已暂停：{error}"
+        with self.desktop_lifecycle_lock:
+            previous = self.desktop_lifecycle_error
+            # A successful read can clear transient observation failures, but a
+            # failed rebind remains visible until a new explicit lifecycle event.
+            if (previous is not None and previous["permanent"] and not permanent):
+                return
+            self.desktop_lifecycle_error = {"detail": detail, "permanent": permanent}
+        with self.status_lock:
+            should_log = detail != self.last_desktop_lifecycle_error
+            self.last_desktop_lifecycle_error = detail
+        if should_log:
+            self.server.notify("event/log", {"level": "error", "message": detail})
+
+    def _clear_transient_desktop_lifecycle_error(self):
+        cleared = False
+        with self.desktop_lifecycle_lock:
+            if (self.desktop_lifecycle_error is not None
+                    and not self.desktop_lifecycle_error["permanent"]):
+                self.desktop_lifecycle_error = None
+                cleared = True
+        if cleared:
+            with self.status_lock:
+                self.last_desktop_lifecycle_error = None
+
+    def _arm_desktop_reprepare(self, *, visible, identity=_UNSET_IDENTITY):
+        if not self._dynamic_desktop_sender():
+            return
+        if identity is _UNSET_IDENTITY:
+            identity = self._read_desktop_identity()
+        with self.desktop_lifecycle_lock:
+            self.desktop_lifecycle_error = None
+            self.desktop_reprepare_generation += 1
+            self.desktop_reprepare_pending = {
+                "generation": self.desktop_reprepare_generation,
+                "identity": identity,
+                "saw_visible": visible is True,
+                "attempting": False,
+            }
+        with self.status_lock:
+            self.last_desktop_lifecycle_error = None
+
+    def _observe_desktop_lifecycle(self):
+        """Wait for a user-visible lifecycle cycle before rebinding the watched target."""
+        if not self._dynamic_desktop_sender():
+            return
+        try:
+            identity = self._read_desktop_identity()
+            state = self.desktop_control.lifecycle_state()
+            if (not isinstance(state, dict)
+                    or type(state.get("visible")) is not bool
+                    or type(state.get("returned")) is not bool
+                    or type(state.get("running")) is not bool):
+                raise ProtocolError("unavailable", "小号微信桌面状态无效，发送已暂停")
+        except Exception as error:
+            self._record_desktop_lifecycle_error(error, permanent=False)
+            raise
+        visible = state["visible"]
+        returned = state["returned"]
+        running = state["running"]
+        self._clear_transient_desktop_lifecycle_error()
+
+        generation = None
+        with self.desktop_lifecycle_lock:
+            if not self.desktop_identity_initialized:
+                self.desktop_process_identity = identity
+                self.desktop_identity_initialized = True
+            elif identity != self.desktop_process_identity:
+                self.desktop_process_identity = identity
+                self.desktop_reprepare_generation += 1
+                self.desktop_reprepare_pending = {
+                    "generation": self.desktop_reprepare_generation,
+                    "identity": identity,
+                    "saw_visible": visible is True,
+                    "attempting": False,
+                }
+                self.desktop_lifecycle_error = None
+
+            pending = self.desktop_reprepare_pending
+            if pending is None:
+                return
+            if identity != pending["identity"]:
+                pending["identity"] = identity
+                pending["saw_visible"] = visible is True
+            if visible is True:
+                pending["saw_visible"] = True
+            if (returned is True and pending["saw_visible"] and identity is not None
+                    and running is True and not pending["attempting"]):
+                pending["attempting"] = True
+                generation = pending["generation"]
+
+        if generation is not None:
+            self._attempt_desktop_reprepare(generation)
+
+    def _attempt_desktop_reprepare(self, generation):
+        # A return to Default is not enough if the account reader is not ready.
+        # account/status re-enters this check after confirming the logged-in DB.
+        if self.reader is None:
+            self._defer_desktop_reprepare(generation)
+            return
+        with self.state_lock:
+            target_ids = list(self.cursors)
+        if len(target_ids) != 1:
+            self._defer_desktop_reprepare(generation)
+            return
+        chat_id = target_ids[0]
+        try:
+            if self.sender.target_id != chat_id:
+                raise ProtocolError("invalid_params", "watched chat differs from the configured sender target")
+            outcome = self.sender.reprepare_target(chat_id)
+        except Exception as error:
+            self._record_desktop_lifecycle_error(error, permanent=True)
+            raise
+        if outcome == "deferred":
+            self._defer_desktop_reprepare(generation)
+            return
+        if outcome not in ("started", "blocked"):
+            error = ProtocolError("unavailable", f"unexpected lifecycle reprepare result: {outcome!r}")
+            self._record_desktop_lifecycle_error(error, permanent=True)
+            raise error
+
+        with self.desktop_lifecycle_lock:
+            pending = self.desktop_reprepare_pending
+            if pending is not None and pending["generation"] == generation:
+                self.desktop_reprepare_pending = None
+        self._publish_status()
+
+    def _defer_desktop_reprepare(self, generation):
+        with self.desktop_lifecycle_lock:
+            pending = self.desktop_reprepare_pending
+            if pending is not None and pending["generation"] == generation:
+                pending["attempting"] = False
 
     def _try_open(self) -> bool:
         if self.reader:
@@ -194,13 +381,23 @@ class Adapter:
                 "instructions": f"读不到微信数据库：{self.open_error}。请在这台电脑上登录微信小号并保持运行，登录后会自动连接。"}
 
     def on_account_status(self, _params):
-        self._try_open()
+        if self._try_open():
+            self._observe_desktop_lifecycle()
+            self._publish_status()
         return self._account()
 
     def on_account_login(self, _params):
         if self.desktop_control is not None:
-            self.on_window_set({'visible': True})
-            return {'state': 'login_required', 'instructions': '已显示小号微信。请在小号桌面扫码或确认登录，再点“返回主桌面”，然后重新选择服务会话。'}
+            state = self.on_window_set({'visible': True})
+            self._arm_desktop_reprepare(visible=state.get('visible') is True)
+            self._publish_status()
+            with self.state_lock:
+                has_watched_target = len(self.cursors) == 1
+            if has_watched_target:
+                instructions = '已显示小号微信。请在小号桌面扫码或确认登录，再点“返回主桌面”；系统会自动重新打开当前监听会话的独立窗口。'
+            else:
+                instructions = '已显示小号微信。请在小号桌面扫码或确认登录，再点“返回主桌面”，然后选择要监听的服务会话；系统会自动打开该会话的独立窗口。'
+            return {'state': 'login_required', 'instructions': instructions}
         if not self._try_open() and not (self.opener and self.opener.is_alive()):
             self.opener = threading.Thread(target=self._keep_opening, daemon=True)
             self.opener.start()
@@ -218,7 +415,10 @@ class Adapter:
         if type(params.get('visible')) is not bool:
             raise ProtocolError('invalid_params', 'visible must be a boolean')
         try:
-            return self.desktop_control.set_visible(params['visible'])
+            state = self.desktop_control.set_visible(params['visible'])
+            self._observe_desktop_lifecycle()
+            self._publish_status()
+            return state
         except DesktopControlError as error:
             raise ProtocolError('unavailable', str(error)) from error
 
@@ -342,9 +542,11 @@ class Adapter:
             self.cursors = cursors
         if dynamic_target:
             if chat_ids:
-                self.sender.prepare_target(chat_ids[0])
+                if not self._desktop_reprepare_is_pending():
+                    self.sender.prepare_target(chat_ids[0])
             else:
                 self.sender.invalidate_target()
+            self._observe_desktop_lifecycle()
             self._publish_status()
         if cursors and not (self.poller and self.poller.is_alive()):
             self.poller = threading.Thread(target=self._poll, daemon=True)
@@ -419,6 +621,14 @@ class Adapter:
             raise ProtocolError("invalid_params", "content.path")
         if not params.get("clientId"):
             raise ProtocolError("invalid_params", "clientId")
+        with self.desktop_lifecycle_lock:
+            lifecycle_pending = (self.desktop_reprepare_pending is not None
+                                 or self.desktop_lifecycle_error is not None)
+        if lifecycle_pending:
+            raise ProtocolError(
+                "unavailable",
+                "小号微信窗口正在重新绑定；完成独立会话准备前不会发送任何内容",
+            )
         chat_id = params.get("chatId")
         self._check_target(chat_id, sending=True)
         if chat_id not in self.cursors:

@@ -761,6 +761,47 @@ class LegacySender:
             return False
         return not self._prepare_cleanup_failed
 
+    def reprepare_target(self, chat_id: str) -> str:
+        """Rebind one selected target after an explicit bot-process lifecycle transition.
+
+        A busy sender or preparation is deferred to the lifecycle observer. An
+        unconfirmed cleanup consumes the transition without starting more UI work.
+        """
+        if not self._detached_window:
+            return "blocked"
+        if not self._lock.acquire(blocking=False):
+            return "deferred"
+        try:
+            if self._target_switching:
+                return "deferred"
+            if self._closed or self._closing or self._disabled or self._prepare_cleanup_failed:
+                return "blocked"
+            if chat_id != self._target_id:
+                raise ProtocolError("invalid_params", "chatId is outside the configured sender target")
+            thread = self._prepare_thread
+            if (self._prepare_state == "preparing" or self._prepare_cleanup_pending
+                    or (thread is not None and thread.is_alive()) or self._child is not None):
+                return "deferred"
+            self._target_switching = True
+        finally:
+            self._lock.release()
+
+        try:
+            if not self.invalidate_target():
+                return "blocked"
+            with self._lock:
+                if (self._closed or self._closing or self._disabled
+                        or self._prepare_cleanup_failed):
+                    return "blocked"
+                # Keep selection and re-preparation atomic: once the flag is
+                # cleared, start the preparation while still holding this RLock.
+                self._target_switching = False
+                self.prepare_target(chat_id)
+                return "blocked" if self._prepare_state == "failed" else "started"
+        finally:
+            with self._lock:
+                self._target_switching = False
+
     def available(self) -> bool:
         with self._lock:
             if (self._closed or self._closing or self._disabled or self._target_switching

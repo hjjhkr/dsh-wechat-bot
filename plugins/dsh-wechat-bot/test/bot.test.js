@@ -3,7 +3,9 @@ import test from 'node:test'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sleep, startBot, until } from './helpers.js'
+import { Bot } from '../lib/bot.js'
+import { Store } from '../lib/store.js'
+import { FAST, linkedSimulator, sleep, startBot, until } from './helpers.js'
 
 const GROUP = 'demo@chatroom'
 const say = (env, from, text, extra = {}) => env.simulator.inject({ chatId: GROUP, from, text, ...extra })
@@ -108,6 +110,205 @@ test('multi-part replies are sent in order as separate messages', async t => {
   await until(() => env.model.calls.length === 2, { what: 'second call' })
   const recent = env.model.calls[1].input.recent
   assert.deepEqual(recent.filter(m => m.from_you).map(m => m.text), ['草', '不对', '其实挺好'], 'own replies are context once, not duplicated by echoes')
+})
+
+test('dispose waits for the in-flight send classification before adapter shutdown acknowledgement', async t => {
+  const env = await watching(t, { reply: () => ({ to: null, reply: ['第一段', '第二段'] }) })
+  const sendStarted = Promise.withResolvers()
+  const finishSend = Promise.withResolvers()
+  const finishShutdown = Promise.withResolvers()
+  const originalSend = env.bot.adapter.send.bind(env.bot.adapter)
+  let sendCalls = 0
+  let shutdownCalls = 0
+  let strictShutdown = false
+  env.bot.adapter.send = async (...args) => {
+    sendCalls++
+    if (sendCalls === 1) {
+      sendStarted.resolve()
+      await finishSend.promise
+    }
+    return originalSend(...args)
+  }
+  env.bot.adapter.waitForSends = async () => {}
+  env.bot.adapter.shutdown = async options => {
+    shutdownCalls++
+    strictShutdown = options?.strict === true
+    await finishShutdown.promise
+    return {}
+  }
+
+  say(env, 'wxid_alice', '来两句')
+  await sendStarted.promise
+  let disposed = false
+  const dispose = env.bot.dispose().then(() => { disposed = true })
+  try {
+    await sleep(30)
+    assert.equal(disposed, false, 'dispose cannot finish while message/send outcome is unresolved')
+    assert.equal(shutdownCalls, 0, 'adapter shutdown starts only after the in-flight send settles')
+    finishSend.resolve()
+    await until(() => shutdownCalls === 1, { timeoutMs: 1000, what: 'safe shutdown after send completion' })
+    assert.equal(strictShutdown, true, 'bot disposal requests strict adapter shutdown')
+    assert.deepEqual(sent(env), ['第一段'], 'the active send is classified before shutdown begins and later parts are blocked')
+    assert.equal(disposed, false, 'dispose waits for the adapter shutdown ACK')
+    finishShutdown.resolve()
+    await dispose
+    assert.equal(sendCalls, 1, 'quiescing does not send or replay another part')
+  } finally {
+    finishSend.resolve()
+    finishShutdown.resolve()
+    await dispose
+  }
+})
+
+test('dispose fails closed when an initialized adapter loses transport before cleanup acknowledgement', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-close-'))
+  const { simulator, client } = linkedSimulator()
+  const bot = new Bot({
+    dataDir,
+    store: new Store(dataDir, { delayMs: 5 }),
+    persona: '你是小鲸鱼。',
+    think: async () => '',
+    settings: { ...FAST, aliases: ['小鲸鱼', 'DeepSeek'] },
+    createAdapter: () => client,
+  })
+  t.after(async () => {
+    await bot.dispose().catch(() => {})
+    simulator.close()
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  await bot.start()
+  await until(() => bot.account.state === 'ready', { what: 'initialized adapter login' })
+  client.peer.close()
+  await until(() => bot.connection.state === 'adapter_down', { what: 'unexpected adapter transport close' })
+
+  await assert.rejects(bot.dispose(), /closed before shutdown acknowledgement/)
+  assert.equal(bot.connection.state, 'shutdown_failed', 'the host remains in an explicit failed-shutdown state')
+  assert.equal(bot.connection.canSend, false)
+})
+
+test('account-status failure after initialize requires a strict shutdown acknowledgement', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-status-failure-'))
+  const { simulator, client } = linkedSimulator()
+  const shutdownCalls = []
+  let createCalls = 0
+  client.accountStatus = async () => { throw new Error('account status failed') }
+  client.shutdown = async options => {
+    shutdownCalls.push(options)
+    if (options?.strict === true) {
+      client.emit('close')
+      throw new Error('shutdown acknowledgement missing')
+    }
+  }
+  const bot = new Bot({
+    dataDir,
+    store: new Store(dataDir, { delayMs: 5 }),
+    persona: '你是小鲸鱼。',
+    think: async () => '',
+    settings: { ...FAST, aliases: ['小鲸鱼', 'DeepSeek'] },
+    createAdapter: () => { createCalls++; return client },
+  })
+  t.after(async () => {
+    await bot.dispose().catch(() => {})
+    simulator.close()
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  await assert.rejects(bot.start(), /shutdown acknowledgement missing/)
+  await sleep(1200)
+  assert.equal(createCalls, 1, 'a failed initial cleanup cancels any reconnect already scheduled by transport close')
+  await assert.rejects(bot.dispose(), /closed before shutdown acknowledgement/, 'failed strict cleanup is not recorded as completed')
+  assert.deepEqual(shutdownCalls, [{ strict: true }], 'a closed transport is not retried or treated as acknowledged cleanup')
+  assert.equal(bot.connection.state, 'shutdown_failed', 'the failed cleanup remains visible to the Host')
+})
+
+test('automatic reconnect records post-initialize cleanup rejection and does not retry again', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-reconnect-cleanup-'))
+  const pairs = []
+  let createCalls = 0
+  const bot = new Bot({
+    dataDir,
+    store: new Store(dataDir, { delayMs: 5 }),
+    persona: '你是小鲸鱼。',
+    think: async () => '',
+    settings: { ...FAST, aliases: ['小鲸鱼', 'DeepSeek'] },
+    createAdapter: () => {
+      createCalls++
+      if (createCalls > 2) throw new Error('unexpected automatic retry')
+      const pair = linkedSimulator()
+      pairs.push(pair)
+      if (createCalls === 2) {
+        pair.client.accountStatus = async () => { throw new Error('account status failed') }
+        pair.client.shutdown = async options => {
+          if (options?.strict !== true) throw new Error('unexpected non-strict shutdown')
+          pair.client.peer.close()
+          await new Promise(resolve => setImmediate(resolve))
+          throw new Error('shutdown acknowledgement missing')
+        }
+      }
+      return pair.client
+    },
+  })
+  t.after(async () => {
+    await bot.dispose().catch(() => {})
+    for (const pair of pairs) pair.simulator.close()
+    await rm(dataDir, { recursive: true, force: true, maxRetries: 5 })
+  })
+
+  await bot.start()
+  bot.adapter.peer.close()
+  await until(() => bot.connection.state === 'shutdown_failed', { timeoutMs: 4000, what: 'reconnect cleanup failure' })
+  await sleep(1100)
+
+  assert.equal(createCalls, 2, 'a rejected cleanup does not trigger another automatic adapter attempt')
+  assert.equal(bot.connection.state, 'shutdown_failed', 'the automatic reconnect rejection remains visible')
+  assert.equal(bot.connection.canSend, false)
+  assert.match(bot.connection.detail, /shutdown acknowledgement missing/)
+  assert.ok(bot.log.some(entry => entry.level === 'error' && /适配器重连失败/.test(entry.message)))
+})
+
+test('dispose quiesces the current runner before waiting for a reconnect handshake', async t => {
+  const env = await watching(t)
+  const runner = env.bot.runner
+  const received = runner.counters.received
+  let receiveCalls = 0
+  const receive = runner.receive.bind(runner)
+  runner.receive = message => { receiveCalls++; return receive(message) }
+  const initializeStarted = Promise.withResolvers()
+  const finishInitialize = Promise.withResolvers()
+  const createAdapter = env.bot.createAdapter
+  let reconnectAdapter
+  env.bot.createAdapter = () => {
+    reconnectAdapter = createAdapter()
+    const initialize = reconnectAdapter.initialize.bind(reconnectAdapter)
+    reconnectAdapter.initialize = async options => {
+      initializeStarted.resolve()
+      await finishInitialize.promise
+      return initialize(options)
+    }
+    return reconnectAdapter
+  }
+
+  env.bot.adapter.peer.close()
+  await initializeStarted.promise
+  let disposed = false
+  const dispose = env.bot.dispose().then(() => { disposed = true })
+  try {
+    reconnectAdapter.emit('message', {
+      id: 'during-page-close', chatId: GROUP, time: Date.now(), kind: 'text', text: 'close race',
+      sender: { id: 'wxid_alice', name: '阿离' }, mentions: ['wxid_bot'], fromSelf: false,
+    })
+    await sleep(100)
+    assert.equal(receiveCalls, 0, 'disposed Bot stops routing new adapter messages into the runner')
+    assert.equal(runner.counters.received, received, 'the disposed runner cannot accept messages while reconnect is pending')
+    assert.equal(env.model.calls.length, 0, 'a message delivered during disposal never reaches the model')
+    assert.equal(disposed, false, 'disposal waits for the existing reconnect cleanup')
+    finishInitialize.resolve()
+    await dispose
+  } finally {
+    finishInitialize.resolve()
+    await dispose
+  }
 })
 
 test('while sending is impossible (locked screen) the bot keeps thinking; replies go out on unlock', async t => {

@@ -103,6 +103,7 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
 | 键 | 默认 | 说明 |
 | --- | --- | --- |
 | `adapter.command` / `args` / `cwd` / `env` | 空 = 模拟器 | 适配器进程 |
+| `exitWithPage` | false | 专用 DSH Web 实例可开启：最后一个浏览器标签页关闭 5 秒后开始安全关停，等待在途发送结束和控件清理确认后退出；5 秒内刷新重连可取消 |
 | `model.provider` / `model` | 空 = DSH 默认模型 | |
 | `model.reasoningEffort` | `off` | 思考强度 off/low/high/max；`/ask` 临时用 high；运行中可用 `/model` `/think` 覆盖 |
 | `model.maxTokens` | 600 | |
@@ -126,6 +127,8 @@ DSH Desktop ≥ 2.0（运行时 0.2.1-rc.2）可在 **设置 → 插件 → 添�
 | `commandsDir` | 空 | 自定义命令脚本目录 |
 | `personaPath` | 自带人设 | |
 | `dataDir` | `~/.dsh/wechat-bot` | 状态目录 |
+
+`exitWithPage` 作用于整个 DSH Web 页面，切换会话或收起机器人面板不会触发。默认关闭，避免影响共用实例；开启后可通过原有桌面启动入口再次启动该专用实例。关停时停止处理新消息，不再发送剩余回复；若控件清理未确认或关停失败，实例会保留并记录错误，便于排查。发送结果不确定的记录会保留，不自动重发。
 
 ## 工作原理
 

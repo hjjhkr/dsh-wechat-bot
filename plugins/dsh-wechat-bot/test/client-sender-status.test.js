@@ -5,7 +5,7 @@ import vm from 'node:vm'
 
 const clientSource = await readFile(new URL('../client/index.js', import.meta.url), 'utf8')
 
-function makeState(reason, { chat = null, completed = true } = {}) {
+function makeState(reason, { chat = null, completed = true, pageLifetime = { enabled: false, pages: 0, closing: false } } = {}) {
   return {
     setup: { completedAt: completed ? '2026-10-22T00:00:00Z' : null, workspace: 'workspace' },
     here: { workspace: 'workspace' },
@@ -17,16 +17,27 @@ function makeState(reason, { chat = null, completed = true } = {}) {
       state: 'connected', canSend: false,
       reason, detail: '目标窗口没有准备好：测试说明',
     },
+    pageLifetime,
     chat,
     recoveries: 0,
     log: [],
   }
 }
 
-async function renderClient(state) {
+async function renderClient(state, { pageResponses = [], pendingPageState = false } = {}) {
   const instances = new Map()
   const pendingEffects = []
+  const clientEffects = []
+  const clientDisposers = []
   const requests = []
+  const pageRequests = []
+  const pageStreams = []
+  const warnings = []
+  const errors = []
+  const timers = new Map()
+  let nextTimerId = 0
+  let pageResponseIndex = 0
+  let pageStateReads = 0
   let active = null
   let extension
   let body
@@ -82,24 +93,53 @@ async function renderClient(state) {
       return React
     }) } } },
     fetch: async (url, init = {}) => {
+      if (url === '/api/wechat-bot.page-lifetime') {
+        pageRequests.push({ url, init })
+        const next = pageResponses[pageResponseIndex++]
+        return typeof next === 'function' ? next(init, pageStreams) : next ?? { status: 204, headers: { get: () => null }, body: null }
+      }
       if (init.method === 'POST') {
         const body = JSON.parse(init.body)
         requests.push(body)
         return { ok: true, json: async () => ({ ok: true, result: body.action === 'windowState'
           ? { visible: false, running: true } : body.action === 'window' ? { visible: body.visible, running: true } : {} }) }
       }
-      if (url.startsWith('/api/wechat-bot.state')) return { ok: true, json: async () => state }
+      if (url.startsWith('/api/wechat-bot.state')) {
+        if (url === '/api/wechat-bot.state') pageStateReads++
+        if (pendingPageState) return new Promise(() => {})
+        return { ok: true, json: async () => state }
+      }
       if (url === '/api/wechat-bot.log') return { ok: true, json: async () => ({ entries: [] }) }
       throw new Error(`unexpected request: ${url}`)
     },
+    EventSource: class FakeEventSource {
+      constructor(url) { this.url = url }
+      close() {}
+    },
     document: { visibilityState: 'hidden' },
+    AbortController,
+    setTimeout: (callback, delay) => {
+      const id = ++nextTimerId
+      timers.set(id, { callback, delay })
+      return id
+    },
+    clearTimeout: id => timers.delete(id),
     setInterval: () => 1,
     clearInterval() {},
+    console: { warn: (...args) => warnings.push(args), error: (...args) => errors.push(args) },
   }
   vm.runInNewContext(clientSource, sandbox, { filename: 'client/index.js' })
 
   extension.apply({
-    effect: effect => effect(),
+    effect: effect => {
+      const result = effect()
+      if (result && typeof result.then === 'function') {
+        clientEffects.push(result.then(disposer => {
+          if (typeof disposer === 'function') clientDisposers.push(disposer)
+        }))
+      } else if (typeof result === 'function') clientDisposers.push(result)
+      return result
+    },
     sidebarRightTabs: { register: () => () => {} },
     sidebarRight: { mounted: { getSnapshot: () => null }, openTab() {} },
     slots: {
@@ -107,6 +147,7 @@ async function renderClient(state) {
       register(_spec, component) { body = component; return () => {} },
     },
   })
+  await Promise.all(clientEffects)
   assert.equal(typeof body, 'function')
 
   let tree
@@ -116,7 +157,50 @@ async function renderClient(state) {
     if (!effects.length) break
     for (const run of effects) await run()
   }
-  return { tree, requests }
+  return {
+    tree, requests, pageStateReads, pageRequests, pageStreams, warnings, errors,
+    get pendingTimers() { return timers.size },
+    runNextTimeout() {
+      const entry = timers.entries().next().value
+      if (!entry) return false
+      const [id, timer] = entry
+      timers.delete(id)
+      timer.callback()
+      return timer.delay
+    },
+    flush: async () => { for (let i = 0; i < 10; i++) await Promise.resolve() },
+    dispose: async () => { for (const dispose of clientDisposers.reverse()) await dispose() },
+  }
+}
+
+function streamResponse(signal, pageStreams) {
+  const stream = { signal, reading: false, finish: null }
+  pageStreams.push(stream)
+  return {
+    status: 200,
+    headers: { get: name => name.toLowerCase() === 'content-type' ? 'text/event-stream; charset=utf-8' : null },
+    body: {
+      getReader() {
+        return {
+          read() {
+            stream.reading = true
+            return new Promise(resolve => {
+              const finish = () => resolve({ done: true })
+              stream.finish = finish
+              if (signal.aborted) finish()
+              else signal.addEventListener('abort', finish, { once: true })
+            })
+          },
+          releaseLock() {},
+        }
+      },
+      async cancel() {},
+    },
+  }
+}
+
+function emptyResponse(status) {
+  return { status, headers: { get: () => null }, body: null }
 }
 
 function textContent(node) {
@@ -145,6 +229,113 @@ test('the reserved window control calls window/set through the existing console 
   assert.ok(show)
   await show.props.onClick()
   assert.ok(requests.some(body => body.action === 'window' && body.visible === true))
+})
+
+test('the page lease is a same-origin authenticated fetch stream owned by the global client fiber', async () => {
+  const state = makeState('sender_prepare_failed', {
+    chat: selectedChat,
+    pageLifetime: { enabled: true, pages: 0, closing: false },
+  })
+
+  const streams = []
+  const client = await renderClient(state, { pageResponses: [init => streamResponse(init.signal, streams)] })
+
+  await client.flush()
+
+  assert.equal(client.pageStateReads, 0, 'the lease does not wait for the state route')
+  assert.equal(client.pageRequests.length, 1)
+  assert.equal(client.pageRequests[0].url, '/api/wechat-bot.page-lifetime')
+  assert.equal(client.pageRequests[0].init.credentials, 'same-origin')
+  assert.equal(client.pageRequests[0].init.cache, 'no-store')
+  assert.equal(client.pageRequests[0].init.headers.Accept, 'text/event-stream')
+  assert.equal(streams[0].reading, true)
+  assert.equal(client.pageRequests[0].init.signal.aborted, false)
+  await client.dispose()
+  assert.equal(client.pageRequests[0].init.signal.aborted, true, 'fiber disposal aborts the active fetch stream')
+})
+
+test('the initial missing host route retries until the page lease route becomes ready', async () => {
+  const streams = []
+  const client = await renderClient(makeState('sender_prepare_failed'), {
+    pageResponses: [emptyResponse(404), init => streamResponse(init.signal, streams)],
+  })
+  await client.flush()
+
+  assert.equal(client.pageRequests.length, 1)
+  assert.equal(client.pendingTimers, 1)
+  assert.equal(client.runNextTimeout(), 250)
+  await client.flush()
+
+  assert.equal(client.pageRequests.length, 2)
+  assert.equal(streams[0].reading, true, 'the retry holds a lease after the host route appears')
+  assert.equal(client.pageRequests[1].init.signal.aborted, false)
+  assert.equal(client.pendingTimers, 0)
+  await client.dispose()
+  assert.equal(client.pageRequests[1].init.signal.aborted, true)
+})
+
+test('a closed page lease stream reconnects within the five-second exit grace', async () => {
+  const streams = []
+  const client = await renderClient(makeState('sender_prepare_failed'), {
+    pageResponses: [init => streamResponse(init.signal, streams), init => streamResponse(init.signal, streams)],
+  })
+  await client.flush()
+
+  streams[0].finish()
+  await client.flush()
+
+  assert.equal(client.pendingTimers, 1)
+  assert.equal(client.runNextTimeout(), 250)
+  await client.flush()
+  assert.equal(client.pageRequests.length, 2)
+  assert.equal(streams[1].reading, true)
+  await client.dispose()
+})
+
+test('disposing the client fiber cancels a pending page lease retry', async () => {
+  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(404)] })
+  await client.flush()
+
+  assert.equal(client.pageRequests.length, 1)
+  assert.equal(client.pendingTimers, 1)
+  await client.dispose()
+
+  assert.equal(client.pendingTimers, 0)
+  assert.equal(client.runNextTimeout(), false)
+  await client.flush()
+  assert.equal(client.pageRequests.length, 1)
+})
+
+test('a disabled host lease returns 204 and stops without polling', async () => {
+  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(204)] })
+  await client.flush()
+
+  assert.equal(client.pageRequests.length, 1)
+  assert.equal(client.pendingTimers, 0)
+  assert.equal(client.runNextTimeout(), false)
+  await client.dispose()
+  assert.equal(client.pageRequests.length, 1)
+})
+
+test('a nontransient lease HTTP error is reported and does not enter the retry loop', async () => {
+  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(401)] })
+  await client.flush()
+
+  assert.equal(client.pageRequests.length, 1)
+  assert.equal(client.pendingTimers, 0)
+  assert.match(String(client.errors[0]?.[0]), /HTTP 401/)
+  await client.dispose()
+})
+
+test('the page lease opens even when the initial page state request is still pending', async () => {
+  const streams = []
+  const client = await renderClient(makeState('sender_prepare_failed'), {
+    pageResponses: [init => streamResponse(init.signal, streams)], pendingPageState: true,
+  })
+
+  assert.deepEqual(client.pageRequests.map(request => request.url), ['/api/wechat-bot.page-lifetime'])
+  assert.equal(client.pageStateReads, 0)
+  await client.dispose()
 })
 
 test('sender preparation failure is visible and retries the currently selected chat through watch', async () => {

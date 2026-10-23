@@ -81,6 +81,10 @@ class Interrupted extends Error {
 // Commands are the exception: they run on arrival, their output jumps the send
 // queue, and state-changing ones interrupt an answer still being thought out.
 export class ChatRunner {
+  #activeRuns = new Set()
+  #sendOperations = new Set()
+  #quiescePromise = null
+
   /**
    * @param {object} o
    * @param {{id,name,kind}} o.chat
@@ -125,6 +129,7 @@ export class ChatRunner {
     this.echoes = []
     this.status = 'idle'
     this.busySince = 0
+    this.quiescing = false
     this.turn = null
     this.abort = new AbortController()
     this.lane = new SendLane()
@@ -210,6 +215,23 @@ export class ChatRunner {
     clearTimeout(this.cronTimer)
   }
 
+  quiesce() {
+    if (this.#quiescePromise) return this.#quiescePromise
+    this.quiescing = true
+    this.disposed = true
+    this.batcher.clear()
+    clearTimeout(this.idleTimer)
+    clearTimeout(this.cronTimer)
+    this.abort.abort(new Error('bot_quiescing'))
+    this.learner?.dispose()
+    this.#quiescePromise = (async () => {
+      while (this.#activeRuns.size || this.#sendOperations.size) {
+        await Promise.allSettled([...this.#activeRuns, ...this.#sendOperations])
+      }
+    })()
+    return this.#quiescePromise
+  }
+
   // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
   stuckFor(now = Date.now()) {
     return this.busySince ? now - this.busySince : 0
@@ -256,7 +278,7 @@ export class ChatRunner {
   }
 
   #receive(message) {
-    if (this.disposed || this.seen.has(message.id)) return
+    if (this.disposed || this.quiescing || this.seen.has(message.id)) return
     this.#remember(message.id)
     // Our own reply coming back (by id, or by text when the adapter only queued it).
     if (message.fromSelf && (this.sentIds.has(message.id) || this.#isEcho(message))) return
@@ -545,6 +567,13 @@ export class ChatRunner {
   }
 
   async #run(batch, event) {
+    const run = this.#runBatch(batch, event)
+    this.#activeRuns.add(run)
+    run.then(() => this.#activeRuns.delete(run), () => this.#activeRuns.delete(run))
+    return run
+  }
+
+  async #runBatch(batch, event) {
     let deferMs = 0
     try {
       deferMs = await this.#turn(batch, event) ?? 0
@@ -552,7 +581,7 @@ export class ChatRunner {
       if (!this.disposed) this.#write('error', { message: error.message, code: error.code })
     } finally {
       this.#setStatus(deferMs ? 'throttled' : 'idle')
-      if (!this.disposed) {
+      if (!this.disposed && !this.quiescing) {
         if (deferMs) this.batcher.defer(deferMs)
         else this.batcher.release()
       }
@@ -792,7 +821,20 @@ export class ChatRunner {
 
   // All sends go through one lane, so command output (urgent) overtakes reply parts.
   #sendOne(content, clientId, { urgent = false, ...options }) {
-    return this.lane.run(() => this.#sendNow(content, clientId, options), { urgent })
+    if (this.disposed || this.quiescing) {
+      this.#write('dropped', { reason: 'shutdown', clientId })
+      return Promise.resolve(null)
+    }
+    const operation = this.lane.run(() => {
+      if (this.disposed || this.quiescing) {
+        this.#write('dropped', { reason: 'shutdown', clientId })
+        return null
+      }
+      return this.#sendNow(content, clientId, options)
+    }, { urgent })
+    this.#sendOperations.add(operation)
+    operation.then(() => this.#sendOperations.delete(operation), () => this.#sendOperations.delete(operation))
+    return operation
   }
 
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
@@ -808,6 +850,7 @@ export class ChatRunner {
         try {
           await this.link.whenCanSend(this.abort.signal)
         } catch {
+          if (this.quiescing) this.#write('dropped', { reason: 'shutdown', clientId })
           return null
         }
         if (ownsStatus && this.status === 'waiting') this.#setStatus('sending')
@@ -822,6 +865,11 @@ export class ChatRunner {
         const result = await this.link.send(content, clientId)
         return { messageId: result?.messageId ?? clientId }
       } catch (error) {
+        if (this.quiescing) {
+          this.counters.sendErrors++
+          this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
+          return null
+        }
         if (error.code === ErrorCode.Unavailable) {
           await sleep(this.settings.retryDelayMs)
           continue

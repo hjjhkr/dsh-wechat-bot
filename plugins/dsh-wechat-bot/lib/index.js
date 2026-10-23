@@ -1,11 +1,13 @@
 import z from '@deepseek-ai/schemastery'
 import { WeChatBotApp } from './app.js'
+import { createHostDisposer, PageLifetime } from './page-lifetime.js'
 import { registerCommand, registerRoutes, registerTool } from './surface.js'
 
 export const name = 'dsh-wechat-bot'
-export const inject = ['llm', 'connection', 'commands', 'tools', 'sessions', 'agents', 'sessionPersistence', 'sessionTitle', 'workspaceRegistry']
+export const inject = ['llm', 'connection', 'commands', 'tools', 'sessions', 'agents', 'sessionPersistence', 'sessionTitle', 'workspaceRegistry', 'appExit']
 
 export const Config = z.object({
+  exitWithPage: z.boolean().default(false).description('Exit this DSH process after the last authenticated browser page closes.'),
   adapter: z.object({
     command: z.string().default('').description('Adapter executable speaking protocol v1 over stdio. Empty = built-in simulator.'),
     args: z.array(z.string()).default([]),
@@ -51,9 +53,15 @@ export const Config = z.object({
 export function apply(ctx, config) {
   ctx.effect(async () => {
     const app = await WeChatBotApp.create(ctx, config)
-    registerRoutes(ctx, app)
+    const pageLifetime = new PageLifetime({
+      enabled: config.exitWithPage,
+      exit: ctx.appExit,
+      shutdown: () => app.dispose(),
+      onError: error => app.bot.note('error', `页面关闭安全关停失败，DSH保持运行：${error.message}`),
+    })
+    const disposeRoutes = registerRoutes(ctx, app, pageLifetime)
     registerCommand(ctx, app)
     registerTool(ctx, app)
-    return () => app.dispose()
+    return createHostDisposer({ disposeRoutes, pageLifetime, app })
   }, 'wechat-bot')
 }

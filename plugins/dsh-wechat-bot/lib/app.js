@@ -33,6 +33,7 @@ export function dataDirOf(config) {
 // `/wechat` DSH command and the `wechat_bot` agent tool all call these.
 export class WeChatBotApp {
   sessions = new Map()
+  #disposePromise = null
 
   static async create(ctx, config) {
     const app = new WeChatBotApp(ctx, config)
@@ -90,9 +91,13 @@ export class WeChatBotApp {
     if (this.bot.chat) this.#mirror(this.bot.chat)
   }
 
-  async dispose() {
-    await this.bot.dispose()
-    await Promise.allSettled([...this.sessions.values()].map(s => s.then(session => session?.dispose())))
+  dispose() {
+    if (this.#disposePromise) return this.#disposePromise
+    this.#disposePromise = (async () => {
+      await this.bot.dispose()
+      await Promise.allSettled([...this.sessions.values()].map(s => s.then(session => session?.dispose())))
+    })()
+    return this.#disposePromise
   }
 
   // A per-call effort (e.g. /ask's "high") falls back to the current one if the model lacks it.
