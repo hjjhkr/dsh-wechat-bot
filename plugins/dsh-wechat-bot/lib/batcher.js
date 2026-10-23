@@ -10,24 +10,7 @@
 //
 // Urgent messages (commands handed to the model) skip the line: they form
 // their own batch as soon as the consumer is free, and cut short any defer.
-//
-// When the newest message looks like the start of something ("在吗", "问个事",
-// a trailing comma, an image sent before its question), the quiet window grows
-// to `holdMs`, still within `maxWaitMs`: the script decides the batch is not
-// complete yet, so the reply does not answer half a thought.
 const URGENT_LIMIT = 5
-
-const LEAD_IN = /^(?:在吗|在不在|在么|在？|在\?|有人吗|问(?:你)?(?:个|一个)?(?:事|问题)|问一下|请教(?:一下)?|(?:我)?跟你说(?:个事)?|有个(?:事|问题)|那个|就是|然后|还有|另外|对了|等等|等一下|等下)$/
-const TRAILING = /(?:[，,、：:；;…—]|然后|而且|但是|所以|就是|还有|比如)$/
-const MEDIA = new Set(['image', 'video', 'file', 'link']) // not stickers: those are a complete reaction
-
-// Whether a message probably has a continuation coming.
-export function looksUnfinished(message) {
-  if (MEDIA.has(message.kind)) return true // a picture is usually followed by what it is about
-  const text = (message.text ?? '').replace(/^(?:[@＠]\S+[\s ]*)+/u, '').replace(/[\s。.！!？?]+$/u, '').trim()
-  if (!text) return false
-  return LEAD_IN.test(text) || TRAILING.test(text)
-}
 
 export class Batcher {
   #pending = []
@@ -40,8 +23,8 @@ export class Batcher {
   #deferTimer
   #busy = false
 
-  constructor({ quietMs = 3000, holdMs = 6000, maxWaitMs = 12_000, maxMessages = 20, maxChars = 6000 }, onBatch, onOverflow = () => {}) {
-    Object.assign(this, { quietMs, holdMs, maxWaitMs, maxMessages, maxChars })
+  constructor({ quietMs = 2000, maxWaitMs = 8000, maxMessages = 20, maxChars = 6000 }, onBatch, onOverflow = () => {}) {
+    Object.assign(this, { quietMs, maxWaitMs, maxMessages, maxChars })
     this.onBatch = onBatch
     this.onOverflow = onOverflow
   }
@@ -52,6 +35,11 @@ export class Batcher {
 
   get busy() {
     return this.#busy
+  }
+
+  // The messages waiting for the next batch (a copy).
+  peek() {
+    return [...this.#pending]
   }
 
   get urgentSize() {
@@ -134,9 +122,7 @@ export class Batcher {
 
   #arm() {
     clearTimeout(this.#quietTimer)
-    const last = this.#pending.at(-1)
-    const quiet = last && looksUnfinished(last) ? Math.max(this.quietMs, this.holdMs) : this.quietMs
-    this.#quietTimer = setTimeout(() => this.#flush(), quiet)
+    this.#quietTimer = setTimeout(() => this.#flush(), this.quietMs)
     if (!this.#maxTimer) {
       const remaining = Math.max(0, this.#firstAt + this.maxWaitMs - Date.now())
       this.#maxTimer = setTimeout(() => this.#flush(), remaining)

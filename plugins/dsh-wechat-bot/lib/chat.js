@@ -14,9 +14,8 @@ import { MemberRoster } from './roster.js'
 
 export const chatDefaults = Object.freeze({
   mode: 'infer',
-  quietMs: 3000,               // a batch closes after this long without new messages…
-  holdMs: 6000,                // …or this long when the last message looks unfinished ("在吗", "问个事", "，")
-  maxWaitMs: 12_000,           // and never later than this after its first message
+  quietMs: 2000,               // a batch closes after this long without new messages…
+  maxWaitMs: 8000,             // …and never later than this after its first message
   maxMessages: 20,
   maxChars: 6000,
   recentLimit: 30,
@@ -57,6 +56,8 @@ const NOTICE_INTERVAL_MS = 5000
 const COMMAND_SENDERS_LIMIT = 500
 // Scheduled messages are checked at least this often, so long delays, sleep and clock changes are safe.
 const CRON_TICK_MS = 60_000
+// What can continue someone's message ("续发"): words or a picture, not a sticker reaction.
+const CONTINUES = new Set(['text', 'image'])
 // Signals that count as "@" for the `at` mode.
 const AT_REASONS = new Set(['at_you', 'quotes_you', 'direct_chat'])
 
@@ -116,6 +117,7 @@ export class ChatRunner {
     this.stats = state.stats?.date === today() ? state.stats : { date: today(), batches: 0, sent: 0 }
     this.seen = new Set(this.transcript.map(m => m.id))
     this.sentIds = new Set()
+    this.rethought = new Set() // messages already written again once because their author kept talking
     this.echoes = []
     this.status = 'idle'
     this.busySince = 0
@@ -609,6 +611,22 @@ export class ChatRunner {
     // Only an unprompted idle remark is dropped if people started talking meanwhile.
     if (event?.kind === 'idle' && this.batcher.arrived) return void this.#write('idle_dropped', { newer: this.batcher.arrived })
 
+    // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
+    const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
+    const answering = urgent ? new Set() : this.#answering(batch, address, target, event)
+    // Someone being answered added to what they said while the reply was written: write it again with
+    // that, once per message (so a member who keeps typing cannot hold the reply back for ever).
+    if (decision.reply.length && !batch.some(m => this.rethought.has(m.id))) {
+      const more = this.#continuation(answering)
+      if (more) {
+        for (const m of batch) this.rethought.add(m.id)
+        while (this.rethought.size > SEEN_LIMIT) this.rethought.delete(this.rethought.values().next().value)
+        this.#write('continued', { from: more.sender.name, count: batch.length })
+        this.batcher.requeue(batch)
+        return void this.emit('change')
+      }
+    }
+
     if (batch.length) {
       if (this.learner) {
         // Notes come from the separate learner, which reads the raw evidence without the persona.
@@ -623,14 +641,31 @@ export class ChatRunner {
       this.#write('silent', {})
       return void this.emit('change')
     }
-    // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
-    const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
     const engagementId = event?.kind === 'engagement' ? engagement.id : batch.find(m => m.command?.engagement)?.command.engagement
     const sendStarted = Date.now()
-    await this.#deliver(decision.reply, { batch, target, event, started, engagementId })
+    await this.#deliver(decision.reply, { batch, target, event, started, engagementId, answering })
     this.#write('latency', { modelMs: decision.modelMs, sendMs: Date.now() - sendStarted,
       queueMs: batch.length ? Math.max(0, started - Math.min(...batch.map(m => m.time))) : 0,
       totalMs: batch.length ? Math.max(0, Date.now() - Math.min(...batch.map(m => m.time))) : Date.now() - started })
+  }
+
+  // Who a reply answers: everyone in the batch who was talking to the bot, the message it replies to,
+  // and an engagement's target.
+  #answering(batch, address, target, event) {
+    const ids = new Set(batch.filter(m => ['you', 'maybe'].includes(address.get(m.id)?.addressed)).map(m => m.sender.id))
+    if (target) ids.add(target.sender.id)
+    if (event?.kind === 'engagement') ids.add(event.target.id)
+    return ids
+  }
+
+  // A waiting message that continues what someone being answered was saying. Script rules only:
+  // the same person, not turned to someone else (an @ or a quote of another member), words or a picture.
+  #continuation(answering) {
+    if (!answering.size) return undefined
+    const waiting = this.batcher.peek().filter(m => answering.has(m.sender.id) && CONTINUES.has(m.kind))
+    if (!waiting.length) return undefined
+    const address = this.#addresses(waiting)
+    return waiting.find(m => address.get(m.id).addressed !== 'other')
   }
 
   // An interrupted batch goes back where it came from; the next turn sees the new state.
@@ -689,7 +724,7 @@ export class ChatRunner {
 
   // ── delivery ────────────────────────────────────────────────────────────
 
-  async #deliver(parts, { batch, target, event, started, engagementId }) {
+  async #deliver(parts, { batch, target, event, started, engagementId, answering = new Set() }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
     const commanded = batch.some(m => m.command)
@@ -699,6 +734,8 @@ export class ChatRunner {
       : !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
     for (const [index, part] of parts.entries()) {
       if (index && this.settings.typingDelay) await sleep(typingMs(part.text ?? ''))
+      // They added something mid-reply: the rest of it may no longer fit; the next turn answers both.
+      if (index && this.#continuation(answering)) return void this.#write('dropped', { reason: 'continued', clientId: `${turnId}:${index}` })
       const content = part.kind === 'sticker'
         ? { kind: 'sticker', path: this.settings.stickers[part.name] }
         : { kind: 'text', text: part.text }
