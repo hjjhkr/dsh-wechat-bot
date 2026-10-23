@@ -147,7 +147,10 @@ function parseDocument(content, expectedId) {
     throw new MarkdownMemoryError('bad_format', '记忆文档格式错误：用户 id header 不是有效 JSON')
   }
   if (typeof actualId !== 'string') throw new MarkdownMemoryError('bad_format', '记忆文档格式错误：用户 id header 类型错误')
-  if (actualId !== expectedId) throw new MarkdownMemoryError('id_mismatch', '记忆路径中的用户 id 与文档 header 不一致')
+  assertId(actualId)
+  if (expectedId !== undefined && actualId !== expectedId) {
+    throw new MarkdownMemoryError('id_mismatch', '记忆路径中的用户 id 与文档 header 不一致')
+  }
   const autoHeadings = lines.filter((line, index) => index > 4 && line.text === AUTOMATIC_HEADING)
   if (autoHeadings.length !== 1) throw new MarkdownMemoryError('bad_format', '记忆文档必须且只能有一个自动记忆区')
   const autoHeading = autoHeadings[0]
@@ -162,7 +165,7 @@ function parseDocument(content, expectedId) {
   if (automatic.length > MAX_AUTOMATIC_NOTES) {
     throw new MarkdownMemoryError('too_many_notes', '自动记忆超过每人 ' + MAX_AUTOMATIC_NOTES + ' 条上限')
   }
-  for (const entry of automatic) validateStoredEntry(expectedId, entry)
+  for (const entry of automatic) validateStoredEntry(actualId, entry)
   return {
     id: actualId,
     manualRaw,
@@ -212,6 +215,51 @@ async function readOptional(path, id) {
 
 function rejected(update, problem) {
   return { update, problem }
+}
+
+function hasExactKeys(value, keys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const actual = Object.keys(value).sort()
+  const expected = [...keys].sort()
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+}
+
+function validateCompactionProposal(who, proposal) {
+  if (!hasExactKeys(proposal, ['who', 'notes', 'discard']) || proposal.who !== who ||
+    !Array.isArray(proposal.notes) || !Array.isArray(proposal.discard) ||
+    proposal.notes.length > MAX_AUTOMATIC_NOTES || proposal.discard.length > MAX_AUTOMATIC_NOTES) {
+    throw new MarkdownMemoryError(proposal?.who !== undefined && proposal.who !== who ? 'who_mismatch' : 'bad_compaction_proposal',
+      proposal?.who !== undefined && proposal.who !== who
+        ? '压实提案的 who 必须与目标用户一致'
+        : '压实提案必须严格包含 who、notes、discard，且两项均为不超过 30 条的数组')
+  }
+
+  const notes = []
+  const targets = new Set()
+  for (const item of proposal.notes) {
+    if (!hasExactKeys(item, ['topic', 'note', 'sourceTopics']) || typeof item.topic !== 'string' ||
+      typeof item.note !== 'string' || !Array.isArray(item.sourceTopics) ||
+      item.sourceTopics.length < 1 || item.sourceTopics.length > MAX_AUTOMATIC_NOTES ||
+      item.sourceTopics.some(topic => typeof topic !== 'string' || !topic.trim()) ||
+      new Set(item.sourceTopics).size !== item.sourceTopics.length) {
+      throw new MarkdownMemoryError('bad_compaction_proposal', '压实 notes 必须提供 topic、note 和非空且不重复的 sourceTopics')
+    }
+    validateStoredEntry(who, { topic: item.topic, text: item.note })
+    const topic = item.topic.trim()
+    if (targets.has(topic)) throw new MarkdownMemoryError('duplicate_target', '压实结果包含重复主题：' + topic)
+    targets.add(topic)
+    notes.push({ topic, note: item.note.trim(), sourceTopics: [...item.sourceTopics] })
+  }
+
+  const discard = []
+  for (const item of proposal.discard) {
+    if (!hasExactKeys(item, ['topic', 'reason']) || typeof item.topic !== 'string' || !item.topic.trim() ||
+      !['temporary', 'outdated', 'duplicate'].includes(item.reason)) {
+      throw new MarkdownMemoryError('bad_compaction_proposal', '压实 discard 必须包含主题及 temporary、outdated 或 duplicate 理由')
+    }
+    discard.push({ topic: item.topic, reason: item.reason })
+  }
+  return { notes, discard }
 }
 
 function normalizeEvidence(evidence) {
@@ -422,6 +470,141 @@ export class MarkdownMemory {
       if (Object.keys(memberNotes).length) setOwn(notes, id, memberNotes)
     }
     return { notes, documents, versions }
+  }
+
+  async snapshot(who) {
+    assertId(who)
+    const stored = await readOptional(this.memoryPath(who), who)
+    if (!stored) return { who, version: null, automatic: [], manual: '' }
+    return {
+      who,
+      version: stored.hash,
+      automatic: stored.parsed.automatic.map(entry => ({ topic: entry.topic, note: entry.text })),
+      manual: stored.parsed.manualRaw,
+    }
+  }
+
+  async listMembers() {
+    await this.flush()
+    let directories
+    try {
+      directories = await readdir(this.chatDirectory, { withFileTypes: true })
+    } catch (error) {
+      if (error.code === 'ENOENT') return []
+      throw error
+    }
+
+    const members = []
+    for (const directory of directories) {
+      if (!directory.isDirectory() || !/^id-[a-f0-9]{64}$/.test(directory.name)) {
+        throw new MarkdownMemoryError('unknown_member_entry', '记忆聊天目录包含未知文件或目录：' + directory.name)
+      }
+      const memberDirectory = join(this.chatDirectory, directory.name)
+      const path = join(memberDirectory, 'MEMORY.md')
+      const member = await this.#serialize(path, async () => {
+        let contents
+        try {
+          contents = await readdir(memberDirectory, { withFileTypes: true })
+        } catch (error) {
+          if (error.code === 'ENOENT') return null
+          throw error
+        }
+        if (contents.length !== 1 || contents[0].name !== 'MEMORY.md' || !contents[0].isFile()) {
+          throw new MarkdownMemoryError('unknown_member_entry', '身份目录必须只包含一个普通 MEMORY.md 文件：' + directory.name)
+        }
+        const stored = await readOptional(path)
+        if (!stored) return null
+        if (idDirectory(stored.parsed.id) !== directory.name) {
+          throw new MarkdownMemoryError('id_path_mismatch', '身份目录 hash 与记忆文档 header 不一致：' + directory.name)
+        }
+        return { who: stored.parsed.id, count: stored.parsed.automatic.length, version: stored.hash }
+      })
+      if (member) members.push(member)
+    }
+    members.sort((left, right) => left.who < right.who ? -1 : left.who > right.who ? 1 : 0)
+    return members
+  }
+
+  async compact(who, proposal, expectedVersion) {
+    assertId(who)
+    const normalized = validateCompactionProposal(who, proposal)
+    if (expectedVersion !== null && (typeof expectedVersion !== 'string' || !/^[a-f0-9]{64}$/.test(expectedVersion))) {
+      throw new MarkdownMemoryError(expectedVersion === undefined ? 'version_missing' : 'bad_version',
+        expectedVersion === undefined ? '压实必须提供 context/snapshot 读取到的版本' : '压实版本格式错误')
+    }
+    const path = this.memoryPath(who)
+    return this.#serialize(path, async () => {
+      const stored = await readOptional(path, who)
+      if ((stored?.hash ?? null) !== expectedVersion) {
+        throw new MarkdownMemoryError('version_conflict', '记忆文档已被修改，拒绝应用过期的压实提案')
+      }
+      const parsed = stored?.parsed ?? {
+        id: who,
+        manualRaw: '\n',
+        manualNotes: [],
+        automatic: [],
+        eol: '\n',
+      }
+      const existingByTopic = new Map(parsed.automatic.map(entry => [entry.topic, entry]))
+      const sourceUse = new Map()
+      const useSource = topic => {
+        if (!existingByTopic.has(topic)) {
+          throw new MarkdownMemoryError('unknown_source', '压实提案引用了不存在的自动主题：' + topic)
+        }
+        sourceUse.set(topic, (sourceUse.get(topic) ?? 0) + 1)
+        if (sourceUse.get(topic) > 1) {
+          throw new MarkdownMemoryError('duplicate_source', '自动主题被重复压实：' + topic)
+        }
+      }
+      for (const note of normalized.notes) for (const topic of note.sourceTopics) useSource(topic)
+      for (const item of normalized.discard) useSource(item.topic)
+      for (const topic of existingByTopic.keys()) {
+        if (!sourceUse.has(topic)) {
+          throw new MarkdownMemoryError('source_coverage_incomplete', '压实提案未处理自动主题：' + topic)
+        }
+      }
+
+      const manualTopics = new Set(parsed.manualNotes.map(entry => entry.topic))
+      for (const note of normalized.notes) {
+        for (const topic of note.sourceTopics) {
+          if (!manualTopics.has(topic)) continue
+          const original = existingByTopic.get(topic)
+          const exactPreservation = note.topic === topic && note.sourceTopics.length === 1 && note.note === original.text
+          if (!exactPreservation) {
+            throw new MarkdownMemoryError('manual_note_conflict', '压实不能修改或移除与人工主题同名的自动记忆：' + topic)
+          }
+        }
+        if (manualTopics.has(note.topic)) {
+          const original = existingByTopic.get(note.topic)
+          const exactPreservation = note.sourceTopics.length === 1 &&
+            note.sourceTopics[0] === note.topic && note.note === original?.text
+          if (!exactPreservation) {
+            throw new MarkdownMemoryError('manual_note_conflict', '压实结果与人工主题重名：' + note.topic)
+          }
+        }
+      }
+      for (const item of normalized.discard) {
+        if (manualTopics.has(item.topic)) {
+          throw new MarkdownMemoryError('manual_note_conflict', '压实不能丢弃与人工主题同名的自动记忆：' + item.topic)
+        }
+      }
+
+      const automatic = normalized.notes.map(({ topic, note }) => ({ topic, text: note }))
+      const current = parsed.automatic
+      const changed = current.length !== automatic.length ||
+        current.some((entry, index) => entry.topic !== automatic[index].topic || entry.text !== automatic[index].text)
+      if (!changed) {
+        return { who, before: current.length, after: automatic.length, changed: false, version: stored?.hash ?? null }
+      }
+      if (!stored) {
+        throw new MarkdownMemoryError('source_coverage_incomplete', '没有现存自动主题可供压实')
+      }
+      const next = { ...parsed, automatic }
+      const content = renderDocument(who, next)
+      const written = await replaceIfUnchanged(path, content, stored.hash)
+      if (!written) throw new MarkdownMemoryError('version_conflict', '记忆文档在压实期间被手工修改')
+      return { who, before: current.length, after: automatic.length, changed: true, version: sha256(Buffer.from(content, 'utf8')) }
+    })
   }
 
   async apply(updates, evidence, versions = {}) {

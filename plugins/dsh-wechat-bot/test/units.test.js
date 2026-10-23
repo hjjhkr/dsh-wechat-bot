@@ -74,7 +74,7 @@ test('a follow-up from the person the bot just answered is "maybe", others stay 
   assert.equal(addressOf(msg('c', '真的假的', { time: now + 10 * 60_000 }), ctx).addressed, 'none')
 })
 
-test('decision parsing tolerates fences and prose, splits lines, strips stage directions', () => {
+test('decision parsing tolerates fences and prose, splits lines, strips only stage directions', () => {
   const batch = [msg('m1', 'hi')]
   const parsed = parseDecision('好的：\n```json\n{"to":"m1","reply":["草（笑）","第二句\\n第三句"],"memory":[]}\n```', { batch })
   assert.equal(parsed.to, 'm1')
@@ -83,7 +83,11 @@ test('decision parsing tolerates fences and prose, splits lines, strips stage di
   assert.equal(parseDecision('{"reply":"单句","to":"nope"}', { batch }).to, null)
   assert.deepEqual(parseDecision('{"reply":[],"memory":[]}', { batch }).reply, [])
   assert.deepEqual(parseDecision('{"reply":["（潜水）"]}', { batch }).reply, [], 'a pure aside is silence')
+  assert.deepEqual(parseDecision('{"reply":["别闹（笑）(￣へ￣)","（潜水）","(｡･ω･｡)","(T_T)","我觉得（这个办法）可行","这里(x)有括号"]}', { batch, maxParts: 10 }).reply.map(p => p.text), [
+    '别闹(￣へ￣)', '(｡･ω･｡)', '(T_T)', '我觉得（这个办法）可行', '这里(x)有括号',
+  ])
   assert.deepEqual(parseDecision('{"reply":[{"sticker":"狗头"}]}', { batch, stickers: ['狗头'] }).reply, [{ kind: 'sticker', name: '狗头' }])
+  assert.throws(() => parseDecision('(T_T)', { batch }), e => e instanceof DecisionError && e.code === 'not_json')
   for (const [raw, code] of [
     ['我觉得不用回', 'not_json'],
     ['{"reply":["1","2","3","4"]}', 'too_many_parts'],

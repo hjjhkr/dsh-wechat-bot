@@ -342,6 +342,7 @@ export class Bot extends EventEmitter {
       emit: (type, payload) => {
         if (runner !== this.runner) return
         if (type === 'log') this.emit('chat-log', payload)
+        if (type === 'memory-changed') this.emit('memory-changed', chat)
         this.store.saveChatLater(chat.id, () => runner.snapshot())
         this.#changed()
       },

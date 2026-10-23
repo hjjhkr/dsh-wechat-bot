@@ -56,6 +56,7 @@ function runAction(app, { action, ...args }) {
     case 'listChats': return app.listChats(args.query)
     case 'watch': return app.watch(args.chatId ?? null)
     case 'mode': return app.setMode(args.mode)
+    case 'compactMemory': return app.compactMemory(args.chatId)
     case 'window': return app.setWindowVisible(args.visible === true)
     case 'windowState': return app.windowState()
     case 'simulate': return app.simulate(args)

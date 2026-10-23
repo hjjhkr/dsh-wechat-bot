@@ -47,7 +47,7 @@ event 的几种情况：
 {"to":"你回应的那条消息 id，或 null","reply":["第一条","第二条"]{memoryField}}
 - reply 是要发出去的消息列表，每个元素是一条单独的微信消息，一行、不换行，最多 {maxParts} 条。不说话就输出 "reply":[]。
 - 只要 new 里有 addressed=you 的消息，就必须回应，reply 不能为空。
-- reply 里不要写括号内心戏、动作描写或解释，写什么就会原样发到微信里。
+- reply 文本只写要直接发送给群友的正文，不写舞台动作、内心旁白或解释；普通括号语义和颜文字属于正文，可以完整放在字符串里。
 {stickers}{memory}`
 
 // Only when no separate learner writes memory: then the reply model proposes notes itself.

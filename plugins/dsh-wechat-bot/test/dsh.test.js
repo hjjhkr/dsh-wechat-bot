@@ -14,6 +14,7 @@ import { createThink } from '../lib/model.js'
 import { ChatSession, chatSessionId, liveChatSessionId } from '../lib/session.js'
 import { WeChatBotApp } from '../lib/app.js'
 import { Store } from '../lib/store.js'
+import { registerRoutes } from '../lib/surface.js'
 import { until } from './helpers.js'
 
 const CHAT = { id: 'demo@chatroom', name: '测试群', kind: 'group' }
@@ -37,6 +38,7 @@ async function fixture(t, llm = fakeLlm(async function* () {})) {
   await rootCtx.plugin(class extends Service {
     constructor(ctx) { super(ctx, 'llm') }
     stream(request) { return llm.stream(request) }
+    resolveModelInfo(provider, model) { return llm.resolveModelInfo?.(provider, model) ?? { reasoning: { efforts: [{ id: 'off' }, { id: 'max' }] } } }
   }).await()
   await rootCtx.plugin(class extends Service {
     constructor(ctx) { super(ctx, 'workspaceRegistry') }
@@ -273,4 +275,135 @@ test('an available recorded mirror id is restored rather than creating another s
   const restored = await ChatSession.openAvailable(ctx, { id, cwd: root, title: '微信 · 测试群', route: ROUTE })
   t.after(() => restored.dispose())
   assert.equal(restored.id, id)
+})
+
+
+async function maintenanceApp(t, llm, counts) {
+  const f = await fixture(t, llm)
+  const dataDir = join(f.root, 'wechat-bot')
+  const store = new Store(dataDir)
+  await store.updateBot({ chat: CHAT,
+    setup: { workspace: f.root, sessionId: 'setup-session', completedAt: 1, self: { id: 'wxid_bot', name: '小鲸鱼' } },
+  })
+  const memory = store.memoryFor(CHAT.id)
+  for (const [who, count] of Object.entries(counts)) {
+    const evidence = Array.from({ length: count }, (_, i) => ({ id: `${who}-${i}`, sender: { id: who, name: who }, fromSelf: false, text: '我长期保持这个习惯' }))
+    const saved = await memory.context([who])
+    const result = await memory.apply(evidence.map((m, i) => ({ who, topic: `主题${i}`, note: `稳定事实${i}`, evidence: m.id })), evidence, saved.versions)
+    assert.equal(result.applied.length, count)
+  }
+  const config = { dataDir, adapter: { command: '' }, model: ROUTE, aliases: ['小鲸鱼'],
+    behavior: { staleMinutes: 10, memoryLearning: true, quietMs: 5, maxWaitMs: 15, memoryQuietMs: 5, memoryMaxWaitMs: 15, typingDelay: false },
+    guard: { maxTurnsPerMinute: 8, commandsPerMinute: 6, modelTimeoutSeconds: 30,
+      maxTextChars: 2000, breakerThreshold: 3, breakerBaseSeconds: 30, stuckMinutes: 5 },
+  }
+  const app = await WeChatBotApp.create(f.ctx, config)
+  t.after(() => app.dispose())
+  await until(() => app.bot.runner)
+  return { ...f, app, memory: app.store.memoryFor(CHAT.id) }
+}
+
+function retainingLlm() {
+  return fakeLlm(async function* (request) {
+    const input = JSON.parse(request.messages.at(-1).content[0].text)
+    yield { type: 'text-delta', index: 0, text: JSON.stringify({ who: input.who,
+      notes: input.automatic.map(entry => ({ ...entry, sourceTopics: [entry.topic] })), discard: [] }) }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+}
+
+test('the console action runs all current-group memories through max native turns without sending WeChat', async t => {
+  const llm = retainingLlm()
+  const { app, ctx, attached } = await maintenanceApp(t, llm, { bob: 2, alice: 1 })
+  const routes = []
+  const unregister = registerRoutes({ connection: { fetch: { register: route => { routes.push(route); return () => {} } } } }, app,
+    { snapshot: () => ({}), handle: () => new Response(null, { status: 204 }) })
+  t.after(unregister)
+  const action = routes.find(route => route.path === '/api/wechat-bot.action')
+  const response = await action.fetch(new Request('http://localhost/api/wechat-bot.action', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ action: 'compactMemory', chatId: CHAT.id }),
+  }))
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).ok, true)
+  await app.memoryMaintenance.whenIdle()
+  assert.equal(llm.requests.length, 2)
+  assert.deepEqual(llm.requests.map(r => JSON.parse(r.messages.at(-1).content[0].text).who), ['alice', 'bob'])
+  assert.ok(llm.requests.every(r => r.reasoningEffort === 'max' && r.maxTokens >= 32768))
+  assert.ok(llm.requests.every(r => r.system.includes('记忆') && !r.system.includes('# 微信回复决策')))
+  const state = app.state().memoryMaintenance
+  assert.equal(state.completed, 2)
+  assert.ok(state.results.every(result => result.status !== 'failed'))
+  const mirrors = [...app.maintenanceSessions.values()]
+  assert.equal(mirrors.length, 1)
+  const mirror = await mirrors[0]
+  assert.equal(mirror.options.reasoningEffort, 'max')
+  assert.equal(ctx.sessionTitle.get(mirror.session).title, `记忆整理 · ${CHAT.name} · max`)
+  assert.equal(mirror.session.snapshotEvents().filter(event => event.type === 'assistant/message').length, 2)
+  assert.ok(attached.some(entry => entry.id === mirror.id))
+  assert.equal(await ctx.sessionPersistence.stat(mirror.id), undefined)
+  assert.equal(app.chatLog().filter(entry => entry.type === 'sent').length, 0)
+  assert.throws(() => app.compactMemory('old-group'), /群已改变/)
+})
+
+test('startup automatically compacts 30 topics once and preserves 30 independent valid themes', async t => {
+  const llm = retainingLlm()
+  const { app, memory } = await maintenanceApp(t, llm, { alice: 30 })
+  await until(() => llm.requests.length === 1)
+  await app.memoryMaintenance.whenIdle()
+  await app.memoryMaintenance.observe(CHAT)
+  await app.memoryMaintenance.whenIdle()
+  assert.equal(llm.requests.length, 1)
+  assert.equal((await memory.snapshot('alice')).automatic.length, 30)
+  assert.equal(app.state().memoryMaintenance.results[0].changed, false)
+})
+
+test('max-unsupported models fail maintenance explicitly instead of silently lowering effort', async t => {
+  const llm = retainingLlm()
+  llm.resolveModelInfo = () => ({ reasoning: { efforts: [{ id: 'off' }] } })
+  const { app, memory } = await maintenanceApp(t, llm, { alice: 1 })
+  const before = await memory.snapshot('alice')
+  await app.compactMemory(CHAT.id)
+  await app.memoryMaintenance.whenIdle()
+  assert.equal(llm.requests.length, 0)
+  const result = app.state().memoryMaintenance.results[0]
+  assert.equal(result.status, 'failed')
+  assert.match(result.error, /不支持 max/)
+  assert.equal((await memory.snapshot('alice')).version, before.version)
+  assert.equal(app.maintenanceSessions.size, 0)
+})
+
+test('production reply and learning calls load only their own AGENTS contract', async t => {
+  const llm = fakeLlm(async function* () {
+    yield { type: 'text-delta', index: 0, text: '{}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const { app } = await maintenanceApp(t, llm, {})
+  const args = { chat: CHAT, system: '当前调用协议', messages: [{ role: 'user', text: '{}' }], readable: '测试角色' }
+  await app.bot.think(args)
+  await app.bot.learn(args)
+  assert.match(llm.requests[0].system, /# 微信回复决策/)
+  assert.match(llm.requests[0].system, /当前调用协议/)
+  assert.doesNotMatch(llm.requests[1].system, /# 微信回复决策/)
+  assert.match(llm.requests[1].system, /AGENTS|记忆/)
+})
+
+
+test('the thirtieth learned theme automatically enters maintenance through the live runner notification', async t => {
+  const llm = fakeLlm(async function* (request) {
+    const input = JSON.parse(request.messages.at(-1).content[0].text)
+    const output = request.reasoningEffort === 'max'
+      ? { who: input.who, notes: input.automatic.map(entry => ({ ...entry, sourceTopics: [entry.topic] })), discard: [] }
+      : { memory: [{ who: 'alice', topic: '新项目', note: '长期维护编译器项目', evidence: 'last-stable-fact' }] }
+    yield { type: 'text-delta', index: 0, text: JSON.stringify(output) }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const { app, memory } = await maintenanceApp(t, llm, { alice: 29 })
+  app.bot.runner.receive({ id: 'last-stable-fact', chatId: CHAT.id, time: Date.now(),
+    kind: 'text', text: '我长期在维护一个编译器项目', fromSelf: false, sender: { id: 'alice', name: '阿甲' }, mentions: [] })
+  await until(() => llm.requests.some(request => request.reasoningEffort === 'max'), { timeoutMs: 5000, what: '30th learned theme triggers max maintenance' })
+  await app.memoryMaintenance.whenIdle()
+  assert.equal(llm.requests.filter(request => request.reasoningEffort === 'max').length, 1)
+  assert.equal((await memory.snapshot('alice')).automatic.length, 30)
+  assert.equal(app.state().memoryMaintenance.results[0].status, 'completed')
+  assert.equal(app.chatLog().filter(entry => entry.type === 'sent').length, 0)
 })

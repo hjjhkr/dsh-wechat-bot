@@ -516,3 +516,264 @@ test('invalid UTF-8, malformed headers, oversized files, and missing CAS version
   assert.equal(missingVersion.rejected[0].problem, 'version_missing')
   assert.equal(await memory.count(), 0)
 })
+
+function compaction(who, notes, discard = []) {
+  return { who, notes, discard }
+}
+
+test('listMembers and snapshot enumerate manual-only ids and expose exact document versions', async t => {
+  const { root, memory } = await memoryFor(t)
+  const siblingChat = new MarkdownMemory(root, CHAT_B)
+  const initial = await memory.context(['z-user', 'a-user'])
+  const source = message('member-a', 'a-user', '我长期喜欢骑行')
+  await memory.apply([update('a-user', '爱好', '喜欢骑行', source.id)], [source], initial.versions)
+  const manualOnlyPath = memory.memoryPath('z-user')
+  await mkdir(join(manualOnlyPath, '..'), { recursive: true })
+  const manualOnly = [
+    '# 微信用户记忆', '', '<!-- dsh-memory-id: "z-user" -->', '',
+    '## 人工补充（程序原样保留）', '', '### 手工主题', '逐字保留', '', '## 自动记忆', '',
+  ].join('\n')
+  await writeFile(manualOnlyPath, manualOnly, 'utf8')
+  const siblingSource = message('sibling', 'a-user', '我喜欢下棋')
+  const siblingInitial = await siblingChat.context(['a-user'])
+  await siblingChat.apply([update('a-user', '爱好', '喜欢下棋', siblingSource.id)], [siblingSource], siblingInitial.versions)
+
+  const a = await memory.snapshot('a-user')
+  assert.deepEqual(a, {
+    who: 'a-user', version: createHash('sha256').update(await readFile(memory.memoryPath('a-user'))).digest('hex'),
+    automatic: [{ topic: '爱好', note: '喜欢骑行' }], manual: '\n',
+  })
+  const z = await memory.snapshot('z-user')
+  assert.deepEqual(z.automatic, [])
+  assert.equal(z.manual, '\n### 手工主题\n逐字保留\n\n')
+  const listed = await memory.listMembers()
+  assert.deepEqual(listed.map(({ who, count }) => ({ who, count })), [
+    { who: 'a-user', count: 1 }, { who: 'z-user', count: 0 },
+  ])
+  assert.equal(listed.find(member => member.who === 'a-user').version, a.version)
+  assert.deepEqual(await siblingChat.listMembers().then(result => result.map(member => member.who)), ['a-user'])
+})
+
+test('compact merges and discards explicit sources while preserving manual bytes and unrelated members', async t => {
+  const { root, memory } = await memoryFor(t)
+  const siblingChat = new MarkdownMemory(root, CHAT_B)
+  const initial = await memory.context(['alice', 'bob'])
+  const topics = ['骑行', '徒步', '临时安排', '工作']
+  const notes = ['喜欢骑行', '喜欢徒步', '本周临时去露营', '从事设计工作']
+  const facts = notes.map((note, index) => message('compact-' + index, 'alice', '我长期' + note))
+  const seeded = await memory.apply(facts.map((source, index) => update('alice', topics[index], notes[index], source.id)), facts, initial.versions)
+  assert.equal(seeded.applied.length, 4)
+  const bob = message('compact-bob', 'bob', '我喜欢摄影')
+  const bobState = await memory.context(['bob'])
+  await memory.apply([update('bob', '爱好', '喜欢摄影', bob.id)], [bob], bobState.versions)
+  const sibling = message('compact-sibling', 'alice', '我喜欢看书')
+  const siblingState = await siblingChat.context(['alice'])
+  await siblingChat.apply([update('alice', '阅读', '喜欢看书', sibling.id)], [sibling], siblingState.versions)
+
+  const path = memory.memoryPath('alice')
+  const beforeDocument = await readFile(path, 'utf8')
+  const edited = beforeDocument.replace('\n\n## 自动记忆\n', '\n### 手工备注\n逐字保留\n\n## 自动记忆\n')
+  await writeFile(path, edited, 'utf8')
+  const editedState = await memory.snapshot('alice')
+  const manual = editedState.manual
+  const proposal = compaction('alice', [
+    { topic: '户外兴趣', note: '喜欢骑行和徒步', sourceTopics: ['骑行', '徒步'] },
+    { topic: '工作', note: '从事设计工作', sourceTopics: ['工作'] },
+  ], [{ topic: '临时安排', reason: 'temporary' }])
+
+  const result = await memory.compact('alice', proposal, editedState.version)
+  assert.deepEqual({ who: result.who, before: result.before, after: result.after, changed: result.changed }, {
+    who: 'alice', before: 4, after: 2, changed: true,
+  })
+  const after = await memory.snapshot('alice')
+  assert.equal(after.manual, manual)
+  assert.deepEqual(after.automatic, [
+    { topic: '户外兴趣', note: '喜欢骑行和徒步' },
+    { topic: '工作', note: '从事设计工作' },
+  ])
+  assert.equal(await memory.snapshot('bob').then(value => value.automatic[0].note), '喜欢摄影')
+  assert.equal(await siblingChat.snapshot('alice').then(value => value.automatic[0].note), '喜欢看书')
+  assert.equal(result.version, after.version)
+})
+
+test('compact accepts 30 independent topics and makes no write when every note is retained unchanged', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const evidence = Array.from({ length: 30 }, (_, index) => message('compact-full-' + index, 'alice', '我长期保存主题 ' + index))
+  const topics = evidence.map((_, index) => '独立主题' + index)
+  const updates = evidence.map((source, index) => update('alice', topics[index], '稳定事实 ' + index, source.id))
+  assert.equal((await memory.apply(updates, evidence, initial.versions)).applied.length, 30)
+  const state = await memory.snapshot('alice')
+  const proposal = compaction('alice', topics.map((topic, index) => ({
+    topic, note: '稳定事实 ' + index, sourceTopics: [topic],
+  })))
+  const result = await memory.compact('alice', proposal, state.version)
+  assert.deepEqual({ before: result.before, after: result.after, changed: result.changed, version: result.version }, {
+    before: 30, after: 30, changed: false, version: state.version,
+  })
+  assert.equal((await memory.snapshot('alice')).automatic.length, 30)
+})
+
+test('compacting away every automatic note leaves the exact manual region in place', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const source = message('compact-discard-all', 'alice', '我这周临时去露营')
+  await memory.apply([update('alice', '临时安排', '这周临时去露营', source.id)], [source], initial.versions)
+  const before = await memory.snapshot('alice')
+  const result = await memory.compact('alice', compaction('alice', [], [
+    { topic: '临时安排', reason: 'temporary' },
+  ]), before.version)
+  assert.deepEqual({ before: result.before, after: result.after, changed: result.changed }, {
+    before: 1, after: 0, changed: true,
+  })
+  const after = await memory.snapshot('alice')
+  assert.deepEqual(after.automatic, [])
+  assert.equal(after.manual, before.manual)
+  assert.ok(after.version)
+})
+
+test('compact rejects incomplete, cross-id, duplicate-target, and unknown-source proposals without mutation', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const topics = ['骑行', '徒步']
+  const evidence = topics.map((topic, index) => message('compact-invalid-' + index, 'alice', '我喜欢' + topic))
+  await memory.apply(evidence.map((source, index) => update('alice', topics[index], '喜欢' + topics[index], source.id)), evidence, initial.versions)
+  const state = await memory.snapshot('alice')
+  const before = await readFile(memory.memoryPath('alice'), 'utf8')
+  const invalid = [
+    [compaction('alice', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行'] }]), 'source_coverage_incomplete'],
+    [compaction('bob', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行', '徒步'] }]), 'who_mismatch'],
+    [compaction('alice', [
+      { topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行'] },
+      { topic: '户外', note: '喜欢远足', sourceTopics: ['徒步'] },
+    ]), 'duplicate_target'],
+    [compaction('alice', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['未知'] }], [
+      { topic: '骑行', reason: 'outdated' }, { topic: '徒步', reason: 'duplicate' },
+    ]), 'unknown_source'],
+    [{ who: 'alice', notes: [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行', '徒步'] }] }, 'bad_compaction_proposal'],
+    [compaction('alice', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: [] }], [
+      { topic: '骑行', reason: 'outdated' }, { topic: '徒步', reason: 'duplicate' },
+    ]), 'bad_compaction_proposal'],
+    [compaction('alice', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行', '徒步'] }], [
+      { topic: '其他', reason: 'temporary' },
+    ]), 'unknown_source'],
+    [compaction('alice', [{ topic: '户外', note: '喜欢户外活动', sourceTopics: ['骑行', '徒步'] }], [
+      { topic: '临时', reason: 'not-supported' },
+    ]), 'bad_compaction_proposal'],
+    [compaction('alice', [{ topic: '户外', note: '稳'.repeat(481), sourceTopics: ['骑行', '徒步'] }]), 'bad_note'],
+    [compaction('alice', [{ topic: '户外', note: 'API key 是 sk-1234567890abcdef', sourceTopics: ['骑行', '徒步'] }]), 'sensitive'],
+  ]
+  for (const [proposal, code] of invalid) {
+    await assert.rejects(memory.compact('alice', proposal, state.version), error =>
+      error instanceof MarkdownMemoryError && error.code === code)
+    assert.equal(await readFile(memory.memoryPath('alice'), 'utf8'), before)
+  }
+})
+
+test('compact rejects a rendered document over 16 KiB without deleting any source', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const topics = ['骑行', '徒步']
+  const evidence = topics.map((topic, index) => message('compact-large-' + index, 'alice', '我喜欢' + topic))
+  await memory.apply(evidence.map((source, index) => update('alice', topics[index], '喜欢' + topics[index], source.id)), evidence, initial.versions)
+  const path = memory.memoryPath('alice')
+  const original = await readFile(path, 'utf8')
+  const paddingLength = MARKDOWN_MEMORY_LIMITS.maxBytes - Buffer.byteLength(original) - 50
+  const edited = original.replace('\n\n## 自动记忆\n', '\n' + 'x'.repeat(paddingLength) + '\n\n## 自动记忆\n')
+  assert.ok(Buffer.byteLength(edited) < MARKDOWN_MEMORY_LIMITS.maxBytes)
+  await writeFile(path, edited, 'utf8')
+  const state = await memory.snapshot('alice')
+  const proposal = compaction('alice', [{
+    topic: '户外', note: '稳'.repeat(400), sourceTopics: topics,
+  }])
+  await assert.rejects(memory.compact('alice', proposal, state.version), error =>
+    error instanceof MarkdownMemoryError && error.code === 'document_too_large')
+  assert.equal(await readFile(path, 'utf8'), edited)
+})
+
+test('compact preserves a manual section and rejects stale versions and shadowed manual topics', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const topics = ['兴趣', '工作']
+  const evidence = topics.map((topic, index) => message('compact-manual-' + index, 'alice', '我长期喜欢' + topic))
+  await memory.apply(evidence.map((source, index) => update('alice', topics[index], '自动记录 ' + index, source.id)), evidence, initial.versions)
+  const path = memory.memoryPath('alice')
+  const before = await readFile(path, 'utf8')
+  const edited = before.replace('\n\n## 自动记忆\n', '\n### 兴趣\n人工内容必须保持\n### 手工事项\n逐字保留\n\n## 自动记忆\n')
+  await writeFile(path, edited, 'utf8')
+  const state = await memory.snapshot('alice')
+  const manual = state.manual
+  const stale = compaction('alice', [
+    { topic: '合并兴趣', note: '兴趣合集', sourceTopics: ['兴趣'] },
+    { topic: '工作', note: '自动记录 1', sourceTopics: ['工作'] },
+  ])
+  await assert.rejects(memory.compact('alice', stale, createHash('sha256').update(before).digest('hex')), error =>
+    error instanceof MarkdownMemoryError && error.code === 'version_conflict')
+  const shadowed = compaction('alice', [
+    { topic: '兴趣', note: '自动记录 0', sourceTopics: ['兴趣'] },
+    { topic: '工作', note: '自动记录 1', sourceTopics: ['工作'] },
+  ])
+  const unchanged = await memory.compact('alice', shadowed, state.version)
+  assert.equal(unchanged.changed, false)
+  assert.equal((await memory.snapshot('alice')).manual, manual)
+  const destructive = compaction('alice', [
+    { topic: '户外', note: '兴趣合集', sourceTopics: ['兴趣'] },
+    { topic: '工作', note: '自动记录 1', sourceTopics: ['工作'] },
+  ])
+  await assert.rejects(memory.compact('alice', destructive, state.version), error =>
+    error instanceof MarkdownMemoryError && error.code === 'manual_note_conflict')
+  assert.equal(await readFile(path, 'utf8'), edited)
+})
+
+test('listMembers rejects unknown entries and hash directories that do not match document headers', async t => {
+  const { memory } = await memoryFor(t)
+  await mkdir(memory.chatDirectory, { recursive: true })
+  await writeFile(join(memory.chatDirectory, 'unexpected.txt'), 'ignored files must fail', 'utf8')
+  await assert.rejects(memory.listMembers(), error => error instanceof MarkdownMemoryError && error.code === 'unknown_member_entry')
+  await rm(join(memory.chatDirectory, 'unexpected.txt'))
+  await mkdir(join(memory.chatDirectory, 'unexpected-directory'))
+  await assert.rejects(memory.listMembers(), error => error instanceof MarkdownMemoryError && error.code === 'unknown_member_entry')
+  await rm(join(memory.chatDirectory, 'unexpected-directory'), { recursive: true })
+
+  const initial = await memory.context(['alice'])
+  const source = message('list-unknown-child', 'alice', '我喜欢骑行')
+  await memory.apply([update('alice', '爱好', '喜欢骑行', source.id)], [source], initial.versions)
+  const extraFile = join(memory.chatDirectory, 'id-' + createHash('sha256').update('alice').digest('hex'), 'unexpected.txt')
+  await writeFile(extraFile, 'unknown member files must fail', 'utf8')
+  await assert.rejects(memory.listMembers(), error => error instanceof MarkdownMemoryError && error.code === 'unknown_member_entry')
+  await rm(extraFile)
+
+  const wrongPath = join(memory.chatDirectory, 'id-' + createHash('sha256').update('other-id').digest('hex'))
+  await mkdir(wrongPath, { recursive: true })
+  const path = join(wrongPath, 'MEMORY.md')
+  const mismatched = [
+    '# 微信用户记忆', '', '<!-- dsh-memory-id: "alice" -->', '',
+    '## 人工补充（程序原样保留）', '', '## 自动记忆', '',
+  ].join('\n')
+  await writeFile(path, mismatched, 'utf8')
+  await assert.rejects(memory.listMembers(), error => error instanceof MarkdownMemoryError && error.code === 'id_path_mismatch')
+})
+
+test('listMembers serializes reads with concurrent writes and treats a queued forget as member removal', async t => {
+  const { memory } = await memoryFor(t)
+  const initial = await memory.context(['alice'])
+  const seed = message('concurrent-list-seed', 'alice', '我长期喜欢骑行')
+  await memory.apply([update('alice', '爱好', '喜欢骑行', seed.id)], [seed], initial.versions)
+
+  const current = await memory.context(['alice'])
+  const updateMessage = message('concurrent-list-update', 'alice', '我现在还喜欢徒步')
+  const listingWhileWriting = memory.listMembers()
+  const writing = memory.apply([update('alice', '爱好', '喜欢徒步', updateMessage.id)], [updateMessage], current.versions)
+  const [listed, writeResult] = await Promise.all([listingWhileWriting, writing])
+  assert.equal(writeResult.applied.length, 1)
+  assert.equal(listed.length, 1)
+  assert.equal(listed[0].who, 'alice')
+  assert.equal(listed[0].version, (await memory.snapshot('alice')).version)
+
+  const listingWhileForgetting = memory.listMembers()
+  const forgetting = memory.forget('alice')
+  const [membersAfterForget, removed] = await Promise.all([listingWhileForgetting, forgetting])
+  assert.equal(removed, 1)
+  assert.deepEqual(membersAfterForget, [])
+  assert.deepEqual(await memory.listMembers(), [])
+})

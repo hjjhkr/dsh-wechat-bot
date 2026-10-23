@@ -168,6 +168,7 @@ export class ChatRunner {
       write: (type, data) => this.#write(type, data),
       notice: (type, data) => this.#notice(type, data),
       saved: async () => {
+        this.emit('memory-changed')
         this.emit('change')
         await this.persist()
       },
@@ -417,7 +418,9 @@ export class ChatRunner {
             this.learner?.cancel()
             for (const m of this.transcript) if (m.sender.id === id) this.forgottenEvidence.add(m.id)
             while (this.forgottenEvidence.size > SEEN_LIMIT) this.forgottenEvidence.delete(this.forgottenEvidence.values().next().value)
-            return this.memoryDocuments ? this.memoryDocuments.forget(id, topic) : this.memory.forget(id, topic)
+            const result = this.memoryDocuments ? await this.memoryDocuments.forget(id, topic) : this.memory.forget(id, topic)
+            this.emit('memory-changed')
+            return result
           },
         },
         resetContext: () => {
@@ -697,6 +700,7 @@ export class ChatRunner {
           ? await this.memoryDocuments.apply(decision.memory, evidence, decision.memoryVersions)
           : this.memory.apply(decision.memory, evidence)
         if (applied.length || rejected.length) this.#write('memory', { applied, rejected })
+        if (applied.length) this.emit('memory-changed')
       }
     }
     if (!decision.reply.length) {

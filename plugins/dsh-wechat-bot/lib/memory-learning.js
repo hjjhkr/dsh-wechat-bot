@@ -379,7 +379,8 @@ export class MemoryLearner {
       if (this.disposed || epoch !== this.#epoch) return
       this.write('memory_error', { code: error.code ?? error.name })
       // One more try for messages that have not been retried yet.
-      const retry = batch.filter(m => !this.#retried.has(m.id))
+      const retry = error.retryable === false ? [] : batch.filter(m => !this.#retried.has(m.id))
+      if (error.retryable === false) this.write('error', { message: `记忆任务配置失败，本批 ${batch.length} 条未写入：${error.message}` })
       for (const m of retry) this.#retried.add(m.id)
       while (this.#retried.size > 1000) this.#retried.delete(this.#retried.values().next().value)
       this.queue(retry)

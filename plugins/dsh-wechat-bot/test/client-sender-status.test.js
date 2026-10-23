@@ -24,7 +24,7 @@ function makeState(reason, { chat = null, completed = true, pageLifetime = { ena
   }
 }
 
-async function renderClient(state, { pageResponses = [], pendingPageState = false } = {}) {
+async function renderClient(state, { pageResponses = [], pendingPageState = false, source = clientSource } = {}) {
   const instances = new Map()
   const pendingEffects = []
   const clientEffects = []
@@ -35,10 +35,14 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
   const warnings = []
   const errors = []
   const timers = new Map()
+  const intervals = new Map()
   let nextTimerId = 0
   let pageResponseIndex = 0
   let pageStateReads = 0
   let active = null
+  let currentState = state
+  let keyedComponents = []
+  let tree
   let extension
   let body
 
@@ -59,6 +63,7 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
     createElement(type, props, ...children) {
       if (typeof type === 'function') {
         const parentPath = active?.path ?? 'root'
+        keyedComponents.push({ type: type.name, key: props?.key ?? null, parentPath })
         return renderComponent(type, props ?? {}, `${parentPath}/${type.name}:${props?.key ?? ''}`)
       }
       return { type, props: props ?? {}, children: children.flat().filter(child => child !== false && child != null) }
@@ -107,7 +112,7 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
       if (url.startsWith('/api/wechat-bot.state')) {
         if (url === '/api/wechat-bot.state') pageStateReads++
         if (pendingPageState) return new Promise(() => {})
-        return { ok: true, json: async () => state }
+        return { ok: true, json: async () => currentState }
       }
       if (url === '/api/wechat-bot.log') return { ok: true, json: async () => ({ entries: [] }) }
       throw new Error(`unexpected request: ${url}`)
@@ -116,7 +121,7 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
       constructor(url) { this.url = url }
       close() {}
     },
-    document: { visibilityState: 'hidden' },
+    document: { visibilityState: 'visible' },
     AbortController,
     setTimeout: (callback, delay) => {
       const id = ++nextTimerId
@@ -124,11 +129,15 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
       return id
     },
     clearTimeout: id => timers.delete(id),
-    setInterval: () => 1,
-    clearInterval() {},
+    setInterval: (callback, delay) => {
+      const id = ++nextTimerId
+      intervals.set(id, { callback, delay })
+      return id
+    },
+    clearInterval: id => intervals.delete(id),
     console: { warn: (...args) => warnings.push(args), error: (...args) => errors.push(args) },
   }
-  vm.runInNewContext(clientSource, sandbox, { filename: 'client/index.js' })
+  vm.runInNewContext(source, sandbox, { filename: 'client/index.js' })
 
   extension.apply({
     effect: effect => {
@@ -150,16 +159,30 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
   await Promise.all(clientEffects)
   assert.equal(typeof body, 'function')
 
-  let tree
-  for (let i = 0; i < 5; i++) {
+  function render() {
+    keyedComponents = []
     tree = body({ sessionId: 'session-1', useTabInfo: () => ({ tab: { visible: true } }) })
+    return tree
+  }
+  for (let i = 0; i < 5; i++) {
+    render()
     const effects = pendingEffects.splice(0)
     if (!effects.length) break
     for (const run of effects) await run()
   }
+  const flush = async () => { for (let i = 0; i < 10; i++) await Promise.resolve() }
   return {
-    tree, requests, pageStateReads, pageRequests, pageStreams, warnings, errors,
+    get tree() { return tree }, requests, pageStateReads, pageRequests, pageStreams, warnings, errors,
+    get keyedComponents() { return keyedComponents },
     get pendingTimers() { return timers.size },
+    setState(next) { currentState = next },
+    async pollState() {
+      const interval = [...intervals.values()].find(entry => entry.delay === 2000)
+      assert.ok(interval, 'the console state poll is registered')
+      interval.callback()
+      await flush()
+      return render()
+    },
     runNextTimeout() {
       const entry = timers.entries().next().value
       if (!entry) return false
@@ -168,7 +191,7 @@ async function renderClient(state, { pageResponses = [], pendingPageState = fals
       timer.callback()
       return timer.delay
     },
-    flush: async () => { for (let i = 0; i < 10; i++) await Promise.resolve() },
+    flush,
     dispose: async () => { for (const dispose of clientDisposers.reverse()) await dispose() },
   }
 }
@@ -217,6 +240,26 @@ function findButton(node, label) {
   if (typeof node !== 'object') return null
   if (node.type === 'button' && textContent(node.children) === label) return node
   return findButton(node.children, label)
+}
+
+function findButtons(node, label, found = []) {
+  if (node == null || node === false) return found
+  if (Array.isArray(node)) {
+    for (const child of node) findButtons(child, label, found)
+    return found
+  }
+  if (typeof node !== 'object') return found
+  if (node.type === 'button' && textContent(node.children) === label) found.push(node)
+  findButtons(node.children, label, found)
+  return found
+}
+
+function assertConsoleChatKeys(client) {
+  const siblings = client.keyedComponents.filter(({ type }) => type === 'MemoryMaintenance' || type === 'ChatLog')
+  assert.equal(siblings.length, 2, 'both chat cards are mounted for the selected group')
+  assert.equal(new Set(siblings.map(({ parentPath }) => parentPath)).size, 1, 'the cards are siblings in Console')
+  const keys = siblings.map(({ key }) => key)
+  assert.equal(new Set(keys).size, keys.length, `Console has duplicate sibling keys: ${keys.join(', ')}`)
 }
 
 const selectedChat = { id: 'chat-target-△', name: '△', kind: 'group', status: 'idle', mode: 'infer', counters: null }
@@ -368,4 +411,76 @@ test('sender status does not replace the separate setup initialization screen', 
   assert.match(textContent(tree), /微信机器人还没有初始化/)
   assert.doesNotMatch(textContent(tree), /独立微信窗口准备失败/)
   assert.equal(findButton(tree, '重新准备'), null)
+})
+
+
+test('manual memory maintenance targets the displayed group and disables duplicate requests while running', async () => {
+  const state = makeState(null, { chat: selectedChat })
+  state.memoryMaintenance = { running: false, total: 0, completed: 0, results: [] }
+  const client = await renderClient(state)
+  const button = findButton(client.tree, '整理记忆')
+  assert.ok(button)
+  assert.equal(button.props.disabled, false)
+  await button.props.onClick()
+  assert.deepEqual(client.requests.at(-1), { action: 'compactMemory', chatId: selectedChat.id })
+  await client.dispose()
+  state.memoryMaintenance = { running: true, total: 3, completed: 1, currentWho: 'wxid_current', results: [] }
+  const running = await renderClient(state)
+  assert.equal(findButton(running.tree, '整理中…').props.disabled, true)
+  assert.match(textContent(running.tree), /1\/3 位用户 · wxid_current/)
+  await running.dispose()
+})
+
+test('memory maintenance displays per-user conflicts without hiding successful results', async () => {
+  const state = makeState(null, { chat: selectedChat })
+  state.memoryMaintenance = { running: false, total: 2, completed: 2, results: [
+    { who: 'wxid_a', status: 'completed', before: 30, after: 24 },
+    { who: 'wxid_b', status: 'failed', error: 'memory_conflict' },
+  ] }
+  const client = await renderClient(state)
+  assert.match(textContent(client.tree), /wxid_a：30 → 24 个主题/)
+  assert.match(textContent(client.tree), /wxid_b：memory_conflict/)
+  assert.equal(findButton(client.tree, '整理记忆').props.disabled, false)
+  await client.dispose()
+})
+
+test('the sibling-key audit detects the old duplicate key even when the VM renders function components immediately', async () => {
+  const legacySource = clientSource
+    .replace('key: `memory:${current.id}`', 'key: current.id')
+    .replace('key: `chat-log:${current.id}`', 'key: current.id')
+  const state = makeState(null, { chat: selectedChat })
+  const legacy = await renderClient(state, { source: legacySource })
+  assert.throws(() => assertConsoleChatKeys(legacy), /duplicate sibling keys/i)
+  await legacy.dispose()
+})
+
+test('memory maintenance remains a single card through ten state polls and a group switch', async () => {
+  const firstState = makeState(null, { chat: selectedChat })
+  firstState.memoryMaintenance = { running: false, total: 0, completed: 0, results: [] }
+  const client = await renderClient(firstState)
+
+  for (let poll = 1; poll <= 10; poll++) {
+    await client.pollState()
+    assertConsoleChatKeys(client)
+    assert.equal(findButtons(client.tree, '整理记忆').length, 1, `poll ${poll} should render one memory button`)
+  }
+
+  const secondChat = { ...selectedChat, id: 'chat-target-second', name: '第二个群' }
+  const secondState = makeState(null, { chat: secondChat })
+  secondState.memoryMaintenance = { running: false, total: 0, completed: 0, results: [] }
+  client.setState(secondState)
+  await client.pollState()
+  assertConsoleChatKeys(client)
+  assert.equal(findButtons(client.tree, '整理记忆').length, 1, 'switching groups should keep one memory button')
+  await client.dispose()
+})
+
+test('memory maintenance stays unavailable until the host reports its maintenance state', async () => {
+  const state = makeState(null, { chat: selectedChat })
+  const client = await renderClient(state)
+  const button = findButton(client.tree, '整理记忆')
+  assert.ok(button)
+  assert.equal(button.props.disabled, true)
+  assert.match(textContent(client.tree), /重启 DSH 后可使用整理记忆/)
+  await client.dispose()
 })

@@ -9,6 +9,7 @@ import { CommandRegistry } from './commands.js'
 import { formatEval, runEval } from './eval.js'
 import { createThink } from './model.js'
 import { ModelControl } from './models.js'
+import { MemoryMaintenance } from './memory-maintenance.js'
 import { ChatSession, liveChatSessionId } from './session.js'
 import { Simulator } from './simulator.js'
 import { Store } from './store.js'
@@ -33,6 +34,7 @@ export function dataDirOf(config) {
 // `/wechat` DSH command and the `wechat_bot` agent tool all call these.
 export class WeChatBotApp {
   sessions = new Map()
+  maintenanceSessions = new Map()
   #disposePromise = null
 
   static async create(ctx, config) {
@@ -70,6 +72,11 @@ export class WeChatBotApp {
     })
     const { adapter } = config
     this.persona = persona
+    this.memoryMaintenance = new MemoryMaintenance({
+      memoryFor: chatId => this.store.memoryFor(chatId),
+      think: args => this.#compactThink(args),
+      onEvent: event => this.#memoryEvent(event),
+    })
     this.bot = new Bot({
       dataDir: this.dataDir, store: this.store, persona, commands, models: this.models,
       settings: {
@@ -85,8 +92,8 @@ export class WeChatBotApp {
         aliases: config.aliases,
         stickers: config.stickers,
       },
-      think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) })),
-      learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm,
+      think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route(), mirror: chat => this.#mirror(chat) })),
+      learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'memory',
         route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 600 }) })),
       createAdapter: () => adapter.command
         ? spawnAdapter({ command: adapter.command, args: adapter.args, cwd: adapter.cwd || undefined, env: adapter.env })
@@ -95,20 +102,28 @@ export class WeChatBotApp {
     })
     this.bot.on('watch', chat => {
       this.#mirror(chat).catch(error => this.bot.note('error', `DSH 会话绑定失败：${error.message}`))
+      this.#observeMemory(chat)
     })
+    this.bot.on('memory-changed', chat => this.#observeMemory(chat))
     await this.bot.start()
-    if (this.bot.chat) await this.#mirror(this.bot.chat)
+    if (this.bot.chat) {
+      await this.#mirror(this.bot.chat)
+      this.#observeMemory(this.bot.chat)
+    }
   }
 
   dispose() {
     if (this.#disposePromise) return this.#disposePromise
     this.#disposePromise = (async () => {
       const failures = []
+      try { await this.memoryMaintenance?.dispose() }
+      catch (error) { failures.push(error) }
       try { await this.bot.dispose() }
       catch (error) { failures.push(error) }
-      const results = await Promise.allSettled([...this.sessions.values()].map(async pending => (await pending).dispose()))
+      const results = await Promise.allSettled([...this.sessions.values(), ...this.maintenanceSessions.values()].map(async pending => (await pending).dispose()))
       failures.push(...results.filter(result => result.status === 'rejected').map(result => result.reason))
       this.sessions.clear()
+      this.maintenanceSessions.clear()
       if (failures.length === 1) throw failures[0]
       if (failures.length > 1) throw new AggregateError(failures, '微信机器人和 DSH 会话关闭失败')
     })()
@@ -153,6 +168,56 @@ export class WeChatBotApp {
     return this.sessions.get(key)
   }
 
+  #observeMemory(chat) {
+    if (this.#disposePromise || !this.setup?.completedAt) return
+    this.memoryMaintenance.observe(chat).catch(error => this.bot.note('error', `记忆整理检查失败：${error.message}`))
+  }
+
+  #memoryEvent(event) {
+    // Maintenance never enters the WeChat send pipeline.
+    if (event.type === 'result') {
+      const result = event.result
+      this.bot.note(result.status === 'failed' ? 'error' : 'info',
+        result.status === 'failed' ? `记忆整理失败（${result.who}）：${result.error}`
+          : result.status === 'skipped' ? `记忆整理（${result.who}）：${result.reason === 'cancelled' ? '已取消' : '无需整理'}`
+            : `记忆整理（${result.who}）：${result.before} → ${result.after} 个主题`)
+    }
+  }
+
+  async #compactThink(args) {
+    if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
+    const route = { ...this.route(), reasoningEffort: 'max', maxTokens: Math.max(4096, this.config.model.maxTokens) }
+    const efforts = await this.models.efforts(route.provider, route.model)
+    if (!efforts.includes('max')) throw new Error(`${route.model} 不支持 max 记忆整理，请切换支持 max 的模型`)
+    args.signal.throwIfAborted()
+    const self = this.bot.account.self ?? this.setup.self
+    const key = `${self.id}\0${args.chat.id}`
+    let session = await this.maintenanceSessions.get(key)
+    if (session && (session.options.provider !== route.provider || session.options.model !== route.model)) {
+      await session.dispose()
+      this.maintenanceSessions.delete(key)
+      session = undefined
+    }
+    if (!session) {
+      const opening = ChatSession.openLive(this.ctx, {
+        id: liveChatSessionId(self.id, `memory\0${args.chat.id}`), cwd: this.setup.workspace,
+        title: `记忆整理 · ${args.chat.name} · max`, route,
+      }).catch(error => { this.maintenanceSessions.delete(key); throw error })
+      this.maintenanceSessions.set(key, opening)
+      session = await opening
+    }
+    args.signal.throwIfAborted()
+    return createThink({ llm: this.ctx.llm, role: 'memory', route: () => route, mirror: async () => session })({ ...args, effort: 'max' })
+  }
+
+  compactMemory(chatId) {
+    if (this.#disposePromise) throw new Error('微信机器人正在关闭')
+    if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
+    const chat = this.bot.chat
+    if (!chat || chat.id !== chatId) throw new Error('服务的群已改变，请刷新控制台后再整理')
+    return this.memoryMaintenance.start({ ...chat })
+  }
+
   // ── operations ──────────────────────────────────────────────────────────
 
   state() {
@@ -161,6 +226,7 @@ export class WeChatBotApp {
       ...view,
       setup: this.setup,
       model: this.route(),
+      memoryMaintenance: this.memoryMaintenance.view(view.chat?.id),
       chats: this.bot.chats,
       log: this.bot.log.slice(-100),
     }
@@ -187,7 +253,10 @@ export class WeChatBotApp {
       this.setup = { ...this.setup, sessionId, self: account.self, completedAt: Date.now(), openConsoleIn: sessionId }
       await this.store.updateBot({ setup: this.setup })
     }
-    if (this.bot.chat) await this.#mirror(this.bot.chat)
+    if (this.bot.chat) {
+      await this.#mirror(this.bot.chat)
+      this.#observeMemory(this.bot.chat)
+    }
     return { step: 'ready', account: account.self, chat: this.bot.chat }
   }
 
@@ -207,7 +276,10 @@ export class WeChatBotApp {
 
   async watch(chatId) {
     const chat = await this.bot.setChat(chatId)
-    if (chat) await this.#mirror(chat)
+    if (chat) {
+      await this.#mirror(chat)
+      this.#observeMemory(chat)
+    }
     return chat
   }
 
@@ -221,7 +293,7 @@ export class WeChatBotApp {
 
   // Runs the built-in decision suite against the real model, once per effort level.
   async evaluate(efforts = [this.config.model.reasoningEffort]) {
-    const think = createThink({ llm: this.ctx.llm, route: () => this.route() })
+    const think = createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route() })
     const settings = { ...this.bot.settings, typingDelay: false }
     return formatEval(await runEval({ think, persona: this.persona, settings, efforts }))
   }
