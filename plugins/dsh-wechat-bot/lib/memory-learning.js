@@ -1,3 +1,4 @@
+import { RateWindow, withDeadline } from './guard.js'
 import { isSensitiveMemoryContent } from './memory.js'
 
 const MAX_UPDATES = 5
@@ -224,4 +225,140 @@ export function parseMemoryDecision(raw) {
     }
   }
   return value.memory
+}
+
+// ── background learner ───────────────────────────────────────────────────
+
+const MAX_RECENT = 20
+const MAX_RECENT_CHARS = 9000
+const MAX_BATCH_CHARS = 6000
+
+/**
+ * Learns member notes from messages in the background, with its own model call
+ * budget, so it never delays or rate-limits a reply. Messages are collected like
+ * a batch (quiet / max wait), one learning call runs at a time, a failed call is
+ * retried once, and cancel() (on /forget, /reset, dispose) drops everything in
+ * flight so a stale answer can never write a note.
+ */
+export class MemoryLearner {
+  #pending = new Map()
+  #retried = new Set()
+  #firstAt = 0
+  #timer
+  #controller
+  #epoch = 0
+
+  /**
+   * @param {object} o
+   * @param {({system, messages, readable, effort, signal}) => Promise<string>} o.learn  the model call
+   * @param {object} o.settings     memoryQuietMs, memoryMaxWaitMs, memoryCallsPerMinute, memoryRateWindowMs, memoryTimeoutMs, maxMessages
+   * @param {(batch) => Promise<object>} o.context  chat, self, members, recent, memory for memoryInput()
+   * @param {(updates, evidence) => {applied, rejected}} o.apply  writes to the MemoryBook (which checks every update)
+   * @param {(id) => boolean} o.forgotten  messages whose author asked to be forgotten
+   * @param {(type, data) => void} o.write  chat log
+   * @param {(type, data) => void} o.notice rate-limited chat log
+   * @param {() => Promise<void>} o.saved  called after notes changed
+   */
+  constructor({ learn, settings, context, apply, forgotten, write, notice, saved }) {
+    Object.assign(this, { learn, settings, context, apply, forgotten, write, notice, saved })
+    this.rate = new RateWindow(settings.memoryCallsPerMinute, settings.memoryRateWindowMs)
+  }
+
+  get pending() {
+    return this.#pending.size
+  }
+
+  queue(messages) {
+    if (this.disposed) return
+    for (const m of messages) {
+      if (this.forgotten(m.id) || !hasMemoryCandidate([m])) continue
+      if (m.text.length > MAX_BATCH_CHARS) {
+        this.notice('memory_input_too_long', { id: m.id })
+        continue
+      }
+      if (!this.#pending.size) this.#firstAt = Date.now()
+      this.#pending.set(m.id, m)
+    }
+    const limit = Math.min(MAX_RECENT, this.settings.maxMessages)
+    while (this.#pending.size > limit) {
+      this.#pending.delete(this.#pending.keys().next().value)
+      this.notice('memory_overflow', { limit })
+    }
+    this.#schedule()
+  }
+
+  cancel() {
+    this.#epoch++
+    clearTimeout(this.#timer)
+    this.#pending.clear()
+    this.#retried.clear()
+    this.#controller?.abort(new Error('memory_cancelled'))
+  }
+
+  dispose() {
+    this.disposed = true
+    this.cancel()
+  }
+
+  #schedule() {
+    clearTimeout(this.#timer)
+    if (!this.#pending.size || this.#controller || this.disposed) return
+    const untilMax = Math.max(0, this.#firstAt + this.settings.memoryMaxWaitMs - Date.now())
+    const wait = Math.max(this.rate.wait(), Math.min(this.settings.memoryQuietMs, untilMax))
+    this.#timer = setTimeout(() => this.#flush(), wait)
+    this.#timer.unref?.()
+  }
+
+  #take() {
+    const batch = []
+    let chars = 0
+    for (const [id, m] of this.#pending) {
+      if (batch.length && chars + m.text.length > MAX_BATCH_CHARS) break
+      batch.push(m)
+      chars += m.text.length
+      this.#pending.delete(id)
+    }
+    return { batch, chars }
+  }
+
+  async #flush() {
+    if (this.disposed || this.#controller || !this.#pending.size) return
+    if (this.rate.wait()) return this.#schedule()
+    const controller = this.#controller = new AbortController()
+    const epoch = this.#epoch
+    const { batch, chars } = this.#take()
+    try {
+      const { chat, self, members, recent: context, memory } = await this.context(batch)
+      const recent = []
+      let total = chars
+      for (const m of [...context].reverse()) {
+        if (this.forgotten(m.id) || !hasMemoryCandidate([m]) || total + m.text.length > MAX_RECENT_CHARS) continue
+        recent.unshift(m)
+        total += m.text.length
+        if (recent.length === MAX_RECENT) break
+      }
+      const request = memoryInput({ chat, self, members, batch, recent, memory })
+      if (!request.evidence.length || epoch !== this.#epoch) return
+      this.rate.record()
+      const raw = await withDeadline(signal => this.learn({
+        chat, system: request.system, messages: [{ role: 'user', text: request.input }],
+        readable: `${chat.name}：后台记忆学习`, effort: 'off', signal,
+      }), this.settings.memoryTimeoutMs, controller.signal)
+      if (this.disposed || epoch !== this.#epoch) return
+      const { applied, rejected } = this.apply(parseMemoryDecision(raw), request.evidence.filter(m => !this.forgotten(m.id)))
+      this.write('memory_learning', { count: batch.length, applied, rejected })
+      if (applied.length) await this.saved()
+    } catch (error) {
+      if (this.disposed || epoch !== this.#epoch) return
+      this.write('memory_error', { code: error.code ?? error.name })
+      // One more try for messages that have not been retried yet.
+      const retry = batch.filter(m => !this.#retried.has(m.id))
+      for (const m of retry) this.#retried.add(m.id)
+      while (this.#retried.size > 1000) this.#retried.delete(this.#retried.values().next().value)
+      this.queue(retry)
+    } finally {
+      if (this.#controller === controller) this.#controller = undefined
+      this.#schedule()
+    }
+  }
 }

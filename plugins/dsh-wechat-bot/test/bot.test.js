@@ -42,7 +42,7 @@ test('addressing facts are attached to every message the model sees', async t =>
   await until(() => env.model.calls.length >= 2, { what: 'second call' })
   const input = env.model.calls[1].input
   assert.deepEqual(input.new.map(m => m.addressed), ['other', 'other', 'you', 'none'])
-  assert.deepEqual(input.new[1].quote, { from: '老鲍', senderId: 'wxid_bob', senderName: '老鲍', messageId: first.id, text: '我摔了' })
+  assert.deepEqual(input.new[1].quote, { from: '老鲍', senderId: 'wxid_bob', messageId: first.id, text: '我摔了' })
   assert.deepEqual(input.recent.map(m => m.text), ['我摔了'], 'already-processed messages move to recent')
 })
 

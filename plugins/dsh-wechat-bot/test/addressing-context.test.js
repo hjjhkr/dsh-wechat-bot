@@ -73,22 +73,14 @@ test('sourceTime admits queued follow-ups after the source but rejects earlier o
   })
 })
 
-test('legacy turns stay recipient-specific and an empty new map takes precedence', () => {
-  const legacyTurn = { time: 1_000, toSenderId: 'member-a' }
-  assert.deepEqual(addressOf(message('legacy-a', 'member-a', 1_500), context({ lastBotTurn: legacyTurn })), {
+test('a follow-up needs an answer to that very member; untargeted or missing answers give none', () => {
+  const answered = [{ time: 1_000, toSenderId: 'member-a' }]
+  assert.deepEqual(addressOf(message('a', 'member-a', 1_500), context({ lastBotTurns: answered })), {
     addressed: 'maybe', reasons: ['follows_your_reply'],
   })
-  assert.deepEqual(addressOf(message('legacy-b', 'member-b', 1_500), context({ lastBotTurn: legacyTurn })), {
-    addressed: 'none', reasons: [],
-  })
-  assert.deepEqual(addressOf(message('untargeted', 'member-a', 1_500), context({ lastBotTurn: { time: 1_000 } })), {
-    addressed: 'none', reasons: [],
-  })
-  assert.deepEqual(addressOf(message('empty-map', 'member-a', 1_500), context({
-    lastBotTurns: [], lastBotTurn: legacyTurn,
-  })), {
-    addressed: 'none', reasons: [],
-  })
+  for (const [id, sender, turns] of [['b', 'member-b', answered], ['untargeted', 'member-a', [{ time: 1_000 }]], ['none', 'member-a', []], ['no-state', 'member-a', undefined]]) {
+    assert.deepEqual(addressOf(message(id, sender, 1_500), context({ lastBotTurns: turns })), { addressed: 'none', reasons: [] }, id)
+  }
 })
 
 test('explicit human-to-human references after the bot turn block bare follow-ups', () => {

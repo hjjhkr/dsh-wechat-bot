@@ -57,10 +57,8 @@ async function runScenario(scenario, { think, persona, settings, effort }) {
   })
   runner.prime(history.map(parseMessage))
   const lastBot = history.findLast(m => m.fromSelf)
-  if (lastBot) {
-    runner.lastBotTurn = { time: lastBot.time, toSenderId: history.findLast(m => !m.fromSelf && m.time < lastBot.time)?.sender.id }
-    runner.lastBotTurns = runner.lastBotTurn.toSenderId ? [runner.lastBotTurn] : []
-  }
+  const answered = lastBot && history.findLast(m => !m.fromSelf && m.time < lastBot.time)
+  if (answered) runner.lastBotTurns = [{ time: lastBot.time, toSenderId: answered.sender.id }]
   const started = Date.now()
   try {
     const decision = await runner.decide(batch)

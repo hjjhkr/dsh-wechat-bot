@@ -89,12 +89,12 @@ test('a disposed runner rejects a learner that ignores cancellation', async t =>
   assert.deepEqual(r.memory.recall([A.id]), {})
 })
 
-test('recent memory evidence resolves only the displayed turn references and keeps author ownership', async t => {
+test('without a learner the reply model may cite a recent message by id, and authorship is still checked', async t => {
   const old = message(A, '我在维护编译器项目', { id: 'original-evidence', time: Date.now() - 1000 })
   const { r } = runner(t, {
     think: input => ({ to: input.new.order[0], reply: ['收到'], memory: [
-      { who: A.id, topic: '项目', note: '维护编译器项目', evidence: 'r1' },
-      { who: B.id, topic: '项目', note: '冒用别人的证据', evidence: 'r1' },
+      { who: A.id, topic: '项目', note: '维护编译器项目', evidence: input.recent.order[0] },
+      { who: B.id, topic: '项目', note: '冒用别人的证据', evidence: input.recent.order[0] },
     ] }),
   })
   r.prime([old])
@@ -165,7 +165,7 @@ test('a queued roster refresh keeps the last complete roster and does not report
   await sleep(5)
   r.receive(message(A, '@机器人 第二问', { mentions: [SELF.id] }))
   await until(() => sent.length === 2 && r.status === 'idle')
-  assert.ok(calls.at(-1).chat.members.some(member => member.id === B.id))
+  assert.ok(r.roster.members.some(member => member.id === B.id), 'the last complete list is kept')
   assert.ok(r.log.filter(e => e.type === 'latency').at(-1).modelMs < 70)
   assert.equal(r.log.some(e => e.type === 'members_unavailable'), false)
 })
@@ -180,9 +180,9 @@ test('a roster result arriving after the initial deadline is still cached for la
   await until(() => sent.length === 1 && r.status === 'idle')
   resolveMembers([SELF, A, B])
   await sleep(5)
-  r.receive(message(A, '@机器人 第二问', { mentions: [SELF.id] }))
+  r.receive(message(A, '@机器人 阿乙在吗', { mentions: [SELF.id] }))
   await until(() => sent.length === 2 && r.status === 'idle')
-  assert.ok(calls.at(-1).chat.members.some(member => member.id === B.id))
+  assert.deepEqual(calls.at(-1).chat.mentioned, [B], 'the late list is used: 阿乙 is known by name')
 })
 
 test('background learning stays bounded and uses its own call budget under a flood', async t => {
@@ -195,7 +195,7 @@ test('background learning stays bounded and uses its own call budget under a flo
   for (let i = 0; i < 20; i++) r.receive(message(B, `我还在处理工具链的第${i}个模块`))
   await sleep(40)
   assert.equal(learned.length, 1, 'memory calls have an independent bounded rate')
-  assert.ok(r.learningPending.size <= 3)
+  assert.ok(r.learner.pending <= 3)
   assert.equal(calls.length, 0, 'background traffic does not trigger a chat reply')
   await until(() => learned.length === 2)
 })

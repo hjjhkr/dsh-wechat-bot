@@ -6,7 +6,8 @@
 //   other  — addressed to someone else (@someone, quoting someone else)
 //   none   — general group chatter
 
-const FOLLOW_UP_MS = 3 * 60_000
+// How long after the bot answered someone their next message may be a follow-up.
+export const FOLLOW_UP_MS = 3 * 60_000
 const PUNCT = '\\s,，.。!！?？~～:：;；、…'
 
 const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -79,13 +80,12 @@ export function addressOf(message, context) {
   if (reasons.length) return { addressed: 'other', reasons }
 
   if (names.mentioned(message.text)) return { addressed: 'maybe', reasons: ['mentions_your_name'] }
-  const last = context.lastBotTurns === undefined
-    ? context.lastBotTurn
-    : (Array.isArray(context.lastBotTurns) ? context.lastBotTurns : [])
-      .filter(turn => turn?.toSenderId === message.sender.id && Number.isFinite(turn.time))
-      .reduce((latest, turn) => !latest || turn.time > latest.time ? turn : latest, null)
-  if (last && isFollowUpTime(message.time, last)
-      && last.toSenderId === message.sender.id) {
+  // The bot's latest answer to *this* member: answers to others do not make it a follow-up.
+  const last = (context.lastBotTurns ?? [])
+    .filter(turn => turn?.toSenderId === message.sender.id && Number.isFinite(turn.time))
+    .reduce((latest, turn) => !latest || turn.time > latest.time ? turn : latest, null)
+  if (last && isFollowUpTime(message.time, last)) {
+    // …unless they have turned to another member since (an @ or a quote of someone else).
     if (humanConversationAfterTurn(message, last, context)) {
       return { addressed: 'none', reasons: ['human_conversation_after_reply'] }
     }
