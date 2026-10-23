@@ -158,10 +158,11 @@ test('/memory shows only your own notes and /forget removes them', async t => {
   await until(() => logOf(env).filter(e => e.type === 'memory').length === 2)
   say(env, 'wxid_alice', '/memory')
   await until(() => sent(env).length === 1)
-  assert.equal(sent(env)[0], '关于你我记得：\n· 城市：住在杭州')
+  assert.match(sent(env)[0], /城市[\s\S]*住在杭州/)
+  assert.equal(sent(env)[0].includes('成都'), false)
   say(env, 'wxid_alice', '/forget 城市')
   await until(() => sent(env).length === 2)
-  assert.deepEqual(env.bot.runner.memory.recall(['wxid_alice', 'wxid_bob']), { wxid_bob: { 城市: '住在成都' } })
+  assert.deepEqual((await env.bot.store.memoryFor(GROUP).context(['wxid_alice', 'wxid_bob'])).notes, { wxid_bob: { 城市: '住在成都' } })
 })
 
 test('/tldr forwards to the model with a summary instruction and higher priority than mode', async t => {

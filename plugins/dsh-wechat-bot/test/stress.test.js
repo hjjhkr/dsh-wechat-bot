@@ -230,7 +230,12 @@ test('soak: steady traffic with memory writes keeps state and the state file bou
   await until(() => env.bot.runner.status === 'idle' && env.bot.runner.batcher.size === 0, { timeoutMs: 10_000 })
   await env.bot.store.flush()
   const { size } = await import('node:fs/promises').then(fs => fs.stat(env.bot.store.chatPath(GROUP)))
-  t.diagnostic(`${n} msgs, ${Object.keys(env.bot.runner.memory.members).length} members remembered, state file ${(size / 1024).toFixed(0)} KiB`)
+  const savedMemory = await env.bot.store.memoryFor(GROUP).context(MEMBERS.map(member => member.id))
+  const remembered = Object.keys(savedMemory.documents).length
+  assert.ok(remembered > 0, 'the soak must actually write long-term memory')
+  for (const notes of Object.values(savedMemory.notes)) assert.ok(Object.keys(notes).length <= 30)
+  for (const document of Object.values(savedMemory.documents)) assert.ok(Buffer.byteLength(document, 'utf8') <= 16 * 1024)
+  t.diagnostic(`${n} msgs, ${remembered} members remembered in Markdown, control state ${(size / 1024).toFixed(0)} KiB`)
   assertBounded(env)
   assert.ok(size < 1024 * 1024, 'state file stays under 1 MiB')
   escaped()

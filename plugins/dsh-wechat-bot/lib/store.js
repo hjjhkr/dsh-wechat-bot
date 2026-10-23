@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
+import { basename, dirname, join } from 'node:path'
+import { MarkdownMemory } from './markdown-memory.js'
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -39,6 +40,7 @@ export class Store {
   #timers = new Map()
   #pending = new Map()
   #chains = new Map()
+  #memories = new Map()
 
   constructor(dir, { delayMs = 1000, onError = () => {} } = {}) {
     this.dir = dir
@@ -64,8 +66,37 @@ export class Store {
     })
   }
 
-  loadChat(chatId) {
-    return readJson(this.chatPath(chatId), {})
+  memoryFor(chatId) {
+    return this.#memoryForKey(basename(this.chatPath(chatId), '.json'))
+  }
+
+  #memoryForKey(key) {
+    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key))
+    return this.#memories.get(key)
+  }
+
+  async loadChat(chatId) {
+    const state = await readJson(this.chatPath(chatId), {})
+    await migrateVerified(this.memoryFor(chatId), state.memory)
+    return state
+  }
+
+  // Raw conversations are temporary. Keep only controls and recovery identifiers.
+  async clearHistory() {
+    await this.flush()
+    let entries
+    try { entries = await readdir(join(this.dir, 'chats'), { withFileTypes: true }) }
+    catch (error) { if (error.code === 'ENOENT') return; throw error }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^[a-f0-9]{24}\.json$/.test(entry.name)) continue
+      const path = join(this.dir, 'chats', entry.name)
+      await this.#serialize(path, async () => {
+        const state = await readJson(path, {})
+        await migrateVerified(this.#memoryForKey(basename(entry.name, '.json')), state.memory)
+        await writeJson(path, durableState(state))
+      })
+    }
+    await Promise.all([...this.#memories.values()].map(memory => memory.flush()))
   }
 
   // Schedule a write; the latest value (or value factory) wins.
@@ -89,7 +120,7 @@ export class Store {
       if (!this.#pending.has(path)) return
       const value = this.#pending.get(path)
       this.#pending.delete(path)
-      await writeJson(path, typeof value === 'function' ? value() : value)
+      await writeJson(path, durableState(typeof value === 'function' ? value() : value))
     })
   }
 
@@ -97,5 +128,23 @@ export class Store {
     const run = (this.#chains.get(path) ?? Promise.resolve()).then(task)
     this.#chains.set(path, run.catch(() => {}))
     return run
+  }
+}
+
+function durableState(state) {
+  return Object.fromEntries(['mode', 'wait', 'mutedUntil', 'stats', 'cron', 'engagement', 'forgottenEvidence']
+    .filter(key => state[key] !== undefined).map(key => [key, state[key]]))
+}
+
+async function migrateVerified(memory, legacy) {
+  await memory.migrate(legacy)
+  const members = legacy?.members ?? {}
+  const saved = await memory.context(Object.keys(members))
+  for (const [id, member] of Object.entries(members)) {
+    for (const note of member.notes ?? []) {
+      if (saved.notes[id]?.[note.topic] !== note.text) {
+        throw new Error(`legacy_memory_conflict: ${id}; resolve MEMORY.md before clearing the old snapshot`)
+      }
+    }
   }
 }

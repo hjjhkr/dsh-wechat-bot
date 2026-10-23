@@ -11,15 +11,19 @@ import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import SessionTitle from '@deepseek-ai/dsh-session-title'
 import * as JsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { createThink } from '../lib/model.js'
-import { ChatSession, chatSessionId } from '../lib/session.js'
+import { ChatSession, chatSessionId, liveChatSessionId } from '../lib/session.js'
+import { WeChatBotApp } from '../lib/app.js'
+import { Store } from '../lib/store.js'
+import { until } from './helpers.js'
 
 const CHAT = { id: 'demo@chatroom', name: '测试群', kind: 'group' }
 const ROUTE = { provider: 'test-provider', model: 'test-model', maxTokens: 100, reasoningEffort: 'off' }
 
-async function fixture(t) {
+async function fixture(t, llm = fakeLlm(async function* () {})) {
   const root = await mkdtemp(join(tmpdir(), 'wechat-dsh-'))
   const rootCtx = new Context()
   const attached = []
+  const detached = []
   let ctx
   t.after(async () => {
     await rootCtx.fiber.dispose()
@@ -31,16 +35,24 @@ async function fixture(t) {
   await rootCtx.plugin(SessionTitle, { fallbackMaxWords: 24, fallbackMaxBytes: 256, maxTitleBytes: 256 }).await()
   await rootCtx.plugin(JsonlPersistence, { root, compression: 'none' }).await()
   await rootCtx.plugin(class extends Service {
+    constructor(ctx) { super(ctx, 'llm') }
+    stream(request) { return llm.stream(request) }
+  }).await()
+  await rootCtx.plugin(class extends Service {
     constructor(ctx) { super(ctx, 'workspaceRegistry') }
-    async create(path) { return { attachSession: async id => attached.push({ path, id }) } }
+    async create(path) { return {
+      attachSession: async id => attached.push({ path, id }),
+      detachSession: async id => detached.push({ path, id }),
+    } }
   }).await()
   await rootCtx.plugin({
     name: 'wechat-session-test',
-    inject: ['sessions', 'agents', 'sessionTitle', 'sessionPersistence', 'workspaceRegistry'],
+    inject: ['sessions', 'agents', 'sessionTitle', 'sessionPersistence', 'workspaceRegistry', 'llm'],
     apply(value) { ctx = value },
   }).await()
   const open = () => ChatSession.open(ctx, { id: chatSessionId('wxid_bot', CHAT.id), cwd: root, title: `微信 · ${CHAT.name}`, route: ROUTE })
-  return { ctx, root, attached, open }
+  const openLive = () => ChatSession.openLive(ctx, { id: liveChatSessionId('wxid_bot', CHAT.id), cwd: root, title: `微信 · ${CHAT.name}`, route: ROUTE })
+  return { ctx, root, attached, detached, open, openLive }
 }
 
 function fakeLlm(script) {
@@ -82,6 +94,88 @@ test('each model call becomes a visible, persisted turn in the chat session', as
   assert.equal(events.filter(e => e.type === 'assistant/message').length, 1)
   assert.equal(events.findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
   assert.throws(() => session.followup({}), /只展示微信机器人/)
+})
+
+test('app startup binds the saved WeChat group to a native session and mirrors reply calls', async t => {
+  const llm = fakeLlm(async function* () {
+    yield { type: 'text-delta', index: 0, text: '{"to":null,"reply":[]}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const { ctx, root, attached } = await fixture(t, llm)
+  const dataDir = join(root, 'wechat-bot')
+  await new Store(dataDir).updateBot({ chat: CHAT,
+    setup: { workspace: root, sessionId: 'setup-session', completedAt: 1, self: { id: 'wxid_bot', name: '小鲸鱼' } },
+  })
+  const config = { dataDir, adapter: { command: '' }, model: ROUTE, aliases: ['小鲸鱼'],
+    behavior: { staleMinutes: 10, memoryLearning: false },
+    guard: { maxTurnsPerMinute: 8, commandsPerMinute: 6, modelTimeoutSeconds: 30,
+      maxTextChars: 2000, breakerThreshold: 3, breakerBaseSeconds: 30, stuckMinutes: 5 },
+  }
+  const app = await WeChatBotApp.create(ctx, config)
+  try {
+    await until(() => app.bot.runner)
+    await until(() => attached.length > 0, { what: 'app startup binds its native WeChat session' })
+    const mirror = ctx.agents.get(attached.at(-1).id)
+    assert.ok(mirror, 'the application owns a native session before the first model call')
+    const output = await app.bot.think({ chat: CHAT, system: '人设',
+      messages: [{ role: 'user', text: '{"new":[]}' }], readable: '应用接线测试' })
+    assert.equal(output, '{"to":null,"reply":[]}')
+    assert.equal(mirror.session.snapshotEvents().filter(e => e.type === 'assistant/message').length, 1)
+    assert.equal(llm.requests.length, 1)
+  } finally {
+    await app.dispose()
+  }
+})
+
+test('a live mirror appears in DSH without a persisted log and is forgotten on dispose', async t => {
+  const llm = fakeLlm(async function* () {
+    yield { type: 'text-delta', index: 0, text: '{"reply":["收到"]}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const { ctx, root, attached, detached, openLive } = await fixture(t, llm)
+  const id = liveChatSessionId('wxid_bot', CHAT.id)
+  const first = await openLive()
+  assert.equal(first.id, id)
+  assert.equal(ctx.sessions.get(id), first.session)
+  assert.equal(ctx.agents.get(id), first)
+  assert.equal(await ctx.sessionPersistence.stat(id), undefined)
+
+  const think = createThink({ llm, route: () => ROUTE, mirror: async () => first })
+  const output = await think({ chat: CHAT, system: '人设',
+    messages: [{ role: 'user', text: '测试输入' }], readable: '测试群（1 条新消息）' })
+  assert.equal(output, '{"reply":["收到"]}')
+  assert.ok(ctx.sessions.list().some(session => session.id === id), 'the DSH live session registry lists the mirror')
+  assert.equal(first.session.snapshotEvents().filter(event => event.type === 'assistant/message').length, 1)
+  assert.equal(await ctx.sessionPersistence.stat(id), undefined, 'the model turn never creates a JSONL session log')
+
+  await first.dispose()
+  assert.equal(ctx.sessions.get(id), undefined)
+  assert.equal(ctx.agents.get(id), undefined)
+  assert.deepEqual(detached, [{ path: root, id }], 'workspace membership is removed with the live session')
+  assert.equal(await ctx.sessionPersistence.stat(id), undefined)
+
+  const second = await openLive()
+  t.after(() => second.dispose())
+  assert.equal(second.id, id)
+  assert.equal(second.turn, 0)
+  assert.equal(second.session.snapshotEvents().some(event => event.type === 'user/message' || event.type === 'assistant/message'), false,
+    'reopening the same id starts with no prior transcript')
+  assert.deepEqual(attached, [{ path: root, id }, { path: root, id }])
+  assert.equal(await ctx.sessionPersistence.stat(id), undefined)
+})
+
+test('a failed adapter shutdown still releases the native mirror and reports the failure', async t => {
+  const { ctx, root, detached, openLive } = await fixture(t)
+  const mirror = await openLive()
+  const app = new WeChatBotApp(ctx, { dataDir: join(root, 'wechat-bot') })
+  const failure = new Error('adapter shutdown failed')
+  app.bot = { dispose: async () => { throw failure } }
+  app.sessions.set('test-chat', Promise.resolve(mirror))
+  await assert.rejects(app.dispose(), error => error === failure)
+  assert.equal(Boolean(ctx.agents.get(mirror.id)), false, 'a shutdown failure must not leak the mirror agent')
+  assert.equal(Boolean(ctx.sessions.get(mirror.id)), false, 'a shutdown failure must not leak the live session')
+  assert.deepEqual(detached, [{ path: root, id: mirror.id }])
+  assert.equal(app.sessions.size, 0)
 })
 
 test('a deliberate /ask call raises the effort and the token budget', async t => {

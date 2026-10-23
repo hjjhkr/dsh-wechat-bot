@@ -188,8 +188,8 @@ export const builtinCommands = [
     name: 'status',
     aliases: ['状态'],
     summary: '运行状态',
-    run: ({ status }) => {
-      const s = status()
+    run: async ({ status }) => {
+      const s = await status()
       const muted = s.mutedUntil > Date.now() ? `，禁言中还剩 ${minutes(s.mutedUntil - Date.now())} 分钟` : ''
       const engaged = s.engagement ? `\n正在${STYLES[s.engagement.style]} ${s.engagement.target.name}（/un${s.engagement.style} 停止）` : ''
       return `模式 ${s.mode}${muted}${engaged}\n今天处理 ${s.today.batches} 批消息，发言 ${s.today.sent} 条\n上下文 ${s.context} 条，记住了 ${s.members} 位成员`
@@ -199,9 +199,9 @@ export const builtinCommands = [
     name: 'memory',
     aliases: ['记忆'],
     summary: '看看我记住了你什么',
-    run: ({ sender, memory }) => {
-      const notes = memory.recall(sender.id)
-      const lines = Object.entries(notes).map(([topic, note]) => `· ${topic}：${note}`)
+    run: async ({ sender, memory }) => {
+      const notes = await memory.recall(sender.id)
+      const lines = Object.entries(notes).filter(([, note]) => note).map(([topic, note]) => `· ${topic}：${note}`)
       return lines.length ? `关于你我记得：\n${lines.join('\n')}` : '还没记住你什么'
     },
   },
@@ -212,9 +212,9 @@ export const builtinCommands = [
     summary: '让我忘掉关于你的某件事或全部',
     // An answer still being thought out may carry memory about this person; it must not land after the forget.
     interrupts: true,
-    run: ({ sender, text, memory }) => {
+    run: async ({ sender, text, memory }) => {
       if (!text) return '要忘掉什么？/forget 主题，或者 /forget all'
-      const removed = memory.forget(sender.id, text === 'all' || text === '全部' ? undefined : text)
+      const removed = await memory.forget(sender.id, text === 'all' || text === '全部' ? undefined : text)
       return removed ? `已执行：忘掉 ${removed} 条` : `没有叫「${text}」的记忆，/memory 看看有哪些`
     },
   },

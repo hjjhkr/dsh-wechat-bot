@@ -103,6 +103,7 @@ export class Bot extends EventEmitter {
       this.#changed()
       throw failure
     }
+    await this.store.clearHistory()
   }
 
   view() {
@@ -323,6 +324,7 @@ export class Bot extends EventEmitter {
   #createRunner(chat, state) {
     const runner = new ChatRunner({
       chat, state, persona: this.persona, commands: this.commands, settings: this.settings, models: this.models,
+      memoryDocuments: this.store.memoryFor(chat.id),
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),

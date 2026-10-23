@@ -99,9 +99,9 @@ test('memory input bounds serialized metadata while preserving every current bat
   assert.ok(input.members.every(member => member.name.length <= 80))
   assert.ok(visibleAliases.length <= 5 * (input.members.length + 1 + input.batch.length))
   assert.ok(visibleAliases.every(alias => alias.length <= 80))
-  assert.ok(visibleNotes.length <= 24)
+  assert.ok(visibleNotes.length <= 60)
   assert.ok(visibleNotes.every(([topic, note]) => topic.length <= 30 && note.length <= 120))
-  assert.ok(visibleNotes.reduce((total, [topic, note]) => total + topic.length + note.length, 0) <= 3_600)
+  assert.ok(visibleNotes.reduce((total, [topic, note]) => total + topic.length + note.length, 0) <= 9_000)
 })
 
 test('memory input drops recent context before notes and never truncates current batch evidence', async () => {
@@ -188,6 +188,68 @@ test('existing MemoryBook remains the final identity and sensitive-content guard
   assert.equal(result.applied.length, 1)
   assert.deepEqual(result.rejected.map(item => item.problem), ['evidence_from_someone_else', 'sensitive'])
   assert.deepEqual(book.recall(['alice']), { alice: { 城市: '住在杭州' } })
+})
+
+test('learner retains expanded notes and parses an explicit same-user topic merge', async () => {
+  const { memoryInput, parseMemoryDecision } = await learnerApi()
+  const note = '喜欢三角洲行动，常聊监狱地图的物资收获。'.repeat(10)
+  const update = { who: 'alice', topic: '三角洲行动', note, evidence: 'new-map',
+    mergeTopics: ['游戏兴趣', '三角洲行动兴趣'] }
+  assert.deepEqual(parseMemoryDecision(JSON.stringify({ memory: [update] })), [update])
+  const input = JSON.parse(memoryInput({
+    batch: [message('new-map', 'alice', '我平时也玩监狱地图')],
+    memory: { alice: { 三角洲行动: note, 游戏兴趣: '喜欢三角洲行动' } },
+  }).input)
+  assert.equal(input.memory.alice.三角洲行动, note)
+  assert.equal(input.memory.alice.游戏兴趣, '喜欢三角洲行动')
+})
+
+test('learner rejects malformed merge operations instead of treating them as ordinary updates', async () => {
+  const { parseMemoryDecision } = await learnerApi()
+  const base = { who: 'alice', topic: '游戏', note: '喜欢三角洲行动', evidence: 'm-1' }
+  for (const invalid of [
+    { mergeTopics: [] }, { mergeTopics: '兴趣' }, { mergeTopics: ['兴趣', '兴趣'] },
+    { mergeTopics: ['游戏'] }, { mergeTopics: [' 兴趣'] }, { mergeTopics: [''] },
+    { mergeTopics: Array.from({ length: 31 }, (_, i) => `主题${i}`) },
+    { mergeTopics: ['兴趣'], note: null }, { mergeTopics: ['兴趣'], extra: true },
+    { note: '字'.repeat(481) },
+  ]) {
+    assert.throws(() => parseMemoryDecision(JSON.stringify({ memory: [{ ...base, ...invalid }] })),
+      error => error.code === 'memory_update_invalid')
+  }
+})
+
+test('trimmed memory is explicitly read-only and cannot be overwritten by a learner proposal', async () => {
+  const { memoryInput, MemoryLearner } = await learnerApi()
+  const oldNotes = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`主题${i}`, '稳定背景'.repeat(100)]))
+  const batch = [message('new-fact', 'alice', '我也喜欢三角洲行动')]
+  const context = { chat: { name: '测试群', kind: 'group' }, batch, recent: [], memory: { alice: oldNotes } }
+  const request = memoryInput(context)
+  assert.deepEqual(JSON.parse(request.input).memoryReadOnlyIds, ['alice'])
+  assert.deepEqual(request.readOnlyIds, ['alice'])
+  const book = new MemoryBook({ members: { alice: { name: 'alice', notes: [
+    { topic: '游戏', text: '喜欢三角洲行动' },
+  ] } } })
+  const done = Promise.withResolvers()
+  const learner = new MemoryLearner({
+    learn: async () => JSON.stringify({ memory: [{ who: 'alice', topic: '新游戏兴趣', note: '喜欢三角洲行动', evidence: 'new-fact' }] }),
+    settings: { memoryCallsPerMinute: 2, memoryRateWindowMs: 1000, memoryQuietMs: 1, memoryMaxWaitMs: 5, memoryTimeoutMs: 1000, maxMessages: 20 },
+    context: async () => context,
+    apply: (updates, evidence) => book.apply(updates, evidence),
+    forgotten: () => false, notice() {}, saved: async () => {},
+    write: (type, data) => { if (type === 'memory_learning') done.resolve(data) },
+  })
+  const timeout = setTimeout(() => done.reject(new Error('learner did not finish')), 2000)
+  try {
+    learner.queue(batch)
+    const result = await done.promise
+    assert.equal(result.applied.length, 0)
+    assert.equal(result.rejected[0].problem, 'memory_context_incomplete')
+    assert.deepEqual(book.recall(['alice']), { alice: { 游戏: '喜欢三角洲行动' } })
+  } finally {
+    clearTimeout(timeout)
+    learner.dispose()
+  }
 })
 
 test('a model cannot delete a speakers existing note based only on a third-party claim', () => {

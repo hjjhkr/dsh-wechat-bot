@@ -93,7 +93,7 @@ function describeSetup(result) {
     return `第一步：登录微信小号。\n${result.instructions}\n登录好以后回到这里，再输入 /wechat（或告诉我"好了"）完成初始化。`
   }
   const watching = result.chat ? `正在服务的群：${result.chat.name}` : '下一步在右侧栏「微信机器人」控制台里选择要服务的群。'
-  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n这个工作区里会生成「微信 · 群名」会话，可以随时打开看模型在想什么。`
+  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n工作区「微信 · 群名」会话显示本次运行的模型过程；长期记忆按用户 ID 保存为 MEMORY.md。`
 }
 
 const EFFORTS = ['off', 'low', 'high', 'max']

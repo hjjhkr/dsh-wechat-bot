@@ -9,7 +9,7 @@ import { CommandRegistry } from './commands.js'
 import { formatEval, runEval } from './eval.js'
 import { createThink } from './model.js'
 import { ModelControl } from './models.js'
-import { ChatSession, chatSessionId } from './session.js'
+import { ChatSession, liveChatSessionId } from './session.js'
 import { Simulator } from './simulator.js'
 import { Store } from './store.js'
 
@@ -37,8 +37,17 @@ export class WeChatBotApp {
 
   static async create(ctx, config) {
     const app = new WeChatBotApp(ctx, config)
-    await app.#start()
-    return app
+    try {
+      await app.#start()
+      return app
+    } catch (error) {
+      // Startup may already own an adapter when the native session fails.
+      if (app.bot) {
+        try { await app.dispose() }
+        catch (cleanupError) { throw new AggregateError([error, cleanupError], '微信机器人启动和清理失败') }
+      }
+      throw error
+    }
   }
 
   constructor(ctx, config) {
@@ -54,7 +63,6 @@ export class WeChatBotApp {
     const commands = new CommandRegistry()
     if (config.commandsDir) await commands.load(config.commandsDir)
     const saved = await this.store.loadBot()
-    this.mirrorSessionIds = saved.mirrorSessionIds ?? {}
     this.setup = saved.setup ?? null
     this.models = new ModelControl({
       llm: this.ctx.llm, base: () => this.#configuredRoute(), override: saved.modelOverride,
@@ -85,17 +93,24 @@ export class WeChatBotApp {
         // Like a real client, the simulated account stays logged in once set up.
         : inProcessSimulator({ loggedIn: Boolean(this.setup?.completedAt) }),
     })
-    // Open each chat's DSH session before the UI can, so the plugin always owns it.
-    this.bot.on('watch', chat => this.#mirror(chat))
+    this.bot.on('watch', chat => {
+      this.#mirror(chat).catch(error => this.bot.note('error', `DSH 会话绑定失败：${error.message}`))
+    })
     await this.bot.start()
-    if (this.bot.chat) this.#mirror(this.bot.chat)
+    if (this.bot.chat) await this.#mirror(this.bot.chat)
   }
 
   dispose() {
     if (this.#disposePromise) return this.#disposePromise
     this.#disposePromise = (async () => {
-      await this.bot.dispose()
-      await Promise.allSettled([...this.sessions.values()].map(s => s.then(session => session?.dispose())))
+      const failures = []
+      try { await this.bot.dispose() }
+      catch (error) { failures.push(error) }
+      const results = await Promise.allSettled([...this.sessions.values()].map(async pending => (await pending).dispose()))
+      failures.push(...results.filter(result => result.status === 'rejected').map(result => result.reason))
+      this.sessions.clear()
+      if (failures.length === 1) throw failures[0]
+      if (failures.length > 1) throw new AggregateError(failures, '微信机器人和 DSH 会话关闭失败')
     })()
     return this.#disposePromise
   }
@@ -121,28 +136,17 @@ export class WeChatBotApp {
     return { provider, model, reasoningEffort, maxTokens: this.config.model.maxTokens }
   }
 
-  // The DSH session mirroring `chat`, in the workspace where setup ran.
-  #mirror(chat) {
-    const self = this.setup?.self ?? this.bot.account.self
-    if (!this.setup?.completedAt || !self) return undefined
+  async #mirror(chat) {
+    if (!this.setup?.completedAt) return undefined
+    const self = this.bot.account.self ?? this.setup.self
     const key = `${self.id}\0${chat.id}`
     if (!this.sessions.has(key)) {
-      const opening = (async () => {
-        const previousId = this.mirrorSessionIds[key] ?? chatSessionId(self.id, chat.id)
-        const session = await ChatSession.openAvailable(this.ctx, {
-          id: previousId, cwd: this.setup.workspace, title: `微信 · ${chat.name}`, route: this.route(),
-        })
-        if (this.mirrorSessionIds[key] !== session.id) {
-          this.mirrorSessionIds[key] = session.id
-          try { await this.store.updateBot({ mirrorSessionIds: { ...this.mirrorSessionIds } }) }
-          catch (error) { await session.dispose(); throw error }
-          if (previousId !== session.id) this.bot.note('info', `旧会话被占用，已新建「微信 · ${chat.name} · 续接」`)
-        }
-        return session
-      })().catch(error => {
+      const opening = ChatSession.openLive(this.ctx, {
+        id: liveChatSessionId(self.id, chat.id), cwd: this.setup.workspace,
+        title: `微信 · ${chat.name}`, route: this.route(),
+      }).catch(error => {
         this.sessions.delete(key)
-        this.bot.note('warn', `无法创建 DSH 会话「${chat.name}」：${error.message}`)
-        return undefined
+        throw error
       })
       this.sessions.set(key, opening)
     }
@@ -183,6 +187,7 @@ export class WeChatBotApp {
       this.setup = { ...this.setup, sessionId, self: account.self, completedAt: Date.now(), openConsoleIn: sessionId }
       await this.store.updateBot({ setup: this.setup })
     }
+    if (this.bot.chat) await this.#mirror(this.bot.chat)
     return { step: 'ready', account: account.self, chat: this.bot.chat }
   }
 
@@ -200,8 +205,10 @@ export class WeChatBotApp {
     return this.bot.listChats(query)
   }
 
-  watch(chatId) {
-    return this.bot.setChat(chatId)
+  async watch(chatId) {
+    const chat = await this.bot.setChat(chatId)
+    if (chat) await this.#mirror(chat)
+    return chat
   }
 
   setMode(mode) {

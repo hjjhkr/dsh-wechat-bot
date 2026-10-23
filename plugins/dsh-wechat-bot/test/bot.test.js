@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Bot } from '../lib/bot.js'
@@ -366,7 +366,7 @@ test('a message typed on the bot account\'s phone is context, not a trigger', as
   assert.deepEqual(env.model.calls[0].input.recent, [{ from_you: true, time: env.model.calls[0].input.recent[0].time, text: '我是本人，在手机上发的' }])
 })
 
-test('memory is learned from conversation and survives a restart', async t => {
+test('Markdown memory survives exit while raw chat history is cleared', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-restart-'))
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5 }))
   const first = await watching(t, {
@@ -382,8 +382,39 @@ test('memory is learned from conversation and survives a restart', async t => {
   second.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '早' })
   await until(() => second.model.calls.length === 1)
   const input = second.model.calls[0].input
-  assert.deepEqual(input.memory, { wxid_alice: { 宠物: '养了一只叫豆豆的猫' } })
-  assert.ok(input.recent.some(m => m.text.includes('豆豆')), 'transcript restored too')
+  assert.match(second.model.calls[0].raw.new.members[0].memoryDocument, /养了一只叫豆豆的猫/)
+  assert.equal(input.recent.some(m => m.text.includes('豆豆')), false, 'raw transcript is not restored')
+  const saved = await second.bot.store.loadChat(GROUP)
+  assert.equal(saved.transcript, undefined)
+  assert.equal(saved.log, undefined)
+  assert.equal(saved.memory, undefined)
+  const path = second.bot.store.memoryFor(GROUP).memoryPath('wxid_alice')
+  const document = await readFile(path, 'utf8')
+  await writeFile(path, document.replace('养了一只叫豆豆的猫', '喜欢直说重点，回答先给结论'))
+  second.simulator.inject({ chatId: GROUP, from: 'wxid_bob', text: '讲讲今天的安排' })
+  await until(() => second.model.calls.length === 2)
+  assert.equal(second.model.calls[1].raw.new.members[0].memoryDocument, undefined)
+  assert.equal(JSON.stringify(second.model.calls[1].raw).includes('喜欢直说重点'), false)
+  second.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '帮我安排一下今天' })
+  await until(() => second.model.calls.length === 3)
+  assert.match(second.model.calls[2].raw.new.members[0].memoryDocument, /喜欢直说重点，回答先给结论/)
+})
+
+test('background learning writes Markdown and the next reply consumes the same users document', async t => {
+  const env = await watching(t, {
+    settings: { mode: 'infer', memoryQuietMs: 10, memoryMaxWaitMs: 30 },
+    reply: input => ({ to: input.new[0].id, reply: ['收到'] }),
+    learn: async args => {
+      const source = JSON.parse(args.messages[0].text).batch[0]
+      return JSON.stringify({ memory: [{ who: source.sender.id, topic: '回答偏好', note: '先给结论，再解释原因', evidence: source.id }] })
+    },
+  })
+  say(env, 'wxid_alice', '以后给我讲问题时，我更喜欢先给结论再解释原因')
+  await until(() => logTypes(env).includes('memory_learning'))
+  assert.equal(env.model.calls.length, 0, 'background learning does not require a reply')
+  say(env, 'wxid_alice', '小鲸鱼，帮我比较一下两种方案')
+  await until(() => env.model.calls.length === 1)
+  assert.match(env.model.calls[0].raw.new.members[0].memoryDocument, /先给结论，再解释原因/)
 })
 
 test('stopping the bot\'s group stops processing it', async t => {
