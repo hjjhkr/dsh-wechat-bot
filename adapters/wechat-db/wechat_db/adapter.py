@@ -59,6 +59,7 @@ class Adapter:
         self.poll_s = poll_ms / 1000
         self.outbox_path = outbox_path
         self.sender = sender
+        self.desktop_control = getattr(sender, 'desktop_control', None)
         self.delivery: Delivery | None = None
         self.chat_names = chat_names or {}
         self.data_dir = Path(".")
@@ -83,6 +84,9 @@ class Adapter:
         for name in ("initialize", "account/status", "account/login", "chats/list", "chats/members",
                      "chats/history", "watch/set", "message/send", "shutdown"):
             server.method(name)(getattr(self, "on_" + name.replace("/", "_")))
+        if self.desktop_control is not None:
+            server.method('window/get')(self.on_window_get)
+            server.method('window/set')(self.on_window_set)
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -101,12 +105,15 @@ class Adapter:
             self._publish_status()
             self.status_thread = threading.Thread(target=self._monitor_status, daemon=True)
             self.status_thread.start()
-        return {
+        result = {
             "protocolVersion": PROTOCOL_VERSION,
             "adapter": {"name": "wechat-db", "version": "0.1.0"},
             "capabilities": {"receive": ["text", "image", "sticker", "voice", "video", "link", "system", "other"],
                              "send": ["text"] if self.sender is not None else ["text", "image", "sticker"], "history": True},
         }
+        if self.desktop_control is not None:
+            result['capabilities']['window'] = True
+        return result
 
     def on_shutdown(self, _params):
         self.server.closing.set()
@@ -129,6 +136,17 @@ class Adapter:
             status["reason"] = "db_read_failed"
         elif not can_send:
             status["reason"] = "sender_unavailable"
+            preparation = getattr(self.sender, "preparation_status", None)
+            if isinstance(preparation, dict):
+                if preparation["recoveryRequired"] is True:
+                    status["reason"] = "sender_recovery_required"
+                    status["detail"] = preparation["error"] or "窗口控制资源恢复尚未确认，发送已暂停。"
+                elif preparation["state"] == "preparing":
+                    status["reason"] = "sender_preparing"
+                    status["detail"] = "正在打开并绑定微信独立窗口，完成后即可发送。"
+                elif preparation["state"] == "failed":
+                    status["reason"] = "sender_prepare_failed"
+                    status["detail"] = preparation["error"] or "独立窗口准备失败，可重新准备。"
         with self.status_lock:
             if status != self.last_status:
                 self.server.notify("event/status", status)
@@ -180,10 +198,29 @@ class Adapter:
         return self._account()
 
     def on_account_login(self, _params):
+        if self.desktop_control is not None:
+            self.on_window_set({'visible': True})
+            return {'state': 'login_required', 'instructions': '已显示小号微信。请在小号桌面扫码或确认登录，再点“返回主桌面”，然后重新选择服务会话。'}
         if not self._try_open() and not (self.opener and self.opener.is_alive()):
             self.opener = threading.Thread(target=self._keep_opening, daemon=True)
             self.opener.start()
         return self._account()
+
+    def on_window_get(self, _params):
+        from .desktop_control import DesktopControlError
+        try:
+            return self.desktop_control.state()
+        except DesktopControlError as error:
+            raise ProtocolError('unavailable', str(error)) from error
+
+    def on_window_set(self, params):
+        from .desktop_control import DesktopControlError
+        if type(params.get('visible')) is not bool:
+            raise ProtocolError('invalid_params', 'visible must be a boolean')
+        try:
+            return self.desktop_control.set_visible(params['visible'])
+        except DesktopControlError as error:
+            raise ProtocolError('unavailable', str(error)) from error
 
     def _keep_opening(self):
         while not self.server.closing.is_set():

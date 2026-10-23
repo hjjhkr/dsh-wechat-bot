@@ -34,6 +34,44 @@ _DETACHED_PREPARE_FAILED = "独立微信窗口准备失败；接收保持开启�
 _DETACHED_GATE_UNCONFIRMED = "独立微信窗口 gate 恢复状态未确认；真实发送已禁用。"
 _DETACHED_CLEANUP_FAILED = "独立微信窗口控制资源清理未确认；真实发送已禁用。"
 _DESKTOP_RE = re.compile(r"DshWeChatBot_[A-Za-z0-9_-]{1,64}\Z")
+_PREPARATION_REASON_CODES = frozenset({
+    "prepare_cancelled",
+    "prepare_failed",
+    "target_not_found",
+    "target_ambiguous",
+    "header_mismatch",
+    "draft_not_empty",
+    "desktop_unavailable",
+    "monitor_unavailable",
+    "gate_preflight",
+    "gate_restore",
+    "cleanup_unconfirmed",
+})
+
+
+class PreparationError(RuntimeError):
+    """Sanitized preparation failure with explicit gate and worker-close state."""
+
+    def __init__(self, reason_code, gate_state=None, cleanup_confirmed=False):
+        self.reason_code = (reason_code if isinstance(reason_code, str)
+                            and reason_code in _PREPARATION_REASON_CODES else "prepare_failed")
+        state = gate_state if isinstance(gate_state, dict) else {}
+        gate_active = state.get("gateActive")
+        self.gate_state = {
+            "gateActive": gate_active if type(gate_active) is bool or gate_active is None else None,
+            "gateRestored": state.get("gateRestored") if type(state.get("gateRestored")) is bool else False,
+        }
+        self.cleanup_confirmed = (cleanup_confirmed is True
+                                  and self.gate_state == {"gateActive": False, "gateRestored": True})
+        super().__init__(self.status_message)
+
+    @property
+    def status_message(self):
+        return f"{_DETACHED_PREPARE_FAILED}原因码：{self.reason_code}。"
+
+    def confirm_restored_cleanup(self):
+        self.gate_state = {"gateActive": False, "gateRestored": True}
+        self.cleanup_confirmed = True
 
 # These worker-side errors are raised before runtime.send() is called.  They
 # only become retryable after a successful normal close confirms gate recovery.
@@ -233,7 +271,20 @@ class _JsonlChild:
             error = decoded.get("error")
             if not isinstance(error, dict) or not isinstance(error.get("code"), str):
                 raise ConnectionError("worker error frame is invalid")
-            return {"error": {"code": error["code"]}}
+            safe_error = {"code": error["code"]}
+            if method == "prepareWindow":
+                reason = error.get("reasonCode")
+                safe_error["reasonCode"] = (
+                    reason if isinstance(reason, str) and reason in _PREPARATION_REASON_CODES
+                    else "prepare_failed"
+                )
+                gate_active = error.get("gateActive")
+                safe_error["gateActive"] = (
+                    gate_active if type(gate_active) is bool or gate_active is None else None
+                )
+                gate_restored = error.get("gateRestored")
+                safe_error["gateRestored"] = gate_restored if type(gate_restored) is bool else False
+            return {"error": safe_error}
         result = decoded.get("result")
         if not isinstance(result, dict):
             raise ConnectionError("worker result frame is invalid")
@@ -309,6 +360,7 @@ class LegacySender:
         self._prepare_cancel: threading.Event | None = None
         self._prepare_thread: threading.Thread | None = None
         self._state_callback = None
+        self.desktop_control = None
 
     @classmethod
     def from_file(cls, path: str | os.PathLike, self_id: str) -> "LegacySender":
@@ -360,9 +412,16 @@ class LegacySender:
                 preparer = preparer_factory(worker_snapshot)
             except Exception:
                 raise ValueError("detached-window preparation backend is unavailable") from None
-        return cls(command, args, worker_snapshot, self_id,
-                   detached_window=detached_window, preparer=preparer,
-                   preparer_factory=preparer_factory)
+        sender = cls(command, args, worker_snapshot, self_id,
+                     detached_window=detached_window, preparer=preparer,
+                     preparer_factory=preparer_factory)
+        desktop_control = raw.get('desktopControl', False)
+        if type(desktop_control) is not bool or (desktop_control and not detached_window):
+            raise ValueError('desktopControl requires detachedWindow mode and a boolean value')
+        if desktop_control:
+            from .desktop_control import DesktopController
+            sender.desktop_control = DesktopController(path, python_command=command)
+        return sender
 
     @property
     def target_id(self) -> str:
@@ -377,6 +436,16 @@ class LegacySender:
     def preparation_error(self) -> str | None:
         with self._lock:
             return self._prepare_error
+
+    @property
+    def preparation_status(self) -> dict:
+        """Return a detached, read-only-by-convention preparation snapshot."""
+        with self._lock:
+            return {
+                "state": self._prepare_state if self._detached_window else "unbound",
+                "recoveryRequired": self._disabled or self._prepare_cleanup_failed,
+                "error": self._prepare_error,
+            }
 
     def set_state_callback(self, callback) -> None:
         """Install an adapter-owned callback for async preparation transitions."""
@@ -445,7 +514,7 @@ class LegacySender:
             self._notify_state(None, None)
 
     def prepare_target(self, chat_id: str) -> None:
-        """Prepare the configured detached target asynchronously, at most once per watch."""
+        """Prepare asynchronously; an explicit same-target watch may retry a safe failure."""
         if not self._detached_window:
             return
         if chat_id != self._target_id:
@@ -455,9 +524,17 @@ class LegacySender:
                 raise ProtocolError("unavailable", "target switch is in progress")
             if self._closed or self._closing or self._disabled or self._prepare_cleanup_failed:
                 return
-            # Repeated watch/set must not replay native UI side effects. A failed
-            # attempt needs an explicit watch[] before the user may try again.
-            if self._prepare_state != "unbound":
+            if self._prepare_state == "failed":
+                previous_thread = self._prepare_thread
+                if (self._prepare_cleanup_pending
+                        or (previous_thread is not None and previous_thread.is_alive())):
+                    return
+                # This call is the explicit same-target watch/set retry signal.
+                # A failed attempt becomes retryable only after its worker thread
+                # has exited and the cleanup path did not mark recovery unknown.
+                self._prepare_state = "unbound"
+                self._prepare_error = None
+            elif self._prepare_state != "unbound":
                 return
             self._prepare_generation += 1
             generation = self._prepare_generation
@@ -505,6 +582,7 @@ class LegacySender:
         prepare_started = False
         unsafe_gate = False
         error_message = None
+        preparation_failure = None
         try:
             if previous_thread is not None and previous_thread is not threading.current_thread():
                 previous_thread.join()
@@ -549,6 +627,7 @@ class LegacySender:
                 prepared_worker_config = json.loads(json.dumps(worker_snapshot, ensure_ascii=True))
                 prepared_worker_config["mainWindowClass"] = binding["mainWindowClass"]
                 prepared_worker_config["mainWindowTitle"] = binding["mainWindowTitle"]
+                prepared_worker_config["preparedBinding"] = json.loads(json.dumps(binding))
                 prepared_worker_args = [
                     str(Path(__file__).with_name("native_window_worker.py")),
                     "--legacy-root",
@@ -569,8 +648,20 @@ class LegacySender:
         except Exception as error:
             if not cancel_event.is_set():
                 failed = True
-                error_message = _DETACHED_PREPARE_FAILED
-                _LOG.warning("detached_window_prepare_failed type=%s", type(error).__name__)
+                if isinstance(error, PreparationError):
+                    preparation_failure = error
+                    gate_confirmed = (
+                        error.cleanup_confirmed
+                        and error.gate_state == {"gateActive": False, "gateRestored": True}
+                    )
+                    error_message = error.status_message
+                    _LOG.warning(
+                        "detached_window_prepare_failed reason=%s gate_confirmed=%s cleanup_confirmed=%s",
+                        error.reason_code, gate_confirmed, error.cleanup_confirmed,
+                    )
+                else:
+                    error_message = _DETACHED_PREPARE_FAILED
+                    _LOG.warning("detached_window_prepare_failed type=%s", type(error).__name__)
                 with self._lock:
                     if prepare_started and not gate_confirmed:
                         unsafe_gate = True
@@ -583,6 +674,15 @@ class LegacySender:
         finally:
             if preparer is not None and not accepted:
                 close_ok = self._close_preparer(preparer)
+                if isinstance(preparation_failure, PreparationError) and close_ok:
+                    preparation_failure.confirm_restored_cleanup()
+                    gate_confirmed = True
+                    unsafe_gate = False
+                    error_message = preparation_failure.status_message
+                    with self._lock:
+                        if (not self._closed and generation == self._prepare_generation
+                                and self._prepare_state == "failed"):
+                            self._prepare_error = error_message
                 if not close_ok:
                     failed = True
                     error_message = _DETACHED_CLEANUP_FAILED

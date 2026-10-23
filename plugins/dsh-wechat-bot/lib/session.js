@@ -1,7 +1,8 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { agentEvents } from '@deepseek-ai/dsh-agent'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import { SessionId, SessionLogOffset, interruptedTurnClosers } from '@deepseek-ai/dsh-session'
+import { SessionAlreadyOwnedError } from '@deepseek-ai/dsh-session-persistence'
 import { AssistantStreamAccumulator, BlockAssembler, LlmAttemptId, createUserMessage } from '@deepseek-ai/dsh-llm'
 
 const READ_ONLY = '这个会话只展示微信机器人的模型工作过程。要和群聊互动，请在微信里发消息，或在控制台/用 / 命令操作。'
@@ -65,6 +66,18 @@ export class ChatSession {
       if (activity) await activity.dispose().catch(() => {})
       else await handle?.close().catch(() => {})
       throw error
+    }
+  }
+
+  // Another active agent may own a session restored by the shell before the
+  // plugin reconnects. Never steal its write handle or silently lose the mirror.
+  static async openAvailable(ctx, options) {
+    try {
+      return await ChatSession.open(ctx, options)
+    } catch (error) {
+      if (!(error instanceof SessionAlreadyOwnedError)) throw error
+      return ChatSession.open(ctx, { ...options,
+        id: SessionId(`wechat-${randomUUID().replaceAll('-', '')}`), title: `${options.title} · 续接` })
     }
   }
 

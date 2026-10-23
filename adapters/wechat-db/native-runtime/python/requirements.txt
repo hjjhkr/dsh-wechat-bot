@@ -1,0 +1,6 @@
+wx4py==0.2.1
+psutil==7.2.2
+cryptography==50.0.2
+pywin32==312
+comtypes==1.4.17
+zstandard==0.25.0

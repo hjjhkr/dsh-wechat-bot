@@ -1081,6 +1081,81 @@ def test_jsonl_preparation_error_does_not_expose_local_exception_text(tmp_path):
     )
 
     assert response == {
-        "error": {"code": "prepare_failed", "message": "native window preparation failed"}
+        "error": {"code": "prepare_failed", "message": "native window preparation failed",
+                  "reasonCode": "prepare_failed", "gateActive": None, "gateRestored": False}
     }
     assert "private runtime detail" not in str(response)
+
+
+@pytest.mark.parametrize("restored", [True, False])
+def test_preparation_error_frame_preserves_gate_state_through_wrapped_causes(tmp_path, restored):
+    config = {**_config(), "stateRoot": str(tmp_path / "state")}
+
+    class FakeRuntime:
+        def prepare_window(self, *_args):
+            try:
+                error = RuntimeError("private gate detail")
+                error.state = {"gateActive": False if restored else None, "gateRestored": restored}
+                error.reason_code = "target_not_found" if restored else "gate_restore"
+                raise error
+            except RuntimeError as exc:
+                raise NativeWindowError("native window preparation failed") from exc
+
+    response = _response_for_request(
+        SimpleNamespace(runtime=FakeRuntime()),
+        {"method": "prepareWindow", "params": {"config": config, "cancelPath": _cancel_path(config)}},
+        lambda value: value,
+    )
+    assert response["error"] == {
+        "code": "prepare_failed", "message": "native window preparation failed",
+        "reasonCode": "target_not_found" if restored else "gate_restore",
+        "gateActive": False if restored else None, "gateRestored": restored,
+    }
+    assert "private" not in str(response)
+
+
+def test_preparation_error_frame_rejects_non_boolean_state_and_private_reason(tmp_path):
+    config = {**_config(), "stateRoot": str(tmp_path / "state")}
+    class FakeRuntime:
+        def prepare_window(self, *_args):
+            error = RuntimeError("private exception")
+            error.state = {"gateActive": 0, "gateRestored": 1}
+            error.reason_code = "private C:/account/key"
+            raise error
+    response = _response_for_request(
+        SimpleNamespace(runtime=FakeRuntime()),
+        {"method": "prepareWindow", "params": {"config": config, "cancelPath": _cancel_path(config)}},
+        lambda value: value,
+    )
+    assert response["error"]["reasonCode"] == "prepare_failed"
+    assert response["error"]["gateActive"] is None
+    assert response["error"]["gateRestored"] is False
+    assert "private" not in str(response)
+
+
+def test_watchdog_accepts_bound_window_memory_factory(tmp_path):
+    from wechat_db.native_window_worker import watchdog_main_with_diagnostics
+    state_root = tmp_path / "state"
+    lease_path = state_root / "gate-leases" / "test.json"
+    lease_path.parent.mkdir(parents=True)
+    lease_path.write_text('{"originalByte":0}', encoding="utf-8")
+    events = []
+    class Memory:
+        def __init__(self, lease):
+            events.append("bound-memory")
+        def read_byte(self, lease):
+            return 0
+        def close(self):
+            events.append("closed")
+    def atomic_json(path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+    gate = SimpleNamespace(
+        Win32ProcessMemory=lambda _: pytest.fail("legacy unique-window check must not run"),
+        _atomic_json=atomic_json,
+        watchdog_recover=lambda *_: {"gateActive": False, "gateRestored": True},
+    )
+    assert watchdog_main_with_diagnostics(
+        lease_path, state_root, gate_module=gate, legacy_root=tmp_path, memory_factory=Memory,
+    ) == 0
+    assert events == ["bound-memory", "closed"]

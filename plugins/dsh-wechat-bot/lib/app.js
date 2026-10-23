@@ -53,6 +53,7 @@ export class WeChatBotApp {
     const commands = new CommandRegistry()
     if (config.commandsDir) await commands.load(config.commandsDir)
     const saved = await this.store.loadBot()
+    this.mirrorSessionIds = saved.mirrorSessionIds ?? {}
     this.setup = saved.setup ?? null
     this.models = new ModelControl({
       llm: this.ctx.llm, base: () => this.#configuredRoute(), override: saved.modelOverride,
@@ -76,6 +77,8 @@ export class WeChatBotApp {
         stickers: config.stickers,
       },
       think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) })),
+      learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm,
+        route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 600 }) })),
       createAdapter: () => adapter.command
         ? spawnAdapter({ command: adapter.command, args: adapter.args, cwd: adapter.cwd || undefined, env: adapter.env })
         // Like a real client, the simulated account stays logged in once set up.
@@ -119,10 +122,19 @@ export class WeChatBotApp {
     if (!this.setup?.completedAt || !self) return undefined
     const key = `${self.id}\0${chat.id}`
     if (!this.sessions.has(key)) {
-      const opening = ChatSession.open(this.ctx, {
-        id: chatSessionId(self.id, chat.id), cwd: this.setup.workspace,
-        title: `微信 · ${chat.name}`, route: this.route(),
-      }).catch(error => {
+      const opening = (async () => {
+        const previousId = this.mirrorSessionIds[key] ?? chatSessionId(self.id, chat.id)
+        const session = await ChatSession.openAvailable(this.ctx, {
+          id: previousId, cwd: this.setup.workspace, title: `微信 · ${chat.name}`, route: this.route(),
+        })
+        if (this.mirrorSessionIds[key] !== session.id) {
+          this.mirrorSessionIds[key] = session.id
+          try { await this.store.updateBot({ mirrorSessionIds: { ...this.mirrorSessionIds } }) }
+          catch (error) { await session.dispose(); throw error }
+          if (previousId !== session.id) this.bot.note('info', `旧会话被占用，已新建「微信 · ${chat.name} · 续接」`)
+        }
+        return session
+      })().catch(error => {
         this.sessions.delete(key)
         this.bot.note('warn', `无法创建 DSH 会话「${chat.name}」：${error.message}`)
         return undefined
