@@ -2,9 +2,11 @@
 
 > 写给接手的人。先读这一份，再按需读 [protocol.md](protocol.md)（插件 ↔ 适配器协议）、[commands.md](commands.md)（聊天命令）和 [README](../README.md)。
 
+本文账号、联系人、群名、消息标识和本机路径均已脱敏。`<legacy-root>`、`<runtime-root>`、`<workspace-root>` 和 `<private-work-dir>` 是部署者本地目录的占位符；原始验收数据不随仓库分发。
+
 ## 1. 一句话现状
 
-**初号机私聊、△群及另一个新群的短期文字收发已通过。群接话、自然记忆与稳定身份已修复；发送运行时源码已迁入仓库，插件预留显隐口已接通并完成重新登录。当前单活动会话；多会话并行、媒体、锁屏恢复和长期稳定性仍需另验。最新改动与验证见第11节。**
+**测试机器人私聊、测试群A及另一个测试群的短期文字收发已通过。群接话、自然记忆与稳定身份已修复；发送运行时源码已迁入仓库，插件预留显隐口已接通并完成重新登录。当前单活动会话；多会话并行、媒体、锁屏恢复和长期稳定性仍需另验。最新改动与验证见第11节。**
 
 ## 2. 和最初版本相比
 
@@ -57,8 +59,8 @@
 | 项 | 现状 | 接手时要做的 |
 | --- | --- | --- |
 | **群昵称格式** | 适配器按 `chat_room.ext_buffer` 的 protobuf（成员 wxid + 群昵称）解析，格式取自开源 4.x 读库工具，**没在真实库上核对**；读不出时退回备注/昵称，不影响其它功能 | 在真实库上用 `chats/members` 看群昵称是否正确；不对就改 `wechat_db/roomdata.py` |
-| **真实账号上验证收消息** | 初号机真实加密库和浪味仙私聊已验证；△群元数据/9人成员数、会话选择及独立窗单条出站回执通过 | △群新消息读取字段与持续/模型驱动的群聊互动仍需验收 |
-| **把回复输入微信** | `--sender-config` 主窗文字通路已完成初号机与浪味仙模型回发；△已选独立窗也接入 native worker，并通过一条真实出站数据库回执。持久防重生效 | 多会话调度仍待实现；不删除发送日志或补发旧发件箱 |
+| **真实账号上验证收消息** | 测试机器人真实加密库和测试联系人私聊已验证；测试群A元数据与成员数、会话选择及独立窗单条出站回执通过 | 测试群A新消息读取字段与持续/模型驱动的群聊互动仍需验收 |
+| **把回复输入微信** | `--sender-config` 主窗文字通路已完成测试机器人与测试联系人模型回发；测试群A已选独立窗也接入 native worker，并通过一条真实出站数据库回执。持久防重生效 | 多会话调度仍待实现；不删除发送日志或补发旧发件箱 |
 | **窗口显隐切换** | 已通过 `window/get|set` 接通专用桌面显示、返回和登录窗口启动 | 锁屏及异常停机仍需专项验证 |
 | **图片/表情包识别与发送** | 收：知道是图片/表情（表情带描述时一并给模型）；发：模型可输出 `{"sticker":"名字"}`，插件按 `stickers` 配置写入发件箱。**内容识别与真正发出没做** | 收：适配器实现 `media/fetch` 或在 `media.description` 给出描述；插件侧把图片交给多模态模型。发：消费者支持 `sticker`/`image` |
 | **真实模型评测** | `/wechat eval` 做好了，没用真实模型跑过 | 在 DSH 里 `/wechat eval off high`，按结果调 `model.reasoningEffort` |
@@ -111,12 +113,12 @@
 | `wechat_db/delivery.py: Delivery` | 协议 §3 的 clientId 幂等与不确定不重发，及 `dsh-plugin-development` §4.6：发送前 fsync attempt、线程串行、独占文件锁、同 ID 请求冲突拒绝、重启恢复回执。未完成 attempt 或 worker 恢复不明时禁发新消息，保留日志供核对 |
 | `tests/test_delivery.py/test_sending.py/test_legacy_sender.py/test_transport_integration.py` | 测试真实日志与文件锁、假 worker 子进程和同结构 SQLite 库。覆盖发送发生后中断、跨进程锁、UTF-8、超时/坏帧、关闭失败、跨重启禁发、适配器 EOF 清理与目标限制；不以模拟结果代替真实微信验收 |
 
-以上 `wechat_db/`、`tests/` 均相对 `adapters/wechat-db/`；外部只读参考根为本机 `E:/dsh-wechat-bot`。实现前实际阅读了协议、相关旧源码与 `dsh-plugin-development` 持久化/生命周期/验证指导；独立审查发现的日志末行粘连、清理失败丢失 worker 引用、超范围读取等已修复并补测。
+以上 `wechat_db/`、`tests/` 均相对 `adapters/wechat-db/`；外部只读参考根为本机 `<legacy-root>`。实现前实际阅读了协议、相关旧源码与 `dsh-plugin-development` 持久化/生命周期/验证指导；独立审查发现的日志末行粘连、清理失败丢失 worker 引用、超范围读取等已修复并补测。
 
 实际验证（仓库根目录）：
 
-- `E:/Anaconda3/python.exe -m pytest adapters/wechat-db/tests -q -p no:cacheprovider`：**70 passed**（最终主 Agent 复跑 35.72 秒）。
-- 设置 `WECHAT_DB_PYTHON=E:/Anaconda3/python.exe`，通过本轮临时 Node import hook 只读解析 `E:/dsh-wechat-bot/runtime/node_modules` 的已安装 DSH 依赖，再执行 `node --import <临时模块解析器> --test plugins/dsh-wechat-bot/test/*.test.js`：**96 passed，0 skipped**，含原数据库端到端与 DSH 原生会话测试。未安装依赖；直接在本仓库运行不带解析器的测试，`dsh.test.js` 会缺少 `@deepseek-ai/cordis` 等依赖。
+- `python -m pytest adapters/wechat-db/tests -q -p no:cacheprovider`：**70 passed**（最终主 Agent 复跑 35.72 秒）。
+- 设置 `WECHAT_DB_PYTHON=python`，通过本轮临时 Node import hook 只读解析 `<runtime-root>/node_modules` 的已安装 DSH 依赖，再执行 `node --import <临时模块解析器> --test plugins/dsh-wechat-bot/test/*.test.js`：**96 passed，0 skipped**，含原数据库端到端与 DSH 原生会话测试。未安装依赖；直接在本仓库运行不带解析器的测试，`dsh.test.js` 会缺少 `@deepseek-ai/cordis` 等依赖。
 - `python adapters/wechat-db/main.py --help` 和 `git diff --check` 通过。项目只声明 test 脚本，本轮未执行安装或打包。
 
 只读现场核对发现旧 worker 的 `expectedVersion` 与本机微信文件版本同为 `4.1.15.13`，已有隐藏桌面配置；旧 `stateRoot` 仍指向旧项目，不能直接作为新实例状态目录使用。这些只证明文件和配置，不能证明账号在线、控件门参数仍有效或群发送正常。
@@ -125,23 +127,23 @@
 
 ## 8. 2026-10-22 后续真实接入与原生会话选择
 
-干净DSH位于 `E:/dshwxbot/dsh-clean`，回环5311，工作区 `E:/chatwx`。初号机真实账号已登录；与浪味仙的实际入站、真实deepseek-flash生成和微信回发通过。随后按用户要求只测试会话选择、切换和原生独立窗，不增加发送前复核，不重复测试消息。
+干净DSH位于 `<runtime-root>`，本地回环端口，工作区 `<workspace-root>`。测试机器人真实账号已登录；与测试联系人的实际入站、真实deepseek-flash生成和微信回发通过。随后按用户要求只测试会话选择、切换和原生独立窗，不增加发送前复核，不重复测试消息。
 
-`sender.json` 顶层 `detachedWindow:true` 启用已有群/私聊列表及单活动目标选择，解决旧固定目标过滤使△群不可见的问题。页面已实际搜索到△（9人群）并完成△→浪味仙→△切换；关闭本次创建的空草稿群窗后再次从页面选择，已自动双击新建△独立窗。辅助进程正常关闭并退出，当前选△、连接正常。
+`sender.json` 顶层 `detachedWindow:true` 启用已有群/私聊列表及单活动目标选择，解决旧固定目标过滤使测试群A不可见的问题。页面已实际搜索到测试群A并完成测试群A→测试联系人→测试群A切换；关闭本次创建的空草稿群窗后再次从页面选择，已自动双击新建测试群A独立窗。辅助进程正常关闭并退出，验收时选中测试群A、连接正常。
 
-新增入口为 `wechat_db/detached_window.py:prepare_on_desktop`、`native_window_worker.py:NativeWindowRuntime`；接线为 `adapter.py:on_chats_list/on_watch_set`、`legacy_sender.py:select_target/prepare_target`，前端 `client/index.js:ChatPicker`。依据旧wx4py `_ensure_subwindow`、旧worker/process/isolated/gate源码及DSH技能§4/8。群抬头实际带人数（△(9)）；短命worker中的ERROR_BUSY桌面句柄由正常进程退出释放，宿主仍要求exit0。
+新增入口为 `wechat_db/detached_window.py:prepare_on_desktop`、`native_window_worker.py:NativeWindowRuntime`；接线为 `adapter.py:on_chats_list/on_watch_set`、`legacy_sender.py:select_target/prepare_target`，前端 `client/index.js:ChatPicker`。依据旧wx4py `_ensure_subwindow`、旧worker/process/isolated/gate源码及DSH技能§4/8。群抬头实际带成员人数后缀；短命worker中的ERROR_BUSY桌面句柄由正常进程退出释放，宿主仍要求exit0。
 
-最终验证Python **121 passed**，Node数据库→插件→发件箱端到端 **1 passed/0 skipped**，客户端语法与diff空白检查通过。详细路径、现场结果与限制见 `E:/dshwxbot/dsh-clean/window-selection-validation.md`；结构化证据 `window-selection-verification.json`，截图 `session-selection-verified.jpg`。独立窗发送路由、多会话并行、群真实收发、媒体和锁屏仍待后续，不以canSend状态替代这些验收。未提交或推送。
+最终验证Python **121 passed**，Node数据库→插件→发件箱端到端 **1 passed/0 skipped**，客户端语法与diff空白检查通过。详细路径、现场结果与限制见 `<private-work-dir>/window-selection-validation.md`；结构化证据 `window-selection-verification.json`，截图 `session-selection-verified.jpg`。独立窗发送路由、多会话并行、群真实收发、媒体和锁屏仍待后续，不以canSend状态替代这些验收。未提交或推送。
 
-## 9. 2026-10-22 △ 独立窗口发送接通
+## 9. 2026-10-22 测试群A 独立窗口发送接通
 
 在第 8 节的会话选择工作之后，修复独立窗已打开但发送仍走主窗的问题。`LegacySender._prepare_target_thread` 只在本代 prepare 成功后发布独立窗 worker 配置与参数；`LegacySender.send` 在 detached mode 只用该快照，未准备成功时禁发、不回退主窗。切换目标或清除 watch 会丢弃已准备路由。发送沿用现有 attempt 防重和 close/gate 恢复边界；没有增加额外的发送前整窗复核，原生 runtime 的账号/进程校验、monitor、焦点保护和控件门检查仍执行。
 
 `NativeWindowRuntime` 将 send 派发到 `native_send.py:send_on_desktop`。`NativeUISender` 在选中的独立窗中对 UIA 输入控件标签「输入」写入并核对完整草稿，再点「发送」；成功以精确数据库出站匹配为准，而不是仅以 UI 点击为准。失败的旧请求没有补发。
 
-先用独立验证适配器对 △（9 人群）发送一条修复测试文字。准备过程记录 `canSend:false` → `canSend:true`，随后返回 messageId `5021905145363587369`；数据库证明中同一 messageId 对应目标群、本人发送者和 `fromSelf:true`，适配器退出码为 0。本机结构化证据归档在 `dsh-clean/validation/20261022-triangle-send/send-result.json`，不随仓库分发；本节保留 receipt id 供排障，不记录测试正文或账号、群 wxid。此前失败请求没有补发。
+先用独立验证适配器对测试群A发送一条测试文字。准备过程记录 `canSend:false` → `canSend:true`，随后返回 messageId；数据库证明中同一 messageId 对应目标群、本人发送者和 `fromSelf:true`，适配器退出码为 0。本机结构化证据保存在部署者的私有验收目录，不随仓库分发；公开文档不记录原始回执、测试正文或账号、群 wxid。此前失败请求没有补发。
 
-随后加载正式插件，新发 `/help` 的收件、回复及正文哈希均经数据库复核，回复回执 `126267775936878936`。真实模型 `/ask` 后续三段回复的目标、本人发送者及正文哈希逐条与数据库相符，生产journal全部confirmed；最终状态idle、backlog0、模型/发送/内部错误均0。正式群收件→命令/真实模型→独立窗发送通路通过。
+随后加载正式插件，新发 `/help` 的收件、回复及正文哈希均经数据库复核。真实模型 `/ask` 后续三段回复的目标、本人发送者及正文哈希逐条与数据库相符，生产journal全部confirmed；最终状态idle、backlog0、模型/发送/内部错误均0。正式群收件→命令/真实模型→独立窗发送通路通过。
 
 Python全测试 **134 passed**；Node数据库→插件→发件箱测试 **1 passed**。本轮Node全套首次91 passed，DSH集成文件因源码未安装宿主依赖而无法启动；临时hook只读解析本次新DSH运行时后，该文件单独 **5 passed**，共96项，不能称为首次全量命令通过。测试fixture已改为虚构账号/会话标识。本机Home、密钥、解密数据库、聊天历史、截图与运行配置不纳入提交。
 
@@ -153,7 +155,7 @@ Python全测试 **134 passed**；Node数据库→插件→发件箱测试 **1 pa
 
 `wechat_db/native_binding.py` 只在已绑定后校验原 HWND；保留进程路径/启动时间/版本、窗口所属进程/owner/class/title/style、DLL路径及大小检查。`native_window_worker.py` 的父 gate 和独立 watchdog 使用同一内存工厂，初次主窗发现仍保持唯一。错误帧只传固定原因码及显式 gate 状态；`DetachedWindowPreparer` 以正常 close ack、恢复状态和退出码0确认清理，未知状态仍锁定。明确重新选择安全失败的同群可以重试，准备中/就绪时重复选择不操作窗口。适配器与控制台显示准备中、失败及恢复待确认，并仅给安全失败提供“重新准备”。依据为旧 process/gate 源码、DSH技能§4/5/8及离线状态迁移测试。
 
-新群正式 `/help` 收件后已确认发送，微信回执 `2706851386646432411`；随后真实模型互动多条回复也已确认。本机证据在工作区 `_work/20261022-new-group/`，含身份/原字节只读检查、官方租约核验及正式插件日志，均不随仓库分发。此处只记录短期单活动目标结果，不承诺所有会话都能自动选择或并行操作。
+测试群B正式 `/help` 收件后已确认发送；随后真实模型互动多条回复也已确认。本机证据保存在部署者的私有验收目录，含身份/原字节只读检查、官方租约核验及正式插件日志，均不随仓库分发。此处只记录短期单活动目标结果，不承诺所有会话都能自动选择或并行操作。
 
 最终回归：Python **163 passed**；Node 全套借助本机临时宿主依赖解析hook、指定测试Python后 **102 passed、0 skipped**；客户端语法及diff空白检查通过。最后在发送空闲时通过官方配置重载加载完整修复，重新选择新群后再次准备成功，状态为connected/canSend true、idle、backlog0。浏览器刷新后显示正确群名、已连接及零模型/发送失败。失败与重试按钮已离线验证，未人为破坏生产gate来触发；额外的空窗关闭辅助验证未完成，未算作新建窗口成功，之后已确认原HWND仍在、原字节0且正常关闭，监听恢复。
 
@@ -170,13 +172,13 @@ Python全测试 **134 passed**；Node数据库→插件→发件箱测试 **1 pa
 | 保留稳定身份、名册、别名、引用作者和原始消息证据 | `lib/prompt.js:turnInput`；current roster 优先，@对象与发言作者分别表示 | 两个身份不同的合成作者，真实模型分别回答爸爸和爷爷；近期r编号只在当前可见输入内归一化 |
 | 降低发送探测开销 | `legacy_sender.py` 发布 preparedBinding；`native_binding.py:resolve_prepared_binding` 和 `native_window_worker.py` 保留精确窗口/账号及DB校验，跳过每条的全机重新发现；参考迁入的 process/runtime/gate 契约 | 只读 probe 从10.750s降至0.969s；旧现场模型中位1.292s而生成到首条发出中位20.417s。迁入后本次新消息模型1.337s、首条4.647s、两段发送总计10.397s，含分段打字等待，不作长期速度保证 |
 | 原生依赖源码进入仓库 | `adapters/wechat-db/native-runtime/python`、90项原有测试、原始vendor许可证与固定依赖清单；复制时核对哈希，只将测试账号替换为虚构标识 | 新Python环境安装、迁入worker90项通过，实际两段发送的目标/本人/正文哈希经数据库核对；旧源码清理和本机配置保全记录留在私有验证目录 |
-| 插件显隐和重新登录 | `wechat_db/desktop_control.py` 与 `adapter.py:on_window_get/on_window_set`，复用既有控制台接口；用户主动切专用桌面，先确认返回工具栏就绪 | 用户已在显示窗口完成登录并返回；新PID下重新选择△准备成功。主桌面工作微信未结束，未清理微信数据 |
+| 插件显隐和重新登录 | `wechat_db/desktop_control.py` 与 `adapter.py:on_window_get/on_window_set`，复用既有控制台接口；用户主动切专用桌面，先确认返回工具栏就绪 | 用户已在显示窗口完成登录并返回；新进程下重新选择测试群A准备成功。主桌面工作微信未结束，未清理微信数据 |
 | 重连后的 DSH 会话镜像 | `session.js:ChatSession.openAvailable`、`app.js:#mirror`；采用正式 `SessionAlreadyOwnedError` 契约，仅在活动写句柄占用时新建并保存 mirrorSessionIds 关联 | 真实 DSH services 离线测试覆盖占用时新建、原会话不被接管、空闲已关联会话恢复；现场验收另记本机证据 |
 
-Node回归139项、适配器190项、迁入worker90项通过，均无失败。Node使用本机干净DSH的临时依赖解析器，0 skipped。`/forget` 禁止旧证据迟到回写；新的自述仍可参与学习。后台学习不镜像到DSH，正常回复的模型调用仍镜像。现场已在“微信 · △ · 续接”看到今天的新模型对话，重载后关联保持。新的续接会话不重放或补发微信历史消息。
+Node回归139项、适配器190项、迁入worker90项通过，均无失败。Node使用本机干净DSH的临时依赖解析器，0 skipped。`/forget` 禁止旧证据迟到回写；新的自述仍可参与学习。后台学习不镜像到DSH，正常回复的模型调用仍镜像。现场已在对应测试群的续接会话看到新模型对话，重载后关联保持。新的续接会话不重放或补发微信历史消息。
 
-现场补修：发送期间适配器串行处理 RPC，后台学习的成员查询会排在发送之后；此前1.5秒等待上限误报“成员列表不可用”。现在保留成功名册并异步刷新，迟到的成功结果也更新缓存；按名找人的命令仍请求最新成员信息，消息携带的改名可覆盖旧缓存。初次查询较慢显示“后台读取”，仅真实查询错误才显示不可用。控制台另显示成员人数。最终现场状态为△群9人、可发送、空闲且无积压，重载后没有新增成员不可用警告；日志保留修复前的历史提示。
+现场补修：发送期间适配器串行处理 RPC，后台学习的成员查询会排在发送之后；此前1.5秒等待上限误报“成员列表不可用”。现在保留成功名册并异步刷新，迟到的成功结果也更新缓存；按名找人的命令仍请求最新成员信息，消息携带的改名可覆盖旧缓存。初次查询较慢显示“后台读取”，仅真实查询错误才显示不可用。控制台另显示成员人数。最终现场状态为测试群A名册完整、可发送、空闲且无积压，重载后没有新增成员不可用警告；日志保留修复前的历史提示。
 
 同时发现主回复人设会把“甲说乙是丙的爸爸”错误提成甲本人的记忆。开启独立学习时，主回复的 memory 仅作模型输出展示，实际写入统一由无人物设定的 learner 重新读取原始证据、@对象及引用作者后提出。程序另拒绝没有明确忘记请求的 note:null，避免模型自行删旧笔记。合成复测中曾出现这类删除建议并已由保护规则拒绝；不把模型输出始终正确作为前提。已有历史记忆未批量改写。
 
-本机桌面快捷方式指向新版 DSH 启动入口，工作区固定chatwx、端口5311；已运行时复用进程。Python环境、Home、模型凭据、解密缓存、真实聊天日志、截图和桌面快捷方式不提交。原始临时ID/正式回执上下文双记录、长时间运行、媒体、多会话并行、锁屏及断电恢复仍未宣称完成。
+本机桌面快捷方式指向新版 DSH 启动入口，工作区与端口取本地部署配置；已运行时复用进程。Python环境、Home、模型凭据、解密缓存、真实聊天日志、截图和桌面快捷方式不提交。原始临时ID/正式回执上下文双记录、长时间运行、媒体、多会话并行、锁屏及断电恢复仍未宣称完成。

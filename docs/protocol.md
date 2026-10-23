@@ -7,6 +7,8 @@
 - 插件侧客户端：[`lib/adapter.js`](../plugins/dsh-wechat-bot/lib/adapter.js)，数据校验：[`lib/protocol.js`](../plugins/dsh-wechat-bot/lib/protocol.js)
 - 一致性检查工具：`node bin/check-adapter.js -- <你的适配器命令>`
 
+本文请求中的账号、群、消息标识和正文均为虚构示例；真实验收回执与账号数据由部署者本地保管。
+
 ---
 
 ## 1. 传输
@@ -23,13 +25,13 @@
 请求示例：
 
 ```json
-{"jsonrpc":"2.0","id":7,"method":"message/send","params":{"chatId":"123@chatroom","clientId":"a1b2c3:0","content":{"kind":"text","text":"草"}}}
+{"jsonrpc":"2.0","id":7,"method":"message/send","params":{"chatId":"example-group@chatroom","clientId":"example-request:0","content":{"kind":"text","text":"示例消息"}}}
 ```
 
 成功响应：
 
 ```json
-{"jsonrpc":"2.0","id":7,"result":{"messageId":"8812734623423"}}
+{"jsonrpc":"2.0","id":7,"result":{"messageId":"example-message-001"}}
 ```
 
 失败响应——**`error.data.code` 是插件路由用的机器码**（见第 5 节），`error.code` 用 JSON-RPC 的数值（未知方法 `-32601`，其他 `-32000`）：
@@ -182,7 +184,7 @@ result: { messageId: string }            // 这条消息在微信里的 id，用
    `adapters/wechat-db` 默认是"排队"式：写进发件箱后返回 `out:<clientId>`，此回执只代表入箱；消费者尚未实现。显式设置 `--sender-config` 后改为同步文字发送：通过仓库内 `native-runtime` 的隐藏桌面 worker 在配置的主窗口或已准备的独立窗口中发送，真实数据库出站核对通过才返回微信 id，持久日志保证跨重启不重复；不消费或补发默认发件箱的旧记录。该路径依赖 wx4py、本机微信版本与控件门参数匹配，不依赖旧项目目录；不支持媒体发送和非空 mentions。
 4. 命令的直接回复可能与普通回复**并发**调用 `message/send`，适配器必须自己串行化对同一个微信实例的操作。
 
-当前实现的真实验收记录（2026-10-22）：初号机真实加密库、初号机与浪味仙私聊的真实模型回复已通过；△群会话选择、双击打开独立窗口、native文字发送和精确数据库回执已通过。正式 `/help` 的 incoming/outgoing 数据库 id 分别为 `4576749726552072719` 和 `126267775936878936`；`/ask` 的三段模型回复全部与数据库核对，`modelErrors`、`sendErrors` 均为0。这是当前单活动会话的短期文字收发证据，不代表群长期稳定性、多会话并行、锁屏恢复或媒体能力。
+当前实现的真实验收记录（2026-10-22）：测试账号真实加密库、与测试联系人私聊的真实模型回复已通过；测试群会话选择、双击打开独立窗口、native文字发送和精确数据库回执已通过。正式 `/help` 的收件与回件已核对；`/ask` 的三段模型回复全部与数据库核对，`modelErrors`、`sendErrors` 均为0。公开文档不包含真实账号及回执标识。这是当前单活动会话的短期文字收发证据，不代表群长期稳定性、多会话并行、锁屏恢复或媒体能力。
 
 ### `media/fetch`（能力 `mediaFetch`，预留给图片/表情包识别）
 
@@ -313,8 +315,8 @@ params: { level: "debug" | "info" | "warn" | "error", message: string }
 
 ```bash
 node bin/check-adapter.js -- python -u my_adapter.py           # 只读检查：握手、登录状态、聊天列表、成员、错误码
-node bin/check-adapter.js --watch 123@chatroom --wait 60 -- …   # 打印 60 秒内收到的消息
-node bin/check-adapter.js --send wxid_xxx -- …                  # 真的发一条 "adapter check"，并验证 clientId 幂等
+node bin/check-adapter.js --watch example-group@chatroom --wait 60 -- …   # 打印 60 秒内收到的消息（替换示例群ID）
+node bin/check-adapter.js --send wxid_example -- …                       # 真的发一条 "adapter check"，并验证 clientId 幂等
 ```
 
 插件端用模拟器跑的单元/场景测试也就是这份协议的活文档：`plugins/dsh-wechat-bot/test/protocol.test.js`。
