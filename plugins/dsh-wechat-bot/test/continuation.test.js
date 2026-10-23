@@ -3,9 +3,9 @@ import test from 'node:test'
 import { ChatRunner } from '../lib/chat.js'
 import { sleep, until } from './helpers.js'
 
-// "续发": the person being answered adds to what they said while the reply is being written.
-// The script decides (same person, not turned to someone else, words or a picture); the reply
-// is written again once with everything, or its remaining parts are left for the next turn.
+// "续发": someone in the batch adds to what they said within one quiet window of the batch being
+// handed over, before the reply goes out. The script sees it and has the reply written once more
+// with it. Anyone else, or anything later, is simply the next batch.
 
 const SELF = { id: 'bot', name: '机器人' }
 const A = { id: 'member-a', name: '阿甲' }
@@ -16,18 +16,19 @@ const message = (sender, text, extra = {}) => ({
   id: `m${++sequence}`, chatId: CHAT.id, time: Date.now(), sender, text, kind: 'text', mentions: [], ...extra,
 })
 const toBot = { mentions: [SELF.id] }
+const QUIET = 60
 
-// `slow`: how long the model "thinks"; `parts`: how many messages each reply has; `sendMs`: per part.
-function runner(t, { slow = 80, parts = 1, sendMs = 0 } = {}) {
+// `slow`: how long the model "thinks"; `parts`: messages per reply; `sendMs`: per part.
+function runner(t, { slow = 150, parts = 1, sendMs = 0, state } = {}) {
   const sent = [], calls = []
   const r = new ChatRunner({
-    chat: CHAT, account: () => SELF, persona: '说短句',
-    settings: { mode: 'infer', quietMs: 20, maxWaitMs: 200, typingDelay: false, aliases: ['机器人'], maxTurnsPerMinute: 1000 },
+    chat: CHAT, account: () => SELF, persona: '说短句', state,
+    settings: { mode: 'free', quietMs: QUIET, maxWaitMs: 400, typingDelay: false, aliases: ['机器人'], maxTurnsPerMinute: 1000, commandsPerMinute: 100 },
     link: { members: async () => [SELF, A, B], canSend: () => true,
       send: async content => { await sleep(sendMs); sent.push(content.text); return { messageId: `sent-${sent.length}` } } },
     think: async args => {
       const input = JSON.parse(args.messages[0].text)
-      const texts = input.new.members.flatMap(g => g.messages.map(m => m.text))
+      const texts = input.new.order.map(id => input.new.members.flatMap(g => g.messages).find(m => m.id === id).text)
       calls.push(texts)
       await sleep(slow)
       return JSON.stringify({ to: input.new.order.at(-1), reply: Array.from({ length: parts }, (_, i) => `回[${texts.join('+')}]${i}`) })
@@ -37,35 +38,40 @@ function runner(t, { slow = 80, parts = 1, sendMs = 0 } = {}) {
   return { r, sent, calls }
 }
 
-test('the person being answered adds something while the reply is written: one reply to all of it', async t => {
+test('the same person adding right after the batch went in gets one reply to all of it', async t => {
   const { r, sent, calls } = runner(t)
   r.receive(message(A, '@机器人 推荐个电影', toBot))
   await until(() => calls.length === 1)
   r.receive(message(A, '最好是喜剧'))
   await until(() => sent.length === 1 && r.status === 'idle')
-  await sleep(100)
+  await sleep(QUIET * 2)
   assert.deepEqual(calls, [['@机器人 推荐个电影'], ['@机器人 推荐个电影', '最好是喜剧']])
   assert.deepEqual(sent, ['回[@机器人 推荐个电影+最好是喜剧]0'], 'the first draft was never sent')
   assert.ok(r.log.some(e => e.type === 'continued' && e.from === '阿甲'))
 })
 
-test('not a continuation: someone else, a turn to another member, or a sticker', async t => {
-  for (const [name, extra] of [
-    ['someone else', message(B, '今天好热')],
-    ['turned to another member', message(A, '@阿乙 你昨天看的啥', { mentions: [B.id] })],
-    ['a sticker', message(A, '[表情]', { kind: 'sticker' })],
-  ]) {
-    const { r, sent, calls } = runner(t)
-    r.receive(message(A, '@机器人 推荐个电影', toBot))
-    await until(() => calls.length === 1)
-    r.receive(extra)
-    await until(() => sent.length === 1)
-    assert.equal(sent[0], '回[@机器人 推荐个电影]0', `${name}: the reply goes out as written`)
-    assert.ok(!r.log.some(e => e.type === 'continued'), name)
-  }
+test('someone else talking meanwhile does not rewrite the reply; it is the next batch', async t => {
+  const { r, sent, calls } = runner(t)
+  r.receive(message(A, '@机器人 推荐个电影', toBot))
+  await until(() => calls.length === 1)
+  r.receive(message(B, '我也想知道'))
+  await until(() => sent.length === 2 && r.status === 'idle')
+  assert.deepEqual(calls, [['@机器人 推荐个电影'], ['我也想知道']])
+  assert.equal(sent[0], '回[@机器人 推荐个电影]0')
 })
 
-test('each message is rewritten at most once, so a member who keeps typing cannot hold a reply back', async t => {
+test('the same person adding only after the quiet window is the next batch, not a rewrite', async t => {
+  const { r, sent, calls } = runner(t, { slow: QUIET * 4 })
+  r.receive(message(A, '@机器人 推荐个电影', toBot))
+  await until(() => calls.length === 1)
+  await sleep(QUIET * 2)
+  r.receive(message(A, '对了，顺便问下天气'))
+  await until(() => sent.length === 2 && r.status === 'idle')
+  assert.deepEqual(calls, [['@机器人 推荐个电影'], ['对了，顺便问下天气']])
+  assert.ok(!r.log.some(e => e.type === 'continued'))
+})
+
+test('each message is written again at most once, so nobody can hold a reply back', async t => {
   const { r, sent, calls } = runner(t)
   r.receive(message(A, '@机器人 推荐个电影', toBot))
   for (let i = 1; i <= 3; i++) {
@@ -79,23 +85,66 @@ test('each message is rewritten at most once, so a member who keeps typing canno
   assert.ok(calls.slice(2).every(texts => !texts.includes('@机器人 推荐个电影')), 'the first message is never thought about again')
 })
 
-test('a continuation in the middle of a multi-part reply stops the rest; the next turn answers it', async t => {
+test('a multi-part reply is sent in full; what arrives meanwhile is the next turn', async t => {
   const { r, sent, calls } = runner(t, { slow: 5, parts: 3, sendMs: 40 })
   r.receive(message(A, '@机器人 讲讲', toBot))
   await until(() => sent.length === 1)
   r.receive(message(A, '简短点'))
-  await until(() => calls.length === 2 && sent.length >= 2 && r.status === 'idle')
-  await sleep(150)
-  assert.ok(!sent.includes('回[@机器人 讲讲]2'), 'the last part of the old reply was dropped')
-  assert.ok(sent.some(s => s.startsWith('回[简短点]')), 'the addition is answered next')
-  assert.ok(r.log.some(e => e.type === 'dropped' && e.reason === 'continued'))
+  await until(() => calls.length === 2 && sent.length === 6 && r.status === 'idle')
+  assert.deepEqual(sent.slice(0, 3), ['回[@机器人 讲讲]0', '回[@机器人 讲讲]1', '回[@机器人 讲讲]2'])
+  assert.deepEqual(calls[1], ['简短点'])
 })
 
-test('commands are not continuations and never rewrite an answer', async t => {
+test('commands never wait in the batch, so they neither trigger nor suffer a rewrite', async t => {
   const { r, sent, calls } = runner(t)
   r.receive(message(A, '@机器人 推荐个电影', toBot))
   await until(() => calls.length === 1)
   r.receive(message(A, '/status'))
   await until(() => sent.some(s => s.startsWith('回[')))
   assert.ok(!r.log.some(e => e.type === 'continued'))
+})
+
+test('during /attack the target adding something rewrites the reply; others are still ignored', async t => {
+  const engagement = { id: 'e1', style: 'attack', target: { id: A.id, name: A.name }, since: Date.now(), lastTargetAt: Date.now() }
+  const { r, sent, calls } = runner(t, { state: { engagement } })
+  r.receive(message(A, '你才菜'))
+  await until(() => calls.length === 1)
+  r.receive(message(B, '哈哈哈'))
+  await until(() => sent.length === 1)
+  assert.equal(sent[0], '回[你才菜]0', 'someone else talking does not rewrite the reply to the target')
+
+  r.receive(message(A, '再来'))
+  await until(() => calls.length === 2)
+  r.receive(message(A, '服不服'))
+  await until(() => sent.length === 2)
+  assert.equal(sent[1], '回[再来+服不服]0')
+})
+
+test('/wait sets the batch timing for every mode at runtime, is kept across restarts, and can be reset', async t => {
+  const { r, sent } = runner(t)
+  const reply = () => sent.at(-1)
+  r.receive(message(A, '/wait'))
+  await until(() => sent.length === 1)
+  assert.match(reply(), /静默 0\.06 秒、最多 0\.4 秒/)
+  r.receive(message(A, '/wait 3 10'))
+  await until(() => sent.length === 2)
+  assert.equal(reply(), '已执行：合批等待改为 静默 3 秒、最多 10 秒')
+  assert.deepEqual(r.wait, { quietMs: 3000, maxWaitMs: 10_000 })
+  r.receive(message(A, '/wait 12'))
+  await until(() => sent.length === 3)
+  assert.deepEqual(r.wait, { quietMs: 12_000, maxWaitMs: 12_000 }, 'the limit follows a longer quiet window')
+  for (const bad of ['/wait 0.1', '/wait 5 3', '/wait 3 500', '/wait abc']) {
+    const before = sent.length
+    r.receive(message(A, bad))
+    await until(() => sent.length === before + 1)
+    assert.match(reply(), /^没改成/, bad)
+  }
+  r.setMode('at')
+  assert.deepEqual(r.wait, { quietMs: 12_000, maxWaitMs: 12_000 }, 'the same for every mode')
+
+  const restarted = runner(t, { state: r.snapshot() })
+  assert.deepEqual(restarted.r.wait, { quietMs: 12_000, maxWaitMs: 12_000 })
+  r.receive(message(A, '/wait reset'))
+  await until(() => reply()?.startsWith('已执行：合批等待恢复为'))
+  assert.deepEqual(r.wait, { quietMs: QUIET, maxWaitMs: 400 })
 })

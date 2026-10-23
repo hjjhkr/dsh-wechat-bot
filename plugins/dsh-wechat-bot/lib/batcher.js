@@ -23,7 +23,7 @@ export class Batcher {
   #deferTimer
   #busy = false
 
-  constructor({ quietMs = 2000, maxWaitMs = 8000, maxMessages = 20, maxChars = 6000 }, onBatch, onOverflow = () => {}) {
+  constructor({ quietMs = 3000, maxWaitMs = 8000, maxMessages = 20, maxChars = 6000 }, onBatch, onOverflow = () => {}) {
     Object.assign(this, { quietMs, maxWaitMs, maxMessages, maxChars })
     this.onBatch = onBatch
     this.onOverflow = onOverflow

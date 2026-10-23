@@ -141,6 +141,27 @@ export const builtinCommands = [
     },
   },
   {
+    name: 'wait',
+    aliases: ['等待', '合批'],
+    usage: '/wait [静默秒数] [上限秒数] | reset',
+    summary: '查看或设置合批等待：群里静默几秒算一批、一批最多等几秒',
+    run: ({ args, wait }) => {
+      const show = w => `静默 ${w.quietMs / 1000} 秒、最多 ${w.maxWaitMs / 1000} 秒`
+      if (!args.length) return `合批等待：${show(wait.current())}
+用法：/wait 3 8（静默 3 秒、最多 8 秒），/wait 3（只改静默），/wait reset（恢复默认）`
+      if (['reset', '默认', '恢复'].includes(args[0].toLowerCase())) {
+        wait.set(null)
+        return `已执行：合批等待恢复为 ${show(wait.current())}`
+      }
+      const quiet = Number(args[0])
+      const max = args[1] === undefined ? Math.max(wait.current().maxWaitMs / 1000, quiet) : Number(args[1])
+      if (!Number.isFinite(quiet) || quiet < 0.5 || quiet > 30) return '没改成：静默秒数要在 0.5 到 30 之间'
+      if (!Number.isFinite(max) || max < quiet || max > 120) return '没改成：上限秒数要不小于静默秒数，且不超过 120'
+      wait.set({ quietMs: Math.round(quiet * 1000), maxWaitMs: Math.round(max * 1000) })
+      return `已执行：合批等待改为 ${show(wait.current())}`
+    },
+  },
+  {
     name: 'mute',
     aliases: ['闭嘴'],
     usage: '/mute [分钟]',

@@ -14,7 +14,7 @@ import { MemberRoster } from './roster.js'
 
 export const chatDefaults = Object.freeze({
   mode: 'infer',
-  quietMs: 2000,               // a batch closes after this long without new messages…
+  quietMs: 3000,               // a batch closes after this long without new messages…
   maxWaitMs: 8000,             // …and never later than this after its first message
   maxMessages: 20,
   maxChars: 6000,
@@ -56,10 +56,13 @@ const NOTICE_INTERVAL_MS = 5000
 const COMMAND_SENDERS_LIMIT = 500
 // Scheduled messages are checked at least this often, so long delays, sleep and clock changes are safe.
 const CRON_TICK_MS = 60_000
-// What can continue someone's message ("续发"): words or a picture, not a sticker reaction.
-const CONTINUES = new Set(['text', 'image'])
 // Signals that count as "@" for the `at` mode.
 const AT_REASONS = new Set(['at_you', 'quotes_you', 'direct_chat'])
+
+export const WAIT_LIMITS = Object.freeze({ minQuietMs: 500, maxQuietMs: 30_000, maxMaxWaitMs: 120_000 })
+const validWait = w => Number.isFinite(w?.quietMs) && Number.isFinite(w?.maxWaitMs)
+  && w.quietMs >= WAIT_LIMITS.minQuietMs && w.quietMs <= WAIT_LIMITS.maxQuietMs
+  && w.maxWaitMs >= w.quietMs && w.maxWaitMs <= WAIT_LIMITS.maxMaxWaitMs
 
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
@@ -117,7 +120,8 @@ export class ChatRunner {
     this.stats = state.stats?.date === today() ? state.stats : { date: today(), batches: 0, sent: 0 }
     this.seen = new Set(this.transcript.map(m => m.id))
     this.sentIds = new Set()
-    this.rethought = new Set() // messages already written again once because their author kept talking
+    this.rethought = new Set() // messages already written again once because their author added more
+    this.arrivedAt = new WeakMap() // when each waiting message reached the runner
     this.echoes = []
     this.status = 'idle'
     this.busySince = 0
@@ -132,6 +136,9 @@ export class ChatRunner {
     this.counters = { received: 0, overflow: 0, deferred: 0, interrupted: 0, modelErrors: 0, breakerTrips: 0, sendErrors: 0, internalErrors: 0 }
     this.notices = {}
     this.batcher = new Batcher(this.settings, batch => this.#run(batch), () => this.#overflow())
+    // Batch timing set with /wait (the same for every mode); otherwise config decides.
+    this.waitOverride = validWait(state.wait) ? state.wait : undefined
+    if (this.waitOverride) Object.assign(this.batcher, this.waitOverride)
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
     this.engagement = state.engagement ?? null // { id, style, target: {id, name}, since, lastTargetAt }
@@ -182,6 +189,7 @@ export class ChatRunner {
       forgottenEvidence: [...this.forgottenEvidence].slice(-SEEN_LIMIT),
       memberCache: this.roster.members, memberCacheAt: this.roster.at,
       mode: this.modeOverride,
+      wait: this.waitOverride,
       mutedUntil: this.mutedUntil,
       stats: this.stats,
       cron: this.cron.toJSON(),
@@ -205,6 +213,20 @@ export class ChatRunner {
   // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
   stuckFor(now = Date.now()) {
     return this.busySince ? now - this.busySince : 0
+  }
+
+  // How long a batch waits: `quietMs` without new messages, at most `maxWaitMs`.
+  get wait() {
+    return { quietMs: this.batcher.quietMs, maxWaitMs: this.batcher.maxWaitMs }
+  }
+
+  // `wait`: { quietMs, maxWaitMs }, or null to go back to the configured values.
+  setWait(wait) {
+    if (wait && !validWait(wait)) throw new Error('invalid wait')
+    this.waitOverride = wait ? { quietMs: wait.quietMs, maxWaitMs: wait.maxWaitMs } : undefined
+    Object.assign(this.batcher, this.waitOverride ?? { quietMs: this.settings.quietMs, maxWaitMs: this.settings.maxWaitMs })
+    this.#write('wait', this.wait)
+    this.emit('change')
   }
 
   setMode(mode) {
@@ -261,6 +283,7 @@ export class ChatRunner {
       this.#command(message, command, parsed).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
       return
     }
+    this.arrivedAt.set(message, Date.now())
     this.batcher.push(message)
   }
 
@@ -356,6 +379,7 @@ export class ChatRunner {
         ...parsed, sender: message.sender, chat: this.chat, message,
         mode: this.mode,
         setMode: mode => this.setMode(mode),
+        wait: { current: () => this.wait, set: wait => this.setWait(wait) },
         mute: ms => this.mute(ms),
         memory: {
           recall: id => this.memory.recall([id])[id] ?? {},
@@ -613,11 +637,10 @@ export class ChatRunner {
 
     // In an engagement the script knows whom the reply is for; the model's `to` is not needed.
     const target = event?.kind === 'engagement' ? batch.at(-1) : batch.find(m => m.id === decision.to)
-    const answering = urgent ? new Set() : this.#answering(batch, address, target, event)
-    // Someone being answered added to what they said while the reply was written: write it again with
-    // that, once per message (so a member who keeps typing cannot hold the reply back for ever).
-    if (decision.reply.length && !batch.some(m => this.rethought.has(m.id))) {
-      const more = this.#continuation(answering)
+    // Someone in this batch added to what they said right after it was handed over ("续发"):
+    // write the reply again with it. Once per message, so nobody can hold a reply back.
+    if (!urgent && decision.reply.length && !batch.some(m => this.rethought.has(m.id))) {
+      const more = this.#continuation(batch, started)
       if (more) {
         for (const m of batch) this.rethought.add(m.id)
         while (this.rethought.size > SEEN_LIMIT) this.rethought.delete(this.rethought.values().next().value)
@@ -643,29 +666,18 @@ export class ChatRunner {
     }
     const engagementId = event?.kind === 'engagement' ? engagement.id : batch.find(m => m.command?.engagement)?.command.engagement
     const sendStarted = Date.now()
-    await this.#deliver(decision.reply, { batch, target, event, started, engagementId, answering })
+    await this.#deliver(decision.reply, { batch, target, event, started, engagementId })
     this.#write('latency', { modelMs: decision.modelMs, sendMs: Date.now() - sendStarted,
       queueMs: batch.length ? Math.max(0, started - Math.min(...batch.map(m => m.time))) : 0,
       totalMs: batch.length ? Math.max(0, Date.now() - Math.min(...batch.map(m => m.time))) : Date.now() - started })
   }
 
-  // Who a reply answers: everyone in the batch who was talking to the bot, the message it replies to,
-  // and an engagement's target.
-  #answering(batch, address, target, event) {
-    const ids = new Set(batch.filter(m => ['you', 'maybe'].includes(address.get(m.id)?.addressed)).map(m => m.sender.id))
-    if (target) ids.add(target.sender.id)
-    if (event?.kind === 'engagement') ids.add(event.target.id)
-    return ids
-  }
-
-  // A waiting message that continues what someone being answered was saying. Script rules only:
-  // the same person, not turned to someone else (an @ or a quote of another member), words or a picture.
-  #continuation(answering) {
-    if (!answering.size) return undefined
-    const waiting = this.batcher.peek().filter(m => answering.has(m.sender.id) && CONTINUES.has(m.kind))
-    if (!waiting.length) return undefined
-    const address = this.#addresses(waiting)
-    return waiting.find(m => address.get(m.id).addressed !== 'other')
+  // A waiting message from someone who spoke in this batch, received within one quiet window
+  // (quietMs) of the batch being handed over: the same person finishing their thought. Anyone
+  // else, or anything later, is the next batch. Commands never wait here.
+  #continuation(batch, handedOver) {
+    const authors = new Set(batch.map(m => m.sender.id))
+    return this.batcher.peek().find(m => authors.has(m.sender.id) && (this.arrivedAt.get(m) ?? Infinity) - handedOver <= this.batcher.quietMs)
   }
 
   // An interrupted batch goes back where it came from; the next turn sees the new state.
@@ -724,7 +736,7 @@ export class ChatRunner {
 
   // ── delivery ────────────────────────────────────────────────────────────
 
-  async #deliver(parts, { batch, target, event, started, engagementId, answering = new Set() }) {
+  async #deliver(parts, { batch, target, event, started, engagementId }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
     const commanded = batch.some(m => m.command)
@@ -734,8 +746,6 @@ export class ChatRunner {
       : !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
     for (const [index, part] of parts.entries()) {
       if (index && this.settings.typingDelay) await sleep(typingMs(part.text ?? ''))
-      // They added something mid-reply: the rest of it may no longer fit; the next turn answers both.
-      if (index && this.#continuation(answering)) return void this.#write('dropped', { reason: 'continued', clientId: `${turnId}:${index}` })
       const content = part.kind === 'sticker'
         ? { kind: 'sticker', path: this.settings.stickers[part.name] }
         : { kind: 'text', text: part.text }
