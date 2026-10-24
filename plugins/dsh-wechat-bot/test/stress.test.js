@@ -29,7 +29,7 @@ function watchProcess(t) {
   return () => assert.deepEqual(escaped, [], 'nothing escaped')
 }
 
-function assertBounded(env) {
+async function assertBounded(env) {
   const runner = env.bot.runner
   const s = runner.settings
   assert.ok(runner.batcher.size <= s.maxMessages, `backlog ${runner.batcher.size} > ${s.maxMessages}`)
@@ -37,7 +37,7 @@ function assertBounded(env) {
   assert.ok(runner.log.length <= 600, `chat log ${runner.log.length}`)
   assert.ok(runner.seen.size <= 1000, `seen ids ${runner.seen.size}`)
   assert.ok(env.bot.log.length <= 600, `bot log ${env.bot.log.length}`)
-  for (const member of Object.values(runner.memory.members)) assert.ok(member.notes.length <= 20)
+  for (const member of await runner.memory.listMembers()) assert.ok(member.count <= 30, `${member.who} has ${member.count} notes`)
 }
 
 // Highest number of model calls inside any `windowMs`.
@@ -90,7 +90,7 @@ test('flood: thousands of messages from 50 members stay bounded and rate-limited
     say(env, `刷屏第${i}条`, Math.random() < 0.05 ? { mentions: [BOT.id] } : {})
     if (i % 25 === 0) {
       await sleep(20)
-      assertBounded(env)
+      await assertBounded(env)
     }
   }
   await until(() => env.bot.runner.batcher.size === 0 && env.bot.runner.status === 'idle', { timeoutMs: 15_000, what: 'flood drained' })
@@ -102,7 +102,7 @@ test('flood: thousands of messages from 50 members stay bounded and rate-limited
   assert.ok(health.counters.deferred > 0, 'the rate limit made batches wait')
   assert.ok(peakRate(times, 1000) <= 15, `rate limit held (peak ${peakRate(times, 1000)})`)
   assert.ok(sentTexts(env).length <= times.length, 'never more replies than model calls')
-  assertBounded(env)
+  await assertBounded(env)
   await answersAgain(env)
   escaped()
 })
@@ -130,7 +130,7 @@ test('chaotic model: errors, hangs and garbage trip the breaker, and the bot rec
   while (Date.now() < deadline) {
     say(env, `混乱${n++}`, Math.random() < 0.2 ? { mentions: [BOT.id] } : {})
     await sleep(7)
-    assertBounded(env)
+    await assertBounded(env)
   }
   const health = env.bot.runner.health()
   t.diagnostic(`${n} msgs, ${env.model.calls.length} model calls, ${health.counters.modelErrors} failures, ` +
@@ -142,7 +142,7 @@ test('chaotic model: errors, hangs and garbage trip the breaker, and the bot rec
   await until(() => env.bot.runner.breaker.wait() === 0, { timeoutMs: 2000, what: 'breaker cool-down' })
   await answersAgain(env)
   assert.equal(env.bot.runner.breaker.view().open, false)
-  assertBounded(env)
+  await assertBounded(env)
   escaped()
 })
 
@@ -160,7 +160,7 @@ test('adapter crash storm: the adapter dies repeatedly under traffic and the bot
   t.diagnostic(`${crashes} crashes, ${env.bot.log.filter(e => e.message.includes('已连接适配器')).length} connections, ${sentTexts(env).length} sent on the last adapter`)
   assert.equal(env.bot.chat.id, GROUP, 'still serving the same group')
   await answersAgain(env)
-  assertBounded(env)
+  await assertBounded(env)
   escaped()
 })
 
@@ -193,7 +193,7 @@ test('flaky sends and a flapping lock screen never duplicate or lose control', a
   t.diagnostic(`${total} @s, ${sent.length} parts sent, ${env.bot.runner.counters.sendErrors} send errors`)
   assert.equal(new Set(sent).size, sent.length, 'no message was ever sent twice')
   await answersAgain(env)
-  assertBounded(env)
+  await assertBounded(env)
   escaped()
 })
 
@@ -230,8 +230,13 @@ test('soak: steady traffic with memory writes keeps state and the state file bou
   await until(() => env.bot.runner.status === 'idle' && env.bot.runner.batcher.size === 0, { timeoutMs: 10_000 })
   await env.bot.store.flush()
   const { size } = await import('node:fs/promises').then(fs => fs.stat(env.bot.store.chatPath(GROUP)))
-  t.diagnostic(`${n} msgs, ${Object.keys(env.bot.runner.memory.members).length} members remembered, state file ${(size / 1024).toFixed(0)} KiB`)
-  assertBounded(env)
+  const savedMemory = await env.bot.store.memoryFor(GROUP).context(MEMBERS.map(member => member.id))
+  const remembered = Object.keys(savedMemory.documents).length
+  assert.ok(remembered > 0, 'the soak must actually write long-term memory')
+  for (const notes of Object.values(savedMemory.notes)) assert.ok(Object.keys(notes).length <= 30)
+  for (const document of Object.values(savedMemory.documents)) assert.ok(Buffer.byteLength(document, 'utf8') <= 16 * 1024)
+  t.diagnostic(`${n} msgs, ${remembered} members remembered in Markdown, control state ${(size / 1024).toFixed(0)} KiB`)
+  await assertBounded(env)
   assert.ok(size < 1024 * 1024, 'state file stays under 1 MiB')
   escaped()
 })

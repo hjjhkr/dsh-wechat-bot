@@ -11,6 +11,10 @@ const readOnly = () => { throw new Error(READ_ONLY) }
 export const chatSessionId = (selfId, chatId) =>
   SessionId('wechat-' + createHash('sha256').update(`${selfId}\0${chatId}`).digest('hex').slice(0, 32))
 
+// A separate namespace keeps live-only mirrors from adopting old persisted logs.
+export const liveChatSessionId = (selfId, chatId) =>
+  SessionId(chatSessionId(selfId, chatId).replace('wechat-', 'wechat-live-'))
+
 // A native DSH session that mirrors one WeChat chat's model calls: every turn
 // shows the batch the bot saw and the model's raw decision, streamed live.
 // It is a minimal Agent driver: no agent loop, no tools, no composer input.
@@ -78,6 +82,28 @@ export class ChatSession {
       if (!(error instanceof SessionAlreadyOwnedError)) throw error
       return ChatSession.open(ctx, { ...options,
         id: SessionId(`wechat-${randomUUID().replaceAll('-', '')}`), title: `${options.title} · 续接` })
+    }
+  }
+
+  // Register a native, visible session for this process only. DSH's projection
+  // cache may still checkpoint it; no append-only session log is created here.
+  static async openLive(ctx, { id, cwd, title, route }) {
+    const session = ctx.sessions.prepare(id, { meta: { cwd } })
+    const activity = new ChatSession(ctx, session, undefined, route)
+    activity.transient = true
+    try {
+      activity.detachSession = activity.ctx.sessions.enter(session)
+      activity.detachAgent = ctx.agents.enter(activity, undefined)
+      activity.ctx.sessions.announce(session)
+      ctx.sessionTitle.rename(session, title)
+      await ctx.agents.announce(activity, 'startup')
+      activity.workspace = await ctx.workspaceRegistry.create(cwd)
+      await activity.workspace.attachSession(id)
+      return activity
+    } catch (error) {
+      try { await activity.dispose() }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], 'opening live WeChat session and cleanup failed') }
+      throw error
     }
   }
 
@@ -182,11 +208,15 @@ export class ChatSession {
       this.cancel({ kind: 'disposed' })
       await this.whenIdle()
       try {
-        await this.handle.close()
+        if (!this.transient) await this.handle.close()
       } finally {
         this.detachAgent?.()
         this.detachSession?.()
-        await this.scope.dispose()
+        try {
+          if (this.workspace) await this.workspace.detachSession(this.id)
+        } finally {
+          await this.scope.dispose()
+        }
       }
     })()
   }

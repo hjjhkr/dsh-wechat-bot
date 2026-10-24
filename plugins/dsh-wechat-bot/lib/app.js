@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -9,12 +8,14 @@ import { CommandRegistry } from './commands.js'
 import { formatEval, runEval } from './eval.js'
 import { createThink } from './model.js'
 import { ModelControl } from './models.js'
-import { ChatSession, chatSessionId } from './session.js'
+import { MemoryMaintenance } from './memory-maintenance.js'
+import { ChatSession, liveChatSessionId } from './session.js'
+import { PersonaLibrary } from './personas.js'
 import { Simulator } from './simulator.js'
 import { Store } from './store.js'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
-export const DEFAULT_PERSONA = join(PACKAGE_ROOT, 'personas', 'persona_dafeiyu.md')
+export const BUNDLED_PERSONAS = join(PACKAGE_ROOT, 'personas')
 
 // The built-in simulator, connected in-process. Used until a real adapter is configured.
 function inProcessSimulator(options) {
@@ -33,11 +34,19 @@ export function dataDirOf(config) {
 // `/wechat` DSH command and the `wechat_bot` agent tool all call these.
 export class WeChatBotApp {
   sessions = new Map()
+  maintenanceSessions = new Map()
+  #disposing = null
 
   static async create(ctx, config) {
     const app = new WeChatBotApp(ctx, config)
-    await app.#start()
-    return app
+    try {
+      await app.#start()
+      return app
+    } catch (error) {
+      // Startup may already own an adapter; do not leave it running.
+      if (app.bot) await app.dispose().catch(() => {})
+      throw error
+    }
   }
 
   constructor(ctx, config) {
@@ -49,20 +58,27 @@ export class WeChatBotApp {
 
   async #start() {
     const config = this.config
-    const persona = await readFile(config.personaPath || DEFAULT_PERSONA, 'utf8')
     const commands = new CommandRegistry()
     if (config.commandsDir) await commands.load(config.commandsDir)
     const saved = await this.store.loadBot()
-    this.mirrorSessionIds = saved.mirrorSessionIds ?? {}
+    this.personas = new PersonaLibrary({
+      dir: config.personasDir || join(this.dataDir, 'personas'), fallback: config.persona, current: saved.persona ?? undefined,
+      save: name => this.store.updateBot({ persona: name ?? null }),
+    })
+    await this.personas.seed(BUNDLED_PERSONAS)
     this.setup = saved.setup ?? null
     this.models = new ModelControl({
       llm: this.ctx.llm, base: () => this.#configuredRoute(), override: saved.modelOverride,
       save: modelOverride => this.store.updateBot({ modelOverride }),
     })
     const { adapter } = config
-    this.persona = persona
+    this.memoryMaintenance = new MemoryMaintenance({
+      memoryFor: chatId => this.store.memoryFor(chatId),
+      think: args => this.#compactThink(args),
+      onEvent: event => this.#memoryEvent(event),
+    })
     this.bot = new Bot({
-      dataDir: this.dataDir, store: this.store, persona, commands, models: this.models,
+      dataDir: this.dataDir, store: this.store, personas: this.personas, commands, models: this.models,
       settings: {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
@@ -76,23 +92,38 @@ export class WeChatBotApp {
         aliases: config.aliases,
         stickers: config.stickers,
       },
-      think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, route: () => this.route(), mirror: chat => this.#mirror(chat) })),
-      learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm,
-        route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 600 }) })),
+      think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route(), mirror: chat => this.#mirror(chat) })),
+      learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'memory',
+        // Room for a few merged notes of up to 480 characters each.
+        route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 2400 }) })),
       createAdapter: () => adapter.command
         ? spawnAdapter({ command: adapter.command, args: adapter.args, cwd: adapter.cwd || undefined, env: adapter.env })
         // Like a real client, the simulated account stays logged in once set up.
         : inProcessSimulator({ loggedIn: Boolean(this.setup?.completedAt) }),
     })
-    // Open each chat's DSH session before the UI can, so the plugin always owns it.
-    this.bot.on('watch', chat => this.#mirror(chat))
+    this.bot.on('watch', chat => {
+      this.#mirror(chat).catch(error => this.bot.note('error', `DSH 会话绑定失败：${error.message}`))
+      this.#observeMemory(chat)
+    })
+    this.bot.on('memory-changed', chat => this.#observeMemory(chat))
     await this.bot.start()
-    if (this.bot.chat) this.#mirror(this.bot.chat)
+    if (this.bot.chat) {
+      await this.#mirror(this.bot.chat)
+      this.#observeMemory(this.bot.chat)
+    }
   }
 
-  async dispose() {
-    await this.bot.dispose()
-    await Promise.allSettled([...this.sessions.values()].map(s => s.then(session => session?.dispose())))
+  dispose() {
+    return this.#disposing ??= (async () => {
+      await this.memoryMaintenance?.dispose()
+      try {
+        await this.bot.dispose()
+      } finally {
+        await Promise.allSettled([...this.sessions.values(), ...this.maintenanceSessions.values()].map(async pending => (await pending).dispose()))
+        this.sessions.clear()
+        this.maintenanceSessions.clear()
+      }
+    })()
   }
 
   // A per-call effort (e.g. /ask's "high") falls back to the current one if the model lacks it.
@@ -116,32 +147,73 @@ export class WeChatBotApp {
     return { provider, model, reasoningEffort, maxTokens: this.config.model.maxTokens }
   }
 
-  // The DSH session mirroring `chat`, in the workspace where setup ran.
-  #mirror(chat) {
-    const self = this.setup?.self ?? this.bot.account.self
-    if (!this.setup?.completedAt || !self) return undefined
+  async #mirror(chat) {
+    if (!this.setup?.completedAt) return undefined
+    const self = this.bot.account.self ?? this.setup.self
     const key = `${self.id}\0${chat.id}`
     if (!this.sessions.has(key)) {
-      const opening = (async () => {
-        const previousId = this.mirrorSessionIds[key] ?? chatSessionId(self.id, chat.id)
-        const session = await ChatSession.openAvailable(this.ctx, {
-          id: previousId, cwd: this.setup.workspace, title: `微信 · ${chat.name}`, route: this.route(),
-        })
-        if (this.mirrorSessionIds[key] !== session.id) {
-          this.mirrorSessionIds[key] = session.id
-          try { await this.store.updateBot({ mirrorSessionIds: { ...this.mirrorSessionIds } }) }
-          catch (error) { await session.dispose(); throw error }
-          if (previousId !== session.id) this.bot.note('info', `旧会话被占用，已新建「微信 · ${chat.name} · 续接」`)
-        }
-        return session
-      })().catch(error => {
+      const opening = ChatSession.openLive(this.ctx, {
+        id: liveChatSessionId(self.id, chat.id), cwd: this.setup.workspace,
+        title: `微信 · ${chat.name}`, route: this.route(),
+      }).catch(error => {
         this.sessions.delete(key)
-        this.bot.note('warn', `无法创建 DSH 会话「${chat.name}」：${error.message}`)
-        return undefined
+        throw error
       })
       this.sessions.set(key, opening)
     }
     return this.sessions.get(key)
+  }
+
+  #observeMemory(chat) {
+    if (this.#disposing || !this.setup?.completedAt) return
+    this.memoryMaintenance.observe(chat).catch(error => this.bot.note('error', `记忆整理检查失败：${error.message}`))
+  }
+
+  #memoryEvent(event) {
+    // Maintenance never enters the WeChat send pipeline.
+    if (event.type === 'result') {
+      const result = event.result
+      this.bot.note(result.status === 'failed' ? 'error' : 'info',
+        result.status === 'failed' ? `记忆整理失败（${result.who}）：${result.error}`
+          : result.status === 'skipped' ? `记忆整理（${result.who}）：${result.reason === 'cancelled' ? '已取消' : '无需整理'}`
+            : `记忆整理（${result.who}）：${result.before} → ${result.after} 个主题`)
+    }
+  }
+
+  async #compactThink(args) {
+    if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
+    // The deepest thinking the current model offers: max where it can.
+    const base = this.route()
+    const efforts = await this.models.efforts(base.provider, base.model)
+    const effort = ['max', 'high', 'low', 'off'].find(level => efforts.includes(level)) ?? 'off'
+    const route = { ...base, reasoningEffort: effort, maxTokens: Math.max(4096, this.config.model.maxTokens) }
+    args.signal.throwIfAborted()
+    const self = this.bot.account.self ?? this.setup.self
+    const key = `${self.id}\0${args.chat.id}`
+    let session = await this.maintenanceSessions.get(key)
+    if (session && (session.options.provider !== route.provider || session.options.model !== route.model)) {
+      await session.dispose()
+      this.maintenanceSessions.delete(key)
+      session = undefined
+    }
+    if (!session) {
+      const opening = ChatSession.openLive(this.ctx, {
+        id: liveChatSessionId(self.id, `memory\0${args.chat.id}`), cwd: this.setup.workspace,
+        title: `记忆整理 · ${args.chat.name} · ${effort}`, route,
+      }).catch(error => { this.maintenanceSessions.delete(key); throw error })
+      this.maintenanceSessions.set(key, opening)
+      session = await opening
+    }
+    args.signal.throwIfAborted()
+    return createThink({ llm: this.ctx.llm, role: 'memory', route: () => route, mirror: async () => session })({ ...args, effort })
+  }
+
+  compactMemory(chatId) {
+    if (this.#disposing) throw new Error('微信机器人正在关闭')
+    if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
+    const chat = this.bot.chat
+    if (!chat || chat.id !== chatId) throw new Error('服务的群已改变，请刷新控制台后再整理')
+    return this.memoryMaintenance.start({ ...chat })
   }
 
   // ── operations ──────────────────────────────────────────────────────────
@@ -152,6 +224,7 @@ export class WeChatBotApp {
       ...view,
       setup: this.setup,
       model: this.route(),
+      memoryMaintenance: this.memoryMaintenance.view(view.chat?.id),
       chats: this.bot.chats,
       log: this.bot.log.slice(-100),
     }
@@ -178,6 +251,10 @@ export class WeChatBotApp {
       this.setup = { ...this.setup, sessionId, self: account.self, completedAt: Date.now(), openConsoleIn: sessionId }
       await this.store.updateBot({ setup: this.setup })
     }
+    if (this.bot.chat) {
+      await this.#mirror(this.bot.chat)
+      this.#observeMemory(this.bot.chat)
+    }
     return { step: 'ready', account: account.self, chat: this.bot.chat }
   }
 
@@ -195,8 +272,13 @@ export class WeChatBotApp {
     return this.bot.listChats(query)
   }
 
-  watch(chatId) {
-    return this.bot.setChat(chatId)
+  async watch(chatId) {
+    const chat = await this.bot.setChat(chatId)
+    if (chat) {
+      await this.#mirror(chat)
+      this.#observeMemory(chat)
+    }
+    return chat
   }
 
   setMode(mode) {
@@ -209,9 +291,9 @@ export class WeChatBotApp {
 
   // Runs the built-in decision suite against the real model, once per effort level.
   async evaluate(efforts = [this.config.model.reasoningEffort]) {
-    const think = createThink({ llm: this.ctx.llm, route: () => this.route() })
+    const think = createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route() })
     const settings = { ...this.bot.settings, typingDelay: false }
-    return formatEval(await runEval({ think, persona: this.persona, settings, efforts }))
+    return formatEval(await runEval({ think, persona: await this.personas.text(), settings, efforts }))
   }
 
   windowState() {

@@ -230,6 +230,38 @@ window.__ModuleLoader__.load({
           : h('div', { className: 'wxb-muted' }, '还没有消息')))
     }
 
+    function MemoryMaintenance({ chat, state, refresh }) {
+      const [pending, setPending] = useState(false)
+      const [error, setError] = useState('')
+      const run = async () => {
+        if (!state || pending || state.running) return
+        setPending(true)
+        setError('')
+        try { await api.act('compactMemory', { chatId: chat.id }); refresh() }
+        catch (e) { setError(e.message) }
+        finally { setPending(false) }
+      }
+      const running = pending || state?.running
+      return h('div', { className: 'wxb-card' },
+        h('div', { className: 'wxb-row' },
+          h('strong', null, '长期记忆'),
+          h('span', { style: { flex: 1 } }),
+          h('button', { disabled: !state || running, onClick: run }, running ? '整理中…' : '整理记忆')),
+        h('div', { className: 'wxb-muted' }, '当前群按用户 ID 逐个整理，使用 max 推理。合并重复、清掉临时细节，保留独立有效主题。'),
+        h('div', { className: 'wxb-muted' }, '单人达到 30 个自动主题时也会触发；人工补充原样保留。'),
+        !state && h('div', { className: 'wxb-muted', role: 'status' }, '重启 DSH 后可使用整理记忆。'),
+        state?.total > 0 && h('div', { role: 'status', 'aria-live': 'polite' },
+          `${state.running ? '正在整理' : '整理结束'}：${state.completed}/${state.total} 位用户${state.currentWho ? ` · ${state.currentWho}` : ''}`),
+        state?.trigger && !running && state.total === 0 && !state.error && h('div', { className: 'wxb-muted', role: 'status' }, '当前群没有需要整理的记忆。'),
+        (error || state?.error) && h('div', { className: 'wxb-error', role: 'alert' }, error || state.error),
+        state?.results?.length > 0 && h('details', null,
+          h('summary', null, '查看整理结果'),
+          state.results.map(result => h('div', { key: result.who, className: result.status === 'failed' ? 'wxb-error' : 'wxb-muted' },
+            result.status === 'failed' ? `${result.who}：${result.error}`
+              : result.status === 'skipped' ? `${result.who}：${result.reason === 'cancelled' ? '任务已取消' : '无自动主题，无需整理'}`
+                : `${result.who}：${result.before} → ${result.after} 个主题`))))
+    }
+
     function Console({ sessionId }) {
       const [state, error, refresh] = usePoll(`/api/wechat-bot.state?session=${encodeURIComponent(sessionId ?? '')}`, 2000)
       const [picking, setPicking] = useState(false)
@@ -253,7 +285,8 @@ window.__ModuleLoader__.load({
           h('h3', { style: { flex: 1 } }, '服务的会话'),
           state.account.state === 'ready' && h('button', { onClick: () => setPicking(!picking) }, picking ? '收起' : current ? '切换会话' : '选择会话')),
         picking && h(ChatPicker, { current, onSaved: () => { setPicking(false); refresh() } }),
-        current ? h(ChatLog, { key: current.id, chat: current, recoveries: state.recoveries, simulator: state.capabilities?.simulator, refresh })
+        current && h(MemoryMaintenance, { key: `memory:${current.id}`, chat: current, state: state.memoryMaintenance, refresh }),
+        current ? h(ChatLog, { key: `chat-log:${current.id}`, chat: current, recoveries: state.recoveries, simulator: state.capabilities?.simulator, refresh })
           : h('div', { className: 'wxb-card wxb-muted' }, '还没有选择要服务的会话，点「选择会话」。'),
         h('details', null, h('summary', { className: 'wxb-muted' }, '连接日志'),
           h('div', { className: 'wxb-log' }, [...state.log].reverse().map((e, i) =>
@@ -268,6 +301,24 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'sidebarRightTabs', 'sidebarRight'],
       apply(ctx) {
+        // Holds the page-lifetime stream while this page is open (used by exitWithPage).
+        // EventSource reconnects by itself after a dropped connection; after an HTTP error
+        // (e.g. the plugin is reloading) it gives up, so try again a little later.
+        ctx.effect(() => {
+          let source, timer
+          const open = () => {
+            source = new EventSource('/api/wechat-bot.page-lifetime')
+            source.onerror = () => {
+              if (source.readyState === EventSource.CLOSED) timer = setTimeout(open, 5000)
+            }
+          }
+          open()
+          return () => {
+            clearTimeout(timer)
+            source.close()
+          }
+        }, 'wechat-bot: page lifetime')
+
         ctx.effect(() => ctx.sidebarRightTabs.register({
           id: ID, kind: KIND, priority: 'extension', keepMounted: false,
           title: () => '微信机器人',

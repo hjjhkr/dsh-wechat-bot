@@ -6,7 +6,7 @@ import { CronBook, cronLimits, parseSchedule } from './cron.js'
 import { DecisionError, parseDecision } from './decision.js'
 import { ENGAGEMENT_IDLE_MS, STYLES } from './engagement.js'
 import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
-import { MemoryBook } from './memory.js'
+import { StateMemory } from './memory.js'
 import { MemoryLearner } from './memory-learning.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
@@ -64,6 +64,8 @@ const validWait = w => Number.isFinite(w?.quietMs) && Number.isFinite(w?.maxWait
   && w.quietMs >= WAIT_LIMITS.minQuietMs && w.quietMs <= WAIT_LIMITS.maxQuietMs
   && w.maxWaitMs >= w.quietMs && w.maxWaitMs <= WAIT_LIMITS.maxMaxWaitMs
 
+const authorsOf = messages => [...new Set(messages.filter(m => !m.fromSelf).map(m => m.sender.id))]
+
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -81,6 +83,8 @@ class Interrupted extends Error {
 // Commands are the exception: they run on arrival, their output jumps the send
 // queue, and state-changing ones interrupt an answer still being thought out.
 export class ChatRunner {
+  #work = new Set() // turns, sends, commands and /cron ticks in progress
+
   /**
    * @param {object} o
    * @param {{id,name,kind}} o.chat
@@ -95,10 +99,11 @@ export class ChatRunner {
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, account, link, think, learn, commands, emit, persist, models }) {
+  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memory }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
-    this.persona = persona
+    this.persona = persona // text, or a function reading the current persona before each reply
+    this.personas = personas
     this.account = account
     this.link = link
     this.think = think
@@ -108,7 +113,8 @@ export class ChatRunner {
     this.persist = persist ?? (async () => {})
     this.models = models
     this.transcript = state.transcript ?? []
-    this.memory = new MemoryBook(state.memory)
+    // Long-term member notes: MarkdownMemory files, or (tests, evaluation) StateMemory kept in this state.
+    this.memory = memory ?? new StateMemory(state.memory)
     this.log = state.log ?? []
     // Whom the bot answered recently, one entry per member: their next message may be a follow-up.
     this.lastBotTurns = Array.isArray(state.lastBotTurns) ? state.lastBotTurns : state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : []
@@ -150,14 +156,17 @@ export class ChatRunner {
     })
     this.learner = learn && this.settings.memoryLearning ? new MemoryLearner({
       learn, settings: this.settings,
+      // The learner sees (and may change) the notes of the batch's authors only.
       context: async batch => ({
-        chat: this.chat, self: this.account(), members: await this.#members(), recent: this.#recent(batch), memory: this.#memoryFor(batch),
+        chat: this.chat, self: this.account(), members: await this.#members(), recent: this.#recent(batch),
+        memory: (await this.memory.context(authorsOf(batch))).notes,
       }),
       apply: (updates, evidence) => this.memory.apply(updates, evidence),
       forgotten: id => this.forgottenEvidence.has(id),
       write: (type, data) => this.#write(type, data),
       notice: (type, data) => this.#notice(type, data),
       saved: async () => {
+        this.emit('memory-changed')
         this.emit('change')
         await this.persist()
       },
@@ -183,7 +192,7 @@ export class ChatRunner {
   snapshot() {
     return {
       transcript: this.transcript.slice(-this.settings.recentLimit * 2),
-      memory: this.memory.toJSON(),
+      memory: this.memory.toJSON?.(), // only StateMemory lives in the state
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurns: this.lastBotTurns,
       forgottenEvidence: [...this.forgottenEvidence].slice(-SEEN_LIMIT),
@@ -208,6 +217,20 @@ export class ChatRunner {
     this.batcher.clear()
     clearTimeout(this.idleTimer)
     clearTimeout(this.cronTimer)
+  }
+
+  // Stops like dispose() and resolves once the work already in progress has finished:
+  // a reply part being sent, a command, a /cron tick.
+  async quiesce() {
+    this.dispose()
+    while (this.#work.size) await Promise.allSettled([...this.#work])
+    await this.memory.flush()
+  }
+
+  #track(promise) {
+    this.#work.add(promise)
+    promise.then(() => this.#work.delete(promise), () => this.#work.delete(promise))
+    return promise
   }
 
   // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
@@ -280,7 +303,7 @@ export class ChatRunner {
     const parsed = message.kind === 'text' ? parseCommand(message.text) : null
     const command = parsed && this.commands.get(parsed.name)
     if (command) {
-      this.#command(message, command, parsed).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
+      this.#track(this.#command(message, command, parsed)).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
       return
     }
     this.arrivedAt.set(message, Date.now())
@@ -382,12 +405,14 @@ export class ChatRunner {
         wait: { current: () => this.wait, set: wait => this.setWait(wait) },
         mute: ms => this.mute(ms),
         memory: {
-          recall: id => this.memory.recall([id])[id] ?? {},
-          forget: (id, topic) => {
+          recall: id => this.memory.recall(id),
+          forget: async (id, topic) => {
             this.learner?.cancel()
             for (const m of this.transcript) if (m.sender.id === id) this.forgottenEvidence.add(m.id)
             while (this.forgottenEvidence.size > SEEN_LIMIT) this.forgottenEvidence.delete(this.forgottenEvidence.values().next().value)
-            return this.memory.forget(id, topic)
+            const result = await this.memory.forget(id, topic)
+            this.emit('memory-changed')
+            return result
           },
         },
         resetContext: () => {
@@ -395,13 +420,14 @@ export class ChatRunner {
           this.transcript = []
           this.lastBotTurns = []
         },
-        status: () => ({
+        status: async () => ({
           mode: this.mode, mutedUntil: this.mutedUntil, today: this.stats,
-          context: this.transcript.length, members: Object.keys(this.memory.members).length,
+          context: this.transcript.length, members: await this.memory.count(),
           engagement: this.#activeEngagement(),
         }),
         commands: this.commands.list(),
         models: this.models,
+        personas: this.personas,
         selfId: this.account().id,
         members: () => this.#members({ fresh: true }),
         engagement: {
@@ -518,10 +544,11 @@ export class ChatRunner {
     return this.transcript.filter(m => !skip.has(m.id)).slice(-this.settings.recentLimit)
   }
 
-  #memoryFor(batch) {
-    const ids = new Set(batch.map(m => m.sender.id))
+  // Members whose memory goes with a turn: the batch's authors and whoever spoke just before.
+  #memoryIds(batch) {
+    const ids = new Set(authorsOf(batch))
     for (const m of this.transcript.slice(-10)) if (!m.fromSelf) ids.add(m.sender.id)
-    return this.memory.recall(ids)
+    return [...ids]
   }
 
   // Asks the model about `batch` without sending or remembering anything (dry runs, evaluation).
@@ -544,7 +571,11 @@ export class ChatRunner {
     }
   }
 
-  async #run(batch, event) {
+  #run(batch, event) {
+    return this.#track(this.#runBatch(batch, event))
+  }
+
+  async #runBatch(batch, event) {
     let deferMs = 0
     try {
       deferMs = await this.#turn(batch, event) ?? 0
@@ -655,9 +686,12 @@ export class ChatRunner {
         // Notes come from the separate learner, which reads the raw evidence without the persona.
         this.learner.queue(batch)
       } else {
-        const evidence = decision.evidence.filter(m => !this.forgottenEvidence.has(m.id))
-        const { applied, rejected } = this.memory.apply(decision.memory, evidence)
+        // Only about members whose memory the model was shown: the batch's authors.
+        const authors = new Set(authorsOf(batch))
+        const evidence = decision.evidence.filter(m => authors.has(m.sender.id) && !this.forgottenEvidence.has(m.id))
+        const { applied, rejected } = await this.memory.apply(decision.memory, evidence)
         if (applied.length || rejected.length) this.#write('memory', { applied, rejected })
+        if (applied.length) this.emit('memory-changed')
       }
     }
     if (!decision.reply.length) {
@@ -703,12 +737,16 @@ export class ChatRunner {
     const modelStarted = Date.now()
     const settings = this.settings
     const stickers = Object.keys(settings.stickers ?? {})
-    const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
     const recent = this.#recent(batch).map(m => this.#withQuoteSender(m))
+    const saved = await this.memory.context(this.#memoryIds(batch))
+    const persona = typeof this.persona === 'function' ? await this.persona() : this.persona
+    const system = systemPrompt(persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
     const members = await this.#members()
     const input = turnInput({
       chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],
-      members, recent, batch: batch.map(m => this.#withQuoteSender(m)), address, memory: this.#memoryFor(batch), event,
+      members, recent, batch: batch.map(m => this.#withQuoteSender(m)), address,
+      // Markdown documents (the full MEMORY.md) when the store has them, else plain notes.
+      memory: saved.documents ? {} : saved.notes, memoryDocuments: saved.documents, event,
     })
     const messages = [{ role: 'user', text: input }]
     const readable = event?.kind === 'idle' ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address, event)
@@ -792,7 +830,7 @@ export class ChatRunner {
 
   // All sends go through one lane, so command output (urgent) overtakes reply parts.
   #sendOne(content, clientId, { urgent = false, ...options }) {
-    return this.lane.run(() => this.#sendNow(content, clientId, options), { urgent })
+    return this.#track(this.lane.run(() => this.#sendNow(content, clientId, options), { urgent }))
   }
 
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
@@ -822,7 +860,7 @@ export class ChatRunner {
         const result = await this.link.send(content, clientId)
         return { messageId: result?.messageId ?? clientId }
       } catch (error) {
-        if (error.code === ErrorCode.Unavailable) {
+        if (error.code === ErrorCode.Unavailable && !this.disposed) {
           await sleep(this.settings.retryDelayMs)
           continue
         }
@@ -832,7 +870,8 @@ export class ChatRunner {
         }
         // A duplicate message is worse than a missing one, so anything but a definite failure is final.
         this.counters.sendErrors++
-        this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
+        // 'closed': the adapter was shutting down and never got it.
+        this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed && error.code !== 'closed', clientId })
         return null
       }
     }
@@ -846,7 +885,7 @@ export class ChatRunner {
     const next = this.cron.nextAt()
     if (next === Infinity) return
     const wait = delay ?? Math.min(Math.max(0, next - Date.now()), CRON_TICK_MS)
-    this.cronTimer = setTimeout(() => this.#cronTick().catch(error => this.#write('error', { message: `定时：${error.message}` })), Math.min(wait, CRON_TICK_MS))
+    this.cronTimer = setTimeout(() => this.#track(this.#cronTick()).catch(error => this.#write('error', { message: `定时：${error.message}` })), Math.min(wait, CRON_TICK_MS))
     this.cronTimer.unref?.()
   }
 

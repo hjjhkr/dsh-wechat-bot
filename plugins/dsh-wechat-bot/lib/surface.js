@@ -9,20 +9,22 @@ import { STYLES } from './engagement.js'
 
 const json = (value, status = 200) => Response.json(value, { status, headers: { 'cache-control': 'no-store' } })
 
-export function registerRoutes(ctx, app) {
-  ctx.connection.fetch.register({
+export function registerRoutes(ctx, app, pageLifetime) {
+  const disposers = []
+  const register = route => { disposers.push(ctx.connection.fetch.register(route)) }
+  register({
     path: '/api/wechat-bot.state', methods: ['GET'], requestBody: 'buffered',
     fetch: async request => {
       const session = new URL(request.url).searchParams.get('session')
       const workspace = session && ctx.workspaceRegistry.list().find(w => w.sessionIds.includes(session))?.path
-      return json({ ...app.state(), here: { session, workspace } })
+      return json({ ...app.state(), here: { session, workspace }, pageLifetime: pageLifetime.view() })
     },
   })
-  ctx.connection.fetch.register({
+  register({
     path: '/api/wechat-bot.log', methods: ['GET'], requestBody: 'buffered',
     fetch: async () => json({ entries: app.chatLog().map(entry => ({ ...entry, text: formatEntry(entry) })) }),
   })
-  ctx.connection.fetch.register({
+  register({
     path: '/api/wechat-bot.action', methods: ['POST'], requestBody: 'buffered',
     fetch: async request => {
       let body
@@ -38,6 +40,11 @@ export function registerRoutes(ctx, app) {
       }
     },
   })
+  register({
+    path: '/api/wechat-bot.page-lifetime', methods: ['GET'], requestBody: 'buffered',
+    fetch: request => pageLifetime.handle(request),
+  })
+  return () => disposers.forEach(dispose => dispose())
 }
 
 function runAction(app, { action, ...args }) {
@@ -46,6 +53,7 @@ function runAction(app, { action, ...args }) {
     case 'listChats': return app.listChats(args.query)
     case 'watch': return app.watch(args.chatId ?? null)
     case 'mode': return app.setMode(args.mode)
+    case 'compactMemory': return app.compactMemory(args.chatId)
     case 'window': return app.setWindowVisible(args.visible === true)
     case 'windowState': return app.windowState()
     case 'simulate': return app.simulate(args)
@@ -83,7 +91,7 @@ function describeSetup(result) {
     return `第一步：登录微信小号。\n${result.instructions}\n登录好以后回到这里，再输入 /wechat（或告诉我"好了"）完成初始化。`
   }
   const watching = result.chat ? `正在服务的群：${result.chat.name}` : '下一步在右侧栏「微信机器人」控制台里选择要服务的群。'
-  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n这个工作区里会生成「微信 · 群名」会话，可以随时打开看模型在想什么。`
+  return `初始化完成，小号「${result.account.name}」已连接。控制台在右侧栏「微信机器人」。\n${watching}\n工作区「微信 · 群名」会话显示本次运行的模型过程；长期记忆按用户 ID 保存为 MEMORY.md。`
 }
 
 const EFFORTS = ['off', 'low', 'high', 'max']
@@ -182,7 +190,7 @@ export function formatEntry(entry) {
     wait: () => `合批等待：静默 ${entry.quietMs / 1000} 秒、最多 ${entry.maxWaitMs / 1000} 秒`,
     mute: () => entry.until ? `禁言到 ${new Date(entry.until).toLocaleTimeString('zh-CN', { hour12: false })}` : '解除禁言',
     waiting: () => '等待可以发送（可能锁屏/断线）',
-    dropped: () => ({ stale: '回复过时，已放弃', engagement_changed: '互动已停止或换了对象，剩下的不发了' })[entry.reason] ?? '已禁言，剩下的不发了',
+    dropped: () => ({ stale: '回复过时，已放弃', engagement_changed: '互动已停止或换了对象，剩下的不发了', shutdown: '关停中，剩余内容未发送' })[entry.reason] ?? '已禁言，剩下的不发了',
     continued: () => `${entry.from} 等人又说了话，合并后重新回复`,
     overflow: () => `消息太多，较早的只作为上下文（累计 ${entry.total} 条）`,
     deferred: () => entry.reason === 'breaker_open' ? `模型熔断中，${Math.ceil(entry.waitMs / 1000)} 秒后再试` : `说话太频繁，${Math.ceil(entry.waitMs / 1000)} 秒后再处理`,

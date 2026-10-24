@@ -46,10 +46,10 @@ test('infer can learn a natural background fact without replying or being asked 
   })
   source = message(A, '我最近在做语音编码器，正在调流式集成')
   r.receive(source)
-  await until(() => r.memory.recall([A.id])[A.id]?.工作, { what: 'background memory' })
+  await until(() => r.memory.book.recall([A.id])[A.id]?.工作, { what: 'background memory' })
   assert.equal(calls.length, 0)
   assert.deepEqual(sent, [])
-  assert.equal(r.memory.recall([A.id])[A.id].工作, '在做语音编码器')
+  assert.equal(r.memory.book.recall([A.id])[A.id].工作, '在做语音编码器')
 })
 
 test('a slow memory learner never holds up a normal reply', async t => {
@@ -72,7 +72,7 @@ test('/forget cancels old background learning and prevents resurrection from rec
   r.receive(message(A, '/forget all'))
   finish({ memory: [{ who: A.id, topic: '项目', note: '维护编译器项目', evidence: source.id }] })
   await sleep(35)
-  assert.deepEqual(r.memory.recall([A.id]), {})
+  assert.deepEqual(r.memory.book.recall([A.id]), {})
   assert.equal(r.log.some(e => e.type === 'memory' && e.applied?.length), false)
 })
 
@@ -86,7 +86,7 @@ test('a disposed runner rejects a learner that ignores cancellation', async t =>
   r.dispose()
   finish({ memory: [{ who: A.id, topic: '项目', note: '开发数据库工具链', evidence: source.id }] })
   await sleep(20)
-  assert.deepEqual(r.memory.recall([A.id]), {})
+  assert.deepEqual(r.memory.book.recall([A.id]), {})
 })
 
 test('without a learner the reply model may cite a recent message by id, and authorship is still checked', async t => {
@@ -99,9 +99,9 @@ test('without a learner the reply model may cite a recent message by id, and aut
   })
   r.prime([old])
   r.receive(message(A, '@机器人 你看到了吗', { mentions: [SELF.id] }))
-  await until(() => r.memory.recall([A.id])[A.id]?.项目)
-  assert.equal(r.memory.recall([A.id])[A.id].项目, '维护编译器项目')
-  assert.deepEqual(r.memory.recall([B.id]), {})
+  await until(() => r.memory.book.recall([A.id])[A.id]?.项目)
+  assert.equal(r.memory.book.recall([A.id])[A.id].项目, '维护编译器项目')
+  assert.deepEqual(r.memory.book.recall([B.id]), {})
   assert.ok(r.log.some(e => e.type === 'memory' && e.rejected?.some(x => x.problem === 'evidence_from_someone_else')))
 })
 
@@ -214,9 +214,9 @@ test('the independent learner checks every author even when the main reply propo
   a = message(A, '@机器人 我在维护编译器项目', { mentions: [SELF.id] })
   b = message(B, '我喜欢短回复，记住这个偏好')
   r.receive(a); r.receive(b)
-  await until(() => r.memory.recall([B.id])[B.id]?.偏好)
+  await until(() => r.memory.book.recall([B.id])[B.id]?.偏好)
   assert.equal(learned.length, 1)
-  assert.equal(r.memory.recall([A.id])[A.id].项目, '维护编译器项目')
+  assert.equal(r.memory.book.recall([A.id])[A.id].项目, '维护编译器项目')
 })
 
 test('persona reply proposals cannot turn a third-party claim into the speakers own memory', async t => {
@@ -230,7 +230,7 @@ test('persona reply proposals cannot turn a third-party claim into the speakers 
   source = message(A, '@机器人 @Beta 是Gamma的爸爸，记住', { mentions: [SELF.id, B.id] })
   r.receive(source)
   await until(() => learned.length === 1 && r.log.some(e => e.type === 'memory_learning'))
-  assert.deepEqual(r.memory.recall([A.id]), {})
+  assert.deepEqual(r.memory.book.recall([A.id]), {})
   assert.equal(learned[0].batch[0].sender.id, A.id)
   assert.deepEqual(learned[0].batch[0].at, [SELF.id, B.id])
 })
@@ -245,6 +245,6 @@ test('a transient learner failure retries once without waiting for another user 
   })
   source = message(A, '我喜欢短回复，记住这个偏好')
   r.receive(source)
-  await until(() => r.memory.recall([A.id])[A.id]?.偏好)
+  await until(() => r.memory.book.recall([A.id])[A.id]?.偏好)
   assert.equal(attempts, 2)
 })

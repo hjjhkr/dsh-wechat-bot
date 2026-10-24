@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { sleep, startBot, until } from './helpers.js'
+import { Bot } from '../lib/bot.js'
+import { Store } from '../lib/store.js'
+import { FAST, linkedSimulator, sleep, startBot, until } from './helpers.js'
 
 const GROUP = 'demo@chatroom'
 const say = (env, from, text, extra = {}) => env.simulator.inject({ chatId: GROUP, from, text, ...extra })
@@ -110,6 +112,149 @@ test('multi-part replies are sent in order as separate messages', async t => {
   assert.deepEqual(recent.filter(m => m.from_you).map(m => m.text), ['草', '不对', '其实挺好'], 'own replies are context once, not duplicated by echoes')
 })
 
+test('dispose waits for the in-flight send classification before adapter shutdown acknowledgement', async t => {
+  const env = await watching(t, { reply: () => ({ to: null, reply: ['第一段', '第二段'] }) })
+  const sendStarted = Promise.withResolvers()
+  const finishSend = Promise.withResolvers()
+  const finishShutdown = Promise.withResolvers()
+  const originalSend = env.bot.adapter.send.bind(env.bot.adapter)
+  let sendCalls = 0
+  let shutdownCalls = 0
+  env.bot.adapter.send = async (...args) => {
+    sendCalls++
+    if (sendCalls === 1) {
+      sendStarted.resolve()
+      await finishSend.promise
+    }
+    return originalSend(...args)
+  }
+  env.bot.adapter.shutdown = async () => {
+    shutdownCalls++
+    await finishShutdown.promise
+  }
+
+  say(env, 'wxid_alice', '来两句')
+  await sendStarted.promise
+  let disposed = false
+  const dispose = env.bot.dispose().then(() => { disposed = true })
+  try {
+    await sleep(30)
+    assert.equal(disposed, false, 'dispose cannot finish while message/send outcome is unresolved')
+    assert.equal(shutdownCalls, 0, 'adapter shutdown starts only after the in-flight send settles')
+    finishSend.resolve()
+    await until(() => shutdownCalls === 1, { timeoutMs: 1000, what: 'safe shutdown after send completion' })
+    assert.deepEqual(sent(env), ['第一段'], 'the active send is classified before shutdown begins and later parts are blocked')
+    assert.equal(disposed, false, 'dispose waits for the adapter shutdown ACK')
+    finishShutdown.resolve()
+    await dispose
+    assert.equal(sendCalls, 1, 'quiescing does not send or replay another part')
+  } finally {
+    finishSend.resolve()
+    finishShutdown.resolve()
+    await dispose
+  }
+})
+
+test('an adapter that dies right after the handshake is restarted, not given up on', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-crash-'))
+  t.after(() => rm(dataDir, { recursive: true, force: true, maxRetries: 5 }))
+  const created = []
+  const bot = new Bot({
+    dataDir, store: new Store(dataDir, { delayMs: 5 }), persona: '', think: async () => '{"reply":[]}', settings: FAST,
+    createAdapter: () => {
+      const { client } = linkedSimulator({ loggedIn: true })
+      // The first one answers the handshake, then fails reading the account.
+      if (!created.length) client.accountStatus = async () => { throw new Error('adapter crashed') }
+      created.push(client)
+      return client
+    },
+  })
+  t.after(() => bot.dispose())
+  await bot.start()
+  await until(() => created.length === 2 && bot.ready, { timeoutMs: 5000, what: 'a restarted, ready adapter' })
+})
+
+test('stopping while the adapter is down still completes', async t => {
+  const env = await watching(t)
+  env.bot.adapter.peer.close() // the adapter is gone; the bot waits to reconnect
+  await until(() => env.bot.connection.state === 'adapter_down')
+  await env.bot.dispose()
+  assert.equal(env.bot.runner, null)
+})
+
+test('stopping while a chat is being opened leaves no runner behind', async t => {
+  const env = await startBot(t)
+  await until(() => env.bot.ready)
+  const watch = env.bot.adapter.watch.bind(env.bot.adapter)
+  const release = Promise.withResolvers()
+  env.bot.adapter.watch = async ids => { await release.promise; return watch(ids) }
+  const opening = env.bot.setChat(GROUP)
+  const stopping = env.bot.dispose()
+  release.resolve()
+  await Promise.all([opening.catch(() => {}), stopping])
+  assert.equal(env.bot.runner, null, 'no runner (and no timers) is created after stopping began')
+})
+
+test('stopping waits for a command that is still running', async t => {
+  const finish = Promise.withResolvers()
+  const env = await watching(t)
+  env.bot.runner.commands.define({ name: 'slow', summary: 'test', run: async ({ setMode }) => { await finish.promise; setMode('at') } })
+  say(env, 'wxid_alice', '/slow')
+  await until(() => logTypes(env).includes('command'))
+  const runner = env.bot.runner
+  let stopped = false
+  const stopping = env.bot.dispose().then(() => { stopped = true })
+  await sleep(30)
+  assert.equal(stopped, false, 'the command is still running')
+  finish.resolve()
+  await stopping
+  assert.equal(runner.snapshot().mode, 'at', 'its change made it into the saved state')
+})
+
+test('dispose quiesces the current runner before waiting for a reconnect handshake', async t => {
+  const env = await watching(t)
+  const runner = env.bot.runner
+  const received = runner.counters.received
+  let receiveCalls = 0
+  const receive = runner.receive.bind(runner)
+  runner.receive = message => { receiveCalls++; return receive(message) }
+  const initializeStarted = Promise.withResolvers()
+  const finishInitialize = Promise.withResolvers()
+  const createAdapter = env.bot.createAdapter
+  let reconnectAdapter
+  env.bot.createAdapter = () => {
+    reconnectAdapter = createAdapter()
+    const initialize = reconnectAdapter.initialize.bind(reconnectAdapter)
+    reconnectAdapter.initialize = async options => {
+      initializeStarted.resolve()
+      await finishInitialize.promise
+      return initialize(options)
+    }
+    return reconnectAdapter
+  }
+
+  env.bot.adapter.peer.close()
+  await initializeStarted.promise
+  let disposed = false
+  const dispose = env.bot.dispose().then(() => { disposed = true })
+  try {
+    reconnectAdapter.emit('message', {
+      id: 'during-page-close', chatId: GROUP, time: Date.now(), kind: 'text', text: 'close race',
+      sender: { id: 'wxid_alice', name: '阿离' }, mentions: ['wxid_bot'], fromSelf: false,
+    })
+    await sleep(100)
+    assert.equal(receiveCalls, 0, 'disposed Bot stops routing new adapter messages into the runner')
+    assert.equal(runner.counters.received, received, 'the disposed runner cannot accept messages while reconnect is pending')
+    assert.equal(env.model.calls.length, 0, 'a message delivered during disposal never reaches the model')
+    assert.equal(disposed, false, 'disposal waits for the existing reconnect cleanup')
+    finishInitialize.resolve()
+    await dispose
+  } finally {
+    finishInitialize.resolve()
+    await dispose
+  }
+})
+
 test('while sending is impossible (locked screen) the bot keeps thinking; replies go out on unlock', async t => {
   const env = await watching(t, { reply: input => ({ to: null, reply: [`回${input.new.at(-1).text}`] }) })
   await env.simulator.handlers()['sim/status']({ canSend: false, reason: 'screen_locked' })
@@ -165,7 +310,7 @@ test('a message typed on the bot account\'s phone is context, not a trigger', as
   assert.deepEqual(env.model.calls[0].input.recent, [{ from_you: true, time: env.model.calls[0].input.recent[0].time, text: '我是本人，在手机上发的' }])
 })
 
-test('memory is learned from conversation and survives a restart', async t => {
+test('Markdown memory survives exit while raw chat history is cleared', async t => {
   const dir = await mkdtemp(join(tmpdir(), 'wechat-bot-restart-'))
   t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 5 }))
   const first = await watching(t, {
@@ -181,8 +326,39 @@ test('memory is learned from conversation and survives a restart', async t => {
   second.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '早' })
   await until(() => second.model.calls.length === 1)
   const input = second.model.calls[0].input
-  assert.deepEqual(input.memory, { wxid_alice: { 宠物: '养了一只叫豆豆的猫' } })
-  assert.ok(input.recent.some(m => m.text.includes('豆豆')), 'transcript restored too')
+  assert.match(second.model.calls[0].raw.new.members[0].memoryDocument, /养了一只叫豆豆的猫/)
+  assert.equal(input.recent.some(m => m.text.includes('豆豆')), false, 'raw transcript is not restored')
+  const saved = await second.bot.store.loadChat(GROUP)
+  assert.equal(saved.transcript, undefined)
+  assert.equal(saved.log, undefined)
+  assert.equal(saved.memory, undefined)
+  const path = second.bot.store.memoryFor(GROUP).pathOf('wxid_alice')
+  const document = await readFile(path, 'utf8')
+  await writeFile(path, document.replace('养了一只叫豆豆的猫', '喜欢直说重点，回答先给结论'))
+  second.simulator.inject({ chatId: GROUP, from: 'wxid_bob', text: '讲讲今天的安排' })
+  await until(() => second.model.calls.length === 2)
+  assert.equal(second.model.calls[1].raw.new.members[0].memoryDocument, undefined)
+  assert.equal(JSON.stringify(second.model.calls[1].raw).includes('喜欢直说重点'), false)
+  second.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text: '帮我安排一下今天' })
+  await until(() => second.model.calls.length === 3)
+  assert.match(second.model.calls[2].raw.new.members[0].memoryDocument, /喜欢直说重点，回答先给结论/)
+})
+
+test('background learning writes Markdown and the next reply consumes the same users document', async t => {
+  const env = await watching(t, {
+    settings: { mode: 'infer', memoryQuietMs: 10, memoryMaxWaitMs: 30 },
+    reply: input => ({ to: input.new[0].id, reply: ['收到'] }),
+    learn: async args => {
+      const source = JSON.parse(args.messages[0].text).batch[0]
+      return JSON.stringify({ memory: [{ who: source.sender.id, topic: '回答偏好', note: '先给结论，再解释原因', evidence: source.id }] })
+    },
+  })
+  say(env, 'wxid_alice', '以后给我讲问题时，我更喜欢先给结论再解释原因')
+  await until(() => logTypes(env).includes('memory_learning'))
+  assert.equal(env.model.calls.length, 0, 'background learning does not require a reply')
+  say(env, 'wxid_alice', '小鲸鱼，帮我比较一下两种方案')
+  await until(() => env.model.calls.length === 1)
+  assert.match(env.model.calls[0].raw.new.members[0].memoryDocument, /先给结论，再解释原因/)
 })
 
 test('stopping the bot\'s group stops processing it', async t => {
@@ -312,4 +488,26 @@ test('a long reply echoed back under a different id is recognised before truncat
   env.simulator.inject({ chatId: GROUP, from: 'wxid_bot', text: long }) // the "real" message, new id
   await sleep(100)
   assert.equal(env.bot.runner.transcript.filter(m => m.fromSelf).length, 1)
+})
+
+test('a failed connect that takes longer to close than the back-off is still followed by a new attempt', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-slowclose-'))
+  t.after(() => rm(dataDir, { recursive: true, force: true, maxRetries: 5 }))
+  const created = []
+  const bot = new Bot({
+    dataDir, store: new Store(dataDir, { delayMs: 5 }), persona: '', think: async () => '{"reply":[]}', settings: FAST,
+    createAdapter: () => {
+      const { client } = linkedSimulator({ loggedIn: true })
+      if (!created.length) {
+        // Times out on the handshake, then takes 1.5 s (longer than the 1 s back-off) to exit.
+        client.initialize = async () => { throw new Error('initialize timed out') }
+        client.shutdown = async () => { client.peer.close(); await sleep(1500) }
+      }
+      created.push(client)
+      return client
+    },
+  })
+  t.after(() => bot.dispose())
+  await bot.start()
+  await until(() => created.length === 2 && bot.ready, { timeoutMs: 6000, what: 'a second attempt' })
 })

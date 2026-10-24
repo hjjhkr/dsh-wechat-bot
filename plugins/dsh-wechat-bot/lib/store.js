@@ -1,8 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { writeText } from './files.js'
+import { MarkdownMemory } from './markdown-memory.js'
 
 async function readJson(path, fallback) {
   try {
@@ -13,32 +13,19 @@ async function readJson(path, fallback) {
   }
 }
 
-// Atomic replace. On Windows a rename can briefly fail while another process
-// (antivirus, indexer, a reader) holds the target open, so retry a few times.
-async function writeJson(path, value) {
-  await mkdir(dirname(path), { recursive: true })
-  const temp = `${path}.${randomUUID()}.tmp`
-  await writeFile(temp, JSON.stringify(value, null, 1))
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await rename(temp, path)
-    } catch (error) {
-      if (attempt >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) {
-        await rm(temp, { force: true })
-        throw error
-      }
-      await sleep(20 * (attempt + 1))
-    }
-  }
-}
+const writeJson = (path, value) => writeText(path, JSON.stringify(value, null, 1))
 
 // Plugin state under one data directory: `bot.json` for settings changed by the
-// console, commands and onboarding; `chats/<hash>.json` for each chat's context.
+// console, commands and onboarding; `chats/<hash>.json` for each chat's controls
+// (mode, mute, /cron, …: raw conversations are never written to disk);
+// `memories/<hash>/…/MEMORY.md` for members' long-term notes.
 // Chat writes are coalesced and serialized per file.
 export class Store {
   #timers = new Map()
   #pending = new Map()
   #chains = new Map()
+  #memories = new Map()
+  #legacy = new Map() // chat file → old in-state memory that could not be migrated yet
 
   constructor(dir, { delayMs = 1000, onError = () => {} } = {}) {
     this.dir = dir
@@ -64,8 +51,33 @@ export class Store {
     })
   }
 
-  loadChat(chatId) {
-    return readJson(this.chatPath(chatId), {})
+  // `onProblem` reports memory files that cannot be read (first caller's is kept).
+  memoryFor(chatId, onProblem) {
+    const key = basename(this.chatPath(chatId), '.json')
+    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key))
+    const memory = this.#memories.get(key)
+    if (onProblem) memory.onProblem = onProblem
+    return memory
+  }
+
+  // A state written by an older version may still hold memory and history: the memory
+  // moves to MEMORY.md files and the file is rewritten with the controls only. Memory that
+  // cannot be migrated yet is kept (as legacyMemory) and tried again on the next load.
+  async loadChat(chatId) {
+    const path = this.chatPath(chatId)
+    const state = await readJson(path, {})
+    const legacy = state.memory ?? state.legacyMemory
+    if (legacy || state.transcript || state.log) {
+      if (!legacy || await this.memoryFor(chatId).migrate(legacy)) this.#legacy.delete(path)
+      else this.#legacy.set(path, legacy)
+      await this.#serialize(path, () => writeJson(path, this.#durable(path, state)))
+    }
+    return state
+  }
+
+  #durable(path, state) {
+    const legacy = this.#legacy.get(path)
+    return { ...durableState(state), ...(legacy ? { legacyMemory: legacy } : {}) }
   }
 
   // Schedule a write; the latest value (or value factory) wins.
@@ -89,7 +101,7 @@ export class Store {
       if (!this.#pending.has(path)) return
       const value = this.#pending.get(path)
       this.#pending.delete(path)
-      await writeJson(path, typeof value === 'function' ? value() : value)
+      await writeJson(path, this.#durable(path, typeof value === 'function' ? value() : value))
     })
   }
 
@@ -98,4 +110,9 @@ export class Store {
     this.#chains.set(path, run.catch(() => {}))
     return run
   }
+}
+
+function durableState(state) {
+  return Object.fromEntries(['mode', 'wait', 'mutedUntil', 'stats', 'cron', 'engagement', 'forgottenEvidence']
+    .filter(key => state[key] !== undefined).map(key => [key, state[key]]))
 }

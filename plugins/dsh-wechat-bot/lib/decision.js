@@ -24,8 +24,9 @@ function extractJson(text) {
   }
 }
 
-// Drop stage directions such as "（潜水）" or "(笑)" that would otherwise be sent verbatim.
-const stripAsides = text => text.replace(/[（(][^（）()]{0,20}[）)]/g, '').trim()
+// Remove only explicit Chinese stage actions; ordinary parentheses and kaomoji are message text.
+const STAGE_ACTION_ASIDE = /[（(](?:大笑|偷笑|坏笑|苦笑|冷笑|笑了|笑|潜水|冒泡|路过|围观|吃瓜|沉默|点头|摇头|挥挥手|挥手|摆手|耸肩|摊手|扶额|捂脸|捂嘴|叹气|叹息|鼓掌|拍桌|鞠躬|抱拳|敬礼|发呆|思考|翻白眼|眨眼|打哈欠|睡觉|离开|逃跑|装死|流泪|大哭|哭|跪地|趴桌|探头|歪头|擦汗|喝水|打盹|震惊|惊讶|无语|脸红|尴尬|坐下|起身|转身|走开|比心|拥抱|抱抱)[）)]/gu
+const stripAsides = text => text.replace(STAGE_ACTION_ASIDE, '').trim()
 
 function replyParts(reply, { maxParts, stickers }) {
   if (reply === null || reply === undefined || reply === '') return []

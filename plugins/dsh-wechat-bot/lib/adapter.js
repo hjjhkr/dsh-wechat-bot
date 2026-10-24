@@ -11,6 +11,8 @@ import {
 export class AdapterClient extends EventEmitter {
   info = null
   capabilities = parseCapabilities()
+  #inFlightSends = new Set()
+  #closing = false
 
   constructor(peerOptions, { timeoutMs = 30_000, sendTimeoutMs = 90_000 } = {}) {
     super()
@@ -84,9 +86,20 @@ export class AdapterClient extends EventEmitter {
     return watching
   }
 
-  async send(chatId, clientId, content) {
+  async #sendRequest(chatId, clientId, content) {
     return this.#call('message/send', { chatId, clientId, content: parseOutgoing(content) }, this.sendTimeoutMs)
   }
+
+  send(chatId, clientId, content) {
+    // Nothing was written to the adapter, so this send definitely did not happen.
+    if (this.#closing) return Promise.reject(new ProtocolError('closed', 'adapter is shutting down'))
+    const request = this.#sendRequest(chatId, clientId, content)
+    let tracked
+    tracked = request.finally(() => this.#inFlightSends.delete(tracked))
+    this.#inFlightSends.add(tracked)
+    return tracked
+  }
+
 
   async fetchMedia(chatId, messageId) {
     if (!this.capabilities.mediaFetch) throw new ProtocolError('unsupported', 'adapter cannot fetch media')
@@ -109,16 +122,19 @@ export class AdapterClient extends EventEmitter {
     return this.#call('sim/inject', params)
   }
 
+  // Takes no new sends, lets the ones in flight finish (each has its own timeout, so the
+  // outcome of every send is known before the adapter goes), then asks it to exit.
   async shutdown() {
-    try {
-      await this.#call('shutdown', {}, 5_000)
-    } catch {}
+    this.#closing = true
+    while (this.#inFlightSends.size) await Promise.allSettled([...this.#inFlightSends])
+    await this.#call('shutdown', {}, Math.min(this.timeoutMs, 5_000)).catch(() => {})
     this.peer.close()
   }
 }
 
 // Launches an adapter executable speaking the protocol on stdio.
-export function spawnAdapter({ command, args = [], cwd, env }, options) {
+// `stopGraceMs`: how long it may take to exit after a requested shutdown before it is killed.
+export function spawnAdapter({ command, args = [], cwd, env }, { stopGraceMs = 10_000, ...options } = {}) {
   const child = spawn(command, args, {
     cwd, env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...env },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -128,9 +144,10 @@ export function spawnAdapter({ command, args = [], cwd, env }, options) {
   // Writing to a process that just died must not crash the host.
   child.stdin.on('error', () => client.peer.close())
   // A closed connection means the process is of no further use; never leave it running.
-  client.peer.closed.then(() => {
-    if (child.exitCode === null && child.signalCode === null) setTimeout(() => child.exitCode === null && child.kill(), 1_000).unref()
-  })
+  // After a requested shutdown it gets longer to clean up (e.g. close its WeChat window).
+  let stopping = false
+  const kill = () => child.exitCode === null && child.signalCode === null && child.kill()
+  client.peer.closed.then(() => setTimeout(kill, stopping ? stopGraceMs : 1_000).unref())
   // Resolves with the exit code (or null if the process never started).
   client.exited = new Promise(resolve => {
     child.once('error', error => {
@@ -145,10 +162,9 @@ export function spawnAdapter({ command, args = [], cwd, env }, options) {
   })
   const shutdown = client.shutdown.bind(client)
   client.shutdown = async () => {
+    stopping = true
     await shutdown()
-    const timer = setTimeout(() => child.kill(), 3_000)
     await client.exited
-    clearTimeout(timer)
   }
   return client
 }

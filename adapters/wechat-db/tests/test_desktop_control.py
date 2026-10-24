@@ -40,6 +40,21 @@ def test_owned_process_identity_never_adopts_a_reused_pid(tmp_path):
         session_running(spec, {**state, 'desktop': 'Default'}, lambda _pid: None)
 
 
+def test_process_identity_requires_the_recorded_process_instance(tmp_path):
+    from wechat_db.desktop_control import DesktopControlError, load_spec, session_identity
+    spec = load_spec(spec_file(tmp_path))
+    state = {'desktop': spec.desktop, 'botWxid': spec.bot_id, 'pid': 12, 'startedAt': 100}
+
+    assert session_identity(spec, state, lambda _pid: {'exe': str(spec.exe), 'start': 100}) == {
+        'pid': 12, 'startedAt': 100.0,
+    }
+    assert session_identity(spec, state, lambda _pid: None) is None
+    with pytest.raises(DesktopControlError):
+        session_identity(spec, {**state, 'startedAt': float('nan')}, lambda _pid: None)
+    with pytest.raises(DesktopControlError):
+        session_identity(spec, {**state, 'pid': True}, lambda _pid: None)
+
+
 def test_show_requires_return_toolbar_and_hide_does_not_launch_wechat(tmp_path):
     from wechat_db.desktop_control import DesktopController, DesktopControlError
     class Backend:
@@ -68,6 +83,16 @@ def test_locked_or_unrelated_input_desktop_is_not_switched(tmp_path):
     backend = SimpleNamespace(input_desktop=lambda: 'Winlogon')
     with pytest.raises(DesktopControlError):
         DesktopController(spec_file(tmp_path), backend=backend).set_visible(True)
+
+
+def test_lifecycle_state_confirms_default_instead_of_any_hidden_desktop(tmp_path):
+    from wechat_db.desktop_control import DesktopController
+    backend = SimpleNamespace(input_desktop=lambda: 'Winlogon', running=lambda: True)
+    controller = DesktopController(spec_file(tmp_path), backend=backend)
+
+    assert controller.lifecycle_state() == {
+        'visible': False, 'returned': False, 'running': True,
+    }
 
 
 def test_existing_window_protocol_is_enabled_only_for_configured_controller():

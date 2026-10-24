@@ -1,11 +1,14 @@
 import z from '@deepseek-ai/schemastery'
 import { WeChatBotApp } from './app.js'
+import { PageLifetime } from './page-lifetime.js'
 import { registerCommand, registerRoutes, registerTool } from './surface.js'
 
 export const name = 'dsh-wechat-bot'
+// appExit (for exitWithPage) is looked up at runtime: not every host provides it, and the plugin must load without it.
 export const inject = ['llm', 'connection', 'commands', 'tools', 'sessions', 'agents', 'sessionPersistence', 'sessionTitle', 'workspaceRegistry']
 
 export const Config = z.object({
+  exitWithPage: z.boolean().default(false).description('Exit this DSH process after the last authenticated browser page closes.'),
   adapter: z.object({
     command: z.string().default('').description('Adapter executable speaking protocol v1 over stdio. Empty = built-in simulator.'),
     args: z.array(z.string()).default([]),
@@ -13,7 +16,8 @@ export const Config = z.object({
     env: z.dict(z.string()).default({}),
   }).default({}),
   dataDir: z.string().default('').description('State directory. Empty = <DSH_HOME>/wechat-bot.'),
-  personaPath: z.string().default('').description('Persona markdown. Empty = bundled persona.'),
+  persona: z.string().default('大肥鱼').description('Default persona: a file name (without .md) in the persona library. /persona switches at runtime.'),
+  personasDir: z.string().default('').description('Persona library folder, maintained by hand. Empty = <dataDir>/personas, seeded with the bundled personas.'),
   commandsDir: z.string().default('').description('Directory of custom chat command scripts (*.js).'),
   model: z.object({
     provider: z.string().default('').description('Empty = the DSH default model.'),
@@ -51,9 +55,19 @@ export const Config = z.object({
 export function apply(ctx, config) {
   ctx.effect(async () => {
     const app = await WeChatBotApp.create(ctx, config)
-    registerRoutes(ctx, app)
+    const exit = config.exitWithPage ? ctx.get('appExit') : undefined
+    if (config.exitWithPage && !exit) app.bot.note('warn', '这个 DSH 不提供 appExit，exitWithPage 不生效')
+    const pageLifetime = new PageLifetime({
+      enabled: config.exitWithPage, exit, shutdown: () => app.dispose(),
+      onError: error => app.bot.note('error', `页面关闭时停止机器人出错（照常退出）：${error.message}`),
+    })
+    const disposeRoutes = registerRoutes(ctx, app, pageLifetime)
     registerCommand(ctx, app)
     registerTool(ctx, app)
-    return () => app.dispose()
+    return async () => {
+      disposeRoutes()
+      pageLifetime.dispose()
+      await app.dispose()
+    }
   }, 'wechat-bot')
 }

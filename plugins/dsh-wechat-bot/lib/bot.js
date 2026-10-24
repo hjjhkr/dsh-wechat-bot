@@ -26,15 +26,18 @@ export class Bot extends EventEmitter {
   recoveries = 0
   #restarts = 0
   #disposed = false
+  #disposing = null
+  #connecting = null
   #canSendWaiters = new Set()
   #statusSeen = false
   #lastSelf
   #queue = Promise.resolve()
   #watchFailures = 0
 
-  constructor({ createAdapter, store, persona, settings = {}, think, learn, dataDir, commands = new CommandRegistry(), models }) {
+  // `personas`: the persona library; or `persona`, a fixed persona text (tests, evaluation).
+  constructor({ createAdapter, store, persona, personas, settings = {}, think, learn, dataDir, commands = new CommandRegistry(), models }) {
     super()
-    Object.assign(this, { createAdapter, store, persona, think, learn, dataDir, commands, models })
+    Object.assign(this, { createAdapter, store, persona, personas, think, learn, dataDir, commands, models })
     this.settings = { ...botDefaults, ...settings }
     store.onError = error => this.note('error', `保存状态失败：${error.message}`)
   }
@@ -46,17 +49,27 @@ export class Bot extends EventEmitter {
     await this.#connect()
   }
 
-  async dispose() {
+  dispose() {
+    return this.#disposing ??= this.#dispose()
+  }
+
+  // Stops taking messages, lets work in progress finish (a reply already being sent is never
+  // cut in half), saves, then closes the adapter, which is killed if it does not exit.
+  async #dispose() {
     this.#disposed = true
     clearTimeout(this.restartTimer)
     clearTimeout(this.watchRetryTimer)
     clearInterval(this.watchdog)
-    const runner = this.runner
-    this.runner = null
-    runner?.dispose()
     for (const waiter of this.#canSendWaiters) waiter.reject(new Error('bot_disposed'))
+    await this.#queue
+    await this.#connecting
+    const runner = this.runner
     try {
-      if (runner) this.store.saveChatLater(this.chat.id, runner.snapshot())
+      if (runner) {
+        await runner.quiesce()
+        this.store.saveChatLater(this.chat.id, runner.snapshot())
+      }
+      this.runner = null
       await this.store.flush()
     } finally {
       await this.adapter?.shutdown()
@@ -92,8 +105,13 @@ export class Bot extends EventEmitter {
 
   // ── adapter connection ──────────────────────────────────────────────────
 
-  async #connect() {
-    if (this.#disposed) return
+  // Never rejects: a failed attempt closes the adapter, and its 'close' schedules the next one.
+  #connect() {
+    if (this.#disposed) return Promise.resolve()
+    return this.#connecting ??= this.#connectOnce().finally(() => { this.#connecting = null })
+  }
+
+  async #connectOnce() {
     let adapter
     this.#statusSeen = false
     try {
@@ -102,7 +120,7 @@ export class Bot extends EventEmitter {
       adapter.on('status', status => this.#onStatus(status))
       adapter.on('account', account => this.#onAccount(account))
       adapter.on('message', message => {
-        if (message.chatId === this.chat?.id) this.runner?.receive(message)
+        if (!this.#disposed && message.chatId === this.chat?.id) this.runner?.receive(message)
       })
       adapter.once('close', () => this.#onClose(adapter))
       const info = await adapter.initialize({ dataDir: this.dataDir, client: { name: 'dsh-wechat-bot', version: '1' } })
@@ -111,7 +129,6 @@ export class Bot extends EventEmitter {
       await this.#onAccount(await adapter.accountStatus())
     } catch (error) {
       this.note('error', `适配器启动失败：${error.message}`)
-      // Ends the process too; the resulting 'close' schedules the next attempt.
       await adapter?.shutdown()
     }
   }
@@ -124,7 +141,8 @@ export class Bot extends EventEmitter {
     this.#changed()
     const delay = BACKOFF_MS[Math.min(this.#restarts++, BACKOFF_MS.length - 1)]
     this.note('warn', `适配器已断开，${delay / 1000} 秒后重连`)
-    this.restartTimer = setTimeout(() => this.#connect(), delay)
+    // After the failed attempt has finished closing (otherwise #connect would just return it).
+    this.restartTimer = setTimeout(() => (this.#connecting ?? Promise.resolve()).then(() => this.#connect()), delay)
     this.restartTimer.unref?.()
   }
 
@@ -227,7 +245,9 @@ export class Bot extends EventEmitter {
     const chat = this.chat
     await this.adapter.watch(chat ? [chat.id] : [])
     if (!chat || this.runner) return this.#changed()
-    this.runner = this.#createRunner(chat, await this.store.loadChat(chat.id))
+    const state = await this.store.loadChat(chat.id)
+    if (this.#disposed) return
+    this.runner = this.#createRunner(chat, state)
     try {
       this.runner.prime(await this.adapter.history(chat.id, this.runner.settings.recentLimit))
     } catch (error) {
@@ -240,7 +260,9 @@ export class Bot extends EventEmitter {
 
   #createRunner(chat, state) {
     const runner = new ChatRunner({
-      chat, state, persona: this.persona, commands: this.commands, settings: this.settings, models: this.models,
+      chat, state, persona: this.personas ? () => this.personas.text() : this.persona, personas: this.personas,
+      commands: this.commands, settings: this.settings, models: this.models,
+      memory: this.store.memoryFor(chat.id, message => this.note('warn', message)),
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),
@@ -258,6 +280,7 @@ export class Bot extends EventEmitter {
       emit: (type, payload) => {
         if (runner !== this.runner) return
         if (type === 'log') this.emit('chat-log', payload)
+        if (type === 'memory-changed') this.emit('memory-changed', chat)
         this.store.saveChatLater(chat.id, () => runner.snapshot())
         this.#changed()
       },

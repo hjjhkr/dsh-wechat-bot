@@ -1,4 +1,5 @@
 import { createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { loadAgentInstructions } from './agent-instructions.js'
 
 export class ModelError extends Error {
   constructor(code, detail) {
@@ -43,12 +44,13 @@ function shownFor(readable, messages) {
  * @param {() => {provider, model, maxTokens, reasoningEffort}} o.route
  * @param {(chat) => Promise<import('./session.js').ChatSession | undefined>} [o.mirror]
  */
-export function createThink({ llm, route, mirror }) {
+export function createThink({ llm, route, mirror, role }) {
   return async ({ chat, system, messages, readable, effort, signal }) => {
     const r = route()
     const reasoningEffort = effort ?? r.reasoningEffort
     const request = {
-      provider: r.provider, model: r.model, reasoningEffort, system,
+      provider: r.provider, model: r.model, reasoningEffort,
+      system: role ? `${loadAgentInstructions(role)}\n\n${system}` : system,
       messages: toLlmMessages(messages, r),
       // Thinking tokens share the budget, so a deliberate answer gets more room.
       maxTokens: reasoningEffort === 'off' ? r.maxTokens : r.maxTokens * 8,

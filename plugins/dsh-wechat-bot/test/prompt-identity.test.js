@@ -125,6 +125,8 @@ test('the rules tie authorship and memory to ids, and drop the memory format whe
   assert.match(prompt, /不需要对方说"记住"/)
   assert.match(prompt, /who 必须是 evidence 那条消息的作者 id/)
   assert.match(prompt, /"memory":\[\]/)
+  assert.match(prompt, /只输出一个 JSON 对象，不要代码块，不要其它文字/)
+  assert.match(prompt, /普通括号.*颜文字.*字符串/)
 
   const withLearner = systemPrompt('人设', { maxParts: 3, stickers: [], memory: false })
   assert.doesNotMatch(withLearner, /memory：|"memory"/, 'the reply model is not asked for notes nobody uses')
