@@ -2,7 +2,6 @@ import { CommandDefinitionId } from '@deepseek-ai/dsh-commands/brand'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { MODES } from './commands.js'
 import { STYLES } from './engagement.js'
-import { disposeInReverseOrder, registerPageLifetimeRoute } from './page-lifetime.js'
 
 // The DSH-facing surface of WeChatBotApp: console HTTP routes, the `/wechat`
 // command and the `wechat_bot` agent tool. Each is a thin adapter over the
@@ -18,7 +17,7 @@ export function registerRoutes(ctx, app, pageLifetime) {
     fetch: async request => {
       const session = new URL(request.url).searchParams.get('session')
       const workspace = session && ctx.workspaceRegistry.list().find(w => w.sessionIds.includes(session))?.path
-      return json({ ...app.state(), here: { session, workspace }, pageLifetime: pageLifetime.snapshot() })
+      return json({ ...app.state(), here: { session, workspace }, pageLifetime: pageLifetime.view() })
     },
   })
   register({
@@ -41,13 +40,11 @@ export function registerRoutes(ctx, app, pageLifetime) {
       }
     },
   })
-  disposers.push(registerPageLifetimeRoute(ctx.connection.fetch, pageLifetime))
-  let disposal
-  return () => {
-    if (disposal) return disposal
-    disposal = disposeInReverseOrder(disposers)
-    return disposal
-  }
+  register({
+    path: '/api/wechat-bot.page-lifetime', methods: ['GET'], requestBody: 'buffered',
+    fetch: request => pageLifetime.handle(request),
+  })
+  return () => disposers.forEach(dispose => dispose())
 }
 
 function runAction(app, { action, ...args }) {

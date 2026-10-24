@@ -35,7 +35,7 @@ export function dataDirOf(config) {
 export class WeChatBotApp {
   sessions = new Map()
   maintenanceSessions = new Map()
-  #disposePromise = null
+  #disposing = null
 
   static async create(ctx, config) {
     const app = new WeChatBotApp(ctx, config)
@@ -43,11 +43,8 @@ export class WeChatBotApp {
       await app.#start()
       return app
     } catch (error) {
-      // Startup may already own an adapter when the native session fails.
-      if (app.bot) {
-        try { await app.dispose() }
-        catch (cleanupError) { throw new AggregateError([error, cleanupError], '微信机器人启动和清理失败') }
-      }
+      // Startup may already own an adapter; do not leave it running.
+      if (app.bot) await app.dispose().catch(() => {})
       throw error
     }
   }
@@ -116,21 +113,16 @@ export class WeChatBotApp {
   }
 
   dispose() {
-    if (this.#disposePromise) return this.#disposePromise
-    this.#disposePromise = (async () => {
-      const failures = []
-      try { await this.memoryMaintenance?.dispose() }
-      catch (error) { failures.push(error) }
-      try { await this.bot.dispose() }
-      catch (error) { failures.push(error) }
-      const results = await Promise.allSettled([...this.sessions.values(), ...this.maintenanceSessions.values()].map(async pending => (await pending).dispose()))
-      failures.push(...results.filter(result => result.status === 'rejected').map(result => result.reason))
-      this.sessions.clear()
-      this.maintenanceSessions.clear()
-      if (failures.length === 1) throw failures[0]
-      if (failures.length > 1) throw new AggregateError(failures, '微信机器人和 DSH 会话关闭失败')
+    return this.#disposing ??= (async () => {
+      await this.memoryMaintenance?.dispose()
+      try {
+        await this.bot.dispose()
+      } finally {
+        await Promise.allSettled([...this.sessions.values(), ...this.maintenanceSessions.values()].map(async pending => (await pending).dispose()))
+        this.sessions.clear()
+        this.maintenanceSessions.clear()
+      }
     })()
-    return this.#disposePromise
   }
 
   // A per-call effort (e.g. /ask's "high") falls back to the current one if the model lacks it.
@@ -172,7 +164,7 @@ export class WeChatBotApp {
   }
 
   #observeMemory(chat) {
-    if (this.#disposePromise || !this.setup?.completedAt) return
+    if (this.#disposing || !this.setup?.completedAt) return
     this.memoryMaintenance.observe(chat).catch(error => this.bot.note('error', `记忆整理检查失败：${error.message}`))
   }
 
@@ -214,7 +206,7 @@ export class WeChatBotApp {
   }
 
   compactMemory(chatId) {
-    if (this.#disposePromise) throw new Error('微信机器人正在关闭')
+    if (this.#disposing) throw new Error('微信机器人正在关闭')
     if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
     const chat = this.bot.chat
     if (!chat || chat.id !== chatId) throw new Error('服务的群已改变，请刷新控制台后再整理')

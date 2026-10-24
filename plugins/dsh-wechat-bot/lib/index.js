@@ -1,10 +1,11 @@
 import z from '@deepseek-ai/schemastery'
 import { WeChatBotApp } from './app.js'
-import { createHostDisposer, PageLifetime } from './page-lifetime.js'
+import { PageLifetime } from './page-lifetime.js'
 import { registerCommand, registerRoutes, registerTool } from './surface.js'
 
 export const name = 'dsh-wechat-bot'
-export const inject = ['llm', 'connection', 'commands', 'tools', 'sessions', 'agents', 'sessionPersistence', 'sessionTitle', 'workspaceRegistry', 'appExit']
+// appExit (for exitWithPage) is looked up at runtime: not every host provides it, and the plugin must load without it.
+export const inject = ['llm', 'connection', 'commands', 'tools', 'sessions', 'agents', 'sessionPersistence', 'sessionTitle', 'workspaceRegistry']
 
 export const Config = z.object({
   exitWithPage: z.boolean().default(false).description('Exit this DSH process after the last authenticated browser page closes.'),
@@ -54,15 +55,19 @@ export const Config = z.object({
 export function apply(ctx, config) {
   ctx.effect(async () => {
     const app = await WeChatBotApp.create(ctx, config)
+    const exit = config.exitWithPage ? ctx.get('appExit') : undefined
+    if (config.exitWithPage && !exit) app.bot.note('warn', '这个 DSH 不提供 appExit，exitWithPage 不生效')
     const pageLifetime = new PageLifetime({
-      enabled: config.exitWithPage,
-      exit: ctx.appExit,
-      shutdown: () => app.dispose(),
-      onError: error => app.bot.note('error', `页面关闭安全关停失败，DSH保持运行：${error.message}`),
+      enabled: config.exitWithPage, exit, shutdown: () => app.dispose(),
+      onError: error => app.bot.note('error', `页面关闭时停止机器人出错（照常退出）：${error.message}`),
     })
     const disposeRoutes = registerRoutes(ctx, app, pageLifetime)
     registerCommand(ctx, app)
     registerTool(ctx, app)
-    return createHostDisposer({ disposeRoutes, pageLifetime, app })
+    return async () => {
+      disposeRoutes()
+      pageLifetime.dispose()
+      await app.dispose()
+    }
   }, 'wechat-bot')
 }

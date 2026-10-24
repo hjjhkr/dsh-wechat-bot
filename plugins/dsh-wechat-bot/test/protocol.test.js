@@ -79,16 +79,10 @@ test('an adapter that fails the handshake is ended, not leaked, before the next 
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(line).id, result: { protocolVersion: 2 } }) + '\n')
   })`
   const spawned = []
-  const shutdownModes = []
   const bot = new Bot({
     dataDir, store: new Store(dataDir), persona: '', think: async () => '',
     createAdapter: () => {
       const client = spawnAdapter({ command: process.execPath, args: ['-e', script] })
-      const shutdown = client.shutdown.bind(client)
-      client.shutdown = async options => {
-        shutdownModes.push(options?.strict === true ? 'strict' : 'normal')
-        return shutdown(options)
-      }
       spawned.push(client)
       return client
     },
@@ -99,7 +93,6 @@ test('an adapter that fails the handshake is ended, not leaked, before the next 
   assert.notEqual(await spawned[0].exited, undefined, 'the first process exited before the retry')
   await bot.dispose()
   await Promise.all(spawned.map(client => client.exited))
-  assert.deepEqual(shutdownModes, ['normal', 'normal'], 'handshake failures use their existing cleanup and are never raced by strict shutdown')
 })
 
 test('an account reported ready must say which account it is', () => {

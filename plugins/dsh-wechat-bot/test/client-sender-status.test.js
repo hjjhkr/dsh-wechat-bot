@@ -274,113 +274,6 @@ test('the reserved window control calls window/set through the existing console 
   assert.ok(requests.some(body => body.action === 'window' && body.visible === true))
 })
 
-test('the page lease is a same-origin authenticated fetch stream owned by the global client fiber', async () => {
-  const state = makeState('sender_prepare_failed', {
-    chat: selectedChat,
-    pageLifetime: { enabled: true, pages: 0, closing: false },
-  })
-
-  const streams = []
-  const client = await renderClient(state, { pageResponses: [init => streamResponse(init.signal, streams)] })
-
-  await client.flush()
-
-  assert.equal(client.pageStateReads, 0, 'the lease does not wait for the state route')
-  assert.equal(client.pageRequests.length, 1)
-  assert.equal(client.pageRequests[0].url, '/api/wechat-bot.page-lifetime')
-  assert.equal(client.pageRequests[0].init.credentials, 'same-origin')
-  assert.equal(client.pageRequests[0].init.cache, 'no-store')
-  assert.equal(client.pageRequests[0].init.headers.Accept, 'text/event-stream')
-  assert.equal(streams[0].reading, true)
-  assert.equal(client.pageRequests[0].init.signal.aborted, false)
-  await client.dispose()
-  assert.equal(client.pageRequests[0].init.signal.aborted, true, 'fiber disposal aborts the active fetch stream')
-})
-
-test('the initial missing host route retries until the page lease route becomes ready', async () => {
-  const streams = []
-  const client = await renderClient(makeState('sender_prepare_failed'), {
-    pageResponses: [emptyResponse(404), init => streamResponse(init.signal, streams)],
-  })
-  await client.flush()
-
-  assert.equal(client.pageRequests.length, 1)
-  assert.equal(client.pendingTimers, 1)
-  assert.equal(client.runNextTimeout(), 250)
-  await client.flush()
-
-  assert.equal(client.pageRequests.length, 2)
-  assert.equal(streams[0].reading, true, 'the retry holds a lease after the host route appears')
-  assert.equal(client.pageRequests[1].init.signal.aborted, false)
-  assert.equal(client.pendingTimers, 0)
-  await client.dispose()
-  assert.equal(client.pageRequests[1].init.signal.aborted, true)
-})
-
-test('a closed page lease stream reconnects within the five-second exit grace', async () => {
-  const streams = []
-  const client = await renderClient(makeState('sender_prepare_failed'), {
-    pageResponses: [init => streamResponse(init.signal, streams), init => streamResponse(init.signal, streams)],
-  })
-  await client.flush()
-
-  streams[0].finish()
-  await client.flush()
-
-  assert.equal(client.pendingTimers, 1)
-  assert.equal(client.runNextTimeout(), 250)
-  await client.flush()
-  assert.equal(client.pageRequests.length, 2)
-  assert.equal(streams[1].reading, true)
-  await client.dispose()
-})
-
-test('disposing the client fiber cancels a pending page lease retry', async () => {
-  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(404)] })
-  await client.flush()
-
-  assert.equal(client.pageRequests.length, 1)
-  assert.equal(client.pendingTimers, 1)
-  await client.dispose()
-
-  assert.equal(client.pendingTimers, 0)
-  assert.equal(client.runNextTimeout(), false)
-  await client.flush()
-  assert.equal(client.pageRequests.length, 1)
-})
-
-test('a disabled host lease returns 204 and stops without polling', async () => {
-  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(204)] })
-  await client.flush()
-
-  assert.equal(client.pageRequests.length, 1)
-  assert.equal(client.pendingTimers, 0)
-  assert.equal(client.runNextTimeout(), false)
-  await client.dispose()
-  assert.equal(client.pageRequests.length, 1)
-})
-
-test('a nontransient lease HTTP error is reported and does not enter the retry loop', async () => {
-  const client = await renderClient(makeState('sender_prepare_failed'), { pageResponses: [emptyResponse(401)] })
-  await client.flush()
-
-  assert.equal(client.pageRequests.length, 1)
-  assert.equal(client.pendingTimers, 0)
-  assert.match(String(client.errors[0]?.[0]), /HTTP 401/)
-  await client.dispose()
-})
-
-test('the page lease opens even when the initial page state request is still pending', async () => {
-  const streams = []
-  const client = await renderClient(makeState('sender_prepare_failed'), {
-    pageResponses: [init => streamResponse(init.signal, streams)], pendingPageState: true,
-  })
-
-  assert.deepEqual(client.pageRequests.map(request => request.url), ['/api/wechat-bot.page-lifetime'])
-  assert.equal(client.pageStateReads, 0)
-  await client.dispose()
-})
-
 test('sender preparation failure is visible and retries the currently selected chat through watch', async () => {
   const { tree, requests } = await renderClient(makeState('sender_prepare_failed', { chat: selectedChat }))
 
@@ -442,16 +335,6 @@ test('memory maintenance displays per-user conflicts without hiding successful r
   assert.match(textContent(client.tree), /wxid_b：memory_conflict/)
   assert.equal(findButton(client.tree, '整理记忆').props.disabled, false)
   await client.dispose()
-})
-
-test('the sibling-key audit detects the old duplicate key even when the VM renders function components immediately', async () => {
-  const legacySource = clientSource
-    .replace('key: `memory:${current.id}`', 'key: current.id')
-    .replace('key: `chat-log:${current.id}`', 'key: current.id')
-  const state = makeState(null, { chat: selectedChat })
-  const legacy = await renderClient(state, { source: legacySource })
-  assert.throws(() => assertConsoleChatKeys(legacy), /duplicate sibling keys/i)
-  await legacy.dispose()
 })
 
 test('memory maintenance remains a single card through ten state polls and a group switch', async () => {

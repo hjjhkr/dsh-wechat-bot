@@ -301,124 +301,21 @@ window.__ModuleLoader__.load({
     return {
       inject: ['slots', 'sidebarRightTabs', 'sidebarRight'],
       apply(ctx) {
+        // Holds the page-lifetime stream while this page is open (used by exitWithPage).
+        // EventSource reconnects by itself after a dropped connection; after an HTTP error
+        // (e.g. the plugin is reloading) it gives up, so try again a little later.
         ctx.effect(() => {
-          const retryDelays = [250, 500, 1000, 2000, 5000]
-          let stopped = false
-          let retryTimer = null
-          let activeController = null
-          let retryAttempt = 0
-          let warned = false
-
-          function scheduleRetry(error) {
-            if (stopped) return
-            if (!warned) {
-              console.warn(`[wechat-bot] page lease reconnecting: ${error instanceof Error ? error.message : String(error)}`)
-              warned = true
-            }
-            const delay = retryDelays[Math.min(retryAttempt, retryDelays.length - 1)]
-            retryAttempt++
-            retryTimer = setTimeout(() => {
-              retryTimer = null
-              void openLease().catch(stopWithError)
-            }, delay)
-          }
-
-          function stopWithError(error) {
-            if (stopped) return
-            stopped = true
-            if (retryTimer !== null) {
-              clearTimeout(retryTimer)
-              retryTimer = null
-            }
-            if (activeController !== null) {
-              activeController.abort()
-              activeController = null
-            }
-            console.error(`[wechat-bot] page lease stopped: ${error instanceof Error ? error.message : String(error)}`)
-          }
-
-          async function openLease() {
-            if (stopped) return
-            const controller = new AbortController()
-            activeController = controller
-            let response
-            try {
-              response = await fetch('/api/wechat-bot.page-lifetime', {
-                method: 'GET',
-                headers: { Accept: 'text/event-stream' },
-                cache: 'no-store',
-                credentials: 'same-origin',
-                signal: controller.signal,
-              })
-            } catch (error) {
-              if (activeController === controller) activeController = null
-              if (!stopped && !controller.signal.aborted) scheduleRetry(error)
-              return
-            }
-
-            if (stopped || controller.signal.aborted) {
-              if (activeController === controller) activeController = null
-              await response.body?.cancel()
-              return
-            }
-            if (response.status === 204) {
-              if (activeController === controller) activeController = null
-              return
-            }
-            if (response.status === 404) {
-              if (activeController === controller) activeController = null
-              await response.body?.cancel()
-              scheduleRetry(new Error('HTTP 404: page lease route is not ready'))
-              return
-            }
-            if (response.status !== 200) {
-              if (activeController === controller) activeController = null
-              await response.body?.cancel()
-              throw new Error(`HTTP ${response.status}`)
-            }
-
-            const contentType = response.headers.get('content-type')
-            if (!/^text\/event-stream(?:\s*;|$)/i.test(contentType ?? '')) {
-              if (activeController === controller) activeController = null
-              await response.body?.cancel()
-              throw new Error(`unexpected content type: ${contentType ?? '(missing)'}`)
-            }
-            const reader = response.body?.getReader()
-            if (!reader) {
-              if (activeController === controller) activeController = null
-              throw new Error('page lease response has no readable body')
-            }
-
-            retryAttempt = 0
-            warned = false
-            let streamError = null
-            try {
-              while (!stopped) {
-                const result = await reader.read()
-                if (result.done) break
-              }
-            } catch (error) {
-              if (!stopped && !controller.signal.aborted) streamError = error
-            } finally {
-              if (activeController === controller) activeController = null
-              reader.releaseLock()
-            }
-            if (!stopped && !controller.signal.aborted) {
-              scheduleRetry(streamError ?? new Error('page lease stream closed'))
+          let source, timer
+          const open = () => {
+            source = new EventSource('/api/wechat-bot.page-lifetime')
+            source.onerror = () => {
+              if (source.readyState === EventSource.CLOSED) timer = setTimeout(open, 5000)
             }
           }
-
-          void openLease().catch(stopWithError)
+          open()
           return () => {
-            stopped = true
-            if (retryTimer !== null) {
-              clearTimeout(retryTimer)
-              retryTimer = null
-            }
-            if (activeController !== null) {
-              activeController.abort()
-              activeController = null
-            }
+            clearTimeout(timer)
+            source.close()
           }
         }, 'wechat-bot: page lifetime')
 

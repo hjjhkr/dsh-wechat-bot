@@ -81,9 +81,7 @@ class Interrupted extends Error {
 // Commands are the exception: they run on arrival, their output jumps the send
 // queue, and state-changing ones interrupt an answer still being thought out.
 export class ChatRunner {
-  #activeRuns = new Set()
-  #sendOperations = new Set()
-  #quiescePromise = null
+  #work = new Set() // turns, sends, commands and /cron ticks in progress
 
   /**
    * @param {object} o
@@ -131,7 +129,6 @@ export class ChatRunner {
     this.echoes = []
     this.status = 'idle'
     this.busySince = 0
-    this.quiescing = false
     this.turn = null
     this.abort = new AbortController()
     this.lane = new SendLane()
@@ -222,22 +219,18 @@ export class ChatRunner {
     clearTimeout(this.cronTimer)
   }
 
-  quiesce() {
-    if (this.#quiescePromise) return this.#quiescePromise
-    this.quiescing = true
-    this.disposed = true
-    this.batcher.clear()
-    clearTimeout(this.idleTimer)
-    clearTimeout(this.cronTimer)
-    this.abort.abort(new Error('bot_quiescing'))
-    this.learner?.dispose()
-    this.#quiescePromise = (async () => {
-      while (this.#activeRuns.size || this.#sendOperations.size) {
-        await Promise.allSettled([...this.#activeRuns, ...this.#sendOperations])
-      }
-      await this.memoryDocuments?.flush()
-    })()
-    return this.#quiescePromise
+  // Stops like dispose() and resolves once the work already in progress has finished:
+  // a reply part being sent, a command, a /cron tick.
+  async quiesce() {
+    this.dispose()
+    while (this.#work.size) await Promise.allSettled([...this.#work])
+    await this.memoryDocuments?.flush()
+  }
+
+  #track(promise) {
+    this.#work.add(promise)
+    promise.then(() => this.#work.delete(promise), () => this.#work.delete(promise))
+    return promise
   }
 
   // How long the runner has been thinking or sending without finishing (0 when idle or waiting).
@@ -286,7 +279,7 @@ export class ChatRunner {
   }
 
   #receive(message) {
-    if (this.disposed || this.quiescing || this.seen.has(message.id)) return
+    if (this.disposed || this.seen.has(message.id)) return
     this.#remember(message.id)
     // Our own reply coming back (by id, or by text when the adapter only queued it).
     if (message.fromSelf && (this.sentIds.has(message.id) || this.#isEcho(message))) return
@@ -310,7 +303,7 @@ export class ChatRunner {
     const parsed = message.kind === 'text' ? parseCommand(message.text) : null
     const command = parsed && this.commands.get(parsed.name)
     if (command) {
-      this.#command(message, command, parsed).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
+      this.#track(this.#command(message, command, parsed)).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
       return
     }
     this.arrivedAt.set(message, Date.now())
@@ -579,11 +572,8 @@ export class ChatRunner {
     }
   }
 
-  async #run(batch, event) {
-    const run = this.#runBatch(batch, event)
-    this.#activeRuns.add(run)
-    run.then(() => this.#activeRuns.delete(run), () => this.#activeRuns.delete(run))
-    return run
+  #run(batch, event) {
+    return this.#track(this.#runBatch(batch, event))
   }
 
   async #runBatch(batch, event) {
@@ -594,7 +584,7 @@ export class ChatRunner {
       if (!this.disposed) this.#write('error', { message: error.message, code: error.code })
     } finally {
       this.#setStatus(deferMs ? 'throttled' : 'idle')
-      if (!this.disposed && !this.quiescing) {
+      if (!this.disposed) {
         if (deferMs) this.batcher.defer(deferMs)
         else this.batcher.release()
       }
@@ -841,20 +831,7 @@ export class ChatRunner {
 
   // All sends go through one lane, so command output (urgent) overtakes reply parts.
   #sendOne(content, clientId, { urgent = false, ...options }) {
-    if (this.disposed || this.quiescing) {
-      this.#write('dropped', { reason: 'shutdown', clientId })
-      return Promise.resolve(null)
-    }
-    const operation = this.lane.run(() => {
-      if (this.disposed || this.quiescing) {
-        this.#write('dropped', { reason: 'shutdown', clientId })
-        return null
-      }
-      return this.#sendNow(content, clientId, options)
-    }, { urgent })
-    this.#sendOperations.add(operation)
-    operation.then(() => this.#sendOperations.delete(operation), () => this.#sendOperations.delete(operation))
-    return operation
+    return this.#track(this.lane.run(() => this.#sendNow(content, clientId, options), { urgent }))
   }
 
   // Waits while sending is impossible (e.g. locked screen), drops the reply once
@@ -870,7 +847,6 @@ export class ChatRunner {
         try {
           await this.link.whenCanSend(this.abort.signal)
         } catch {
-          if (this.quiescing) this.#write('dropped', { reason: 'shutdown', clientId })
           return null
         }
         if (ownsStatus && this.status === 'waiting') this.#setStatus('sending')
@@ -885,12 +861,7 @@ export class ChatRunner {
         const result = await this.link.send(content, clientId)
         return { messageId: result?.messageId ?? clientId }
       } catch (error) {
-        if (this.quiescing) {
-          this.counters.sendErrors++
-          this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
-          return null
-        }
-        if (error.code === ErrorCode.Unavailable) {
+        if (error.code === ErrorCode.Unavailable && !this.disposed) {
           await sleep(this.settings.retryDelayMs)
           continue
         }
@@ -900,7 +871,8 @@ export class ChatRunner {
         }
         // A duplicate message is worse than a missing one, so anything but a definite failure is final.
         this.counters.sendErrors++
-        this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed, clientId })
+        // 'closed': the adapter was shutting down and never got it.
+        this.#write('send_error', { code: error.code, message: error.message, uncertain: error.code !== ErrorCode.SendFailed && error.code !== 'closed', clientId })
         return null
       }
     }
@@ -914,7 +886,7 @@ export class ChatRunner {
     const next = this.cron.nextAt()
     if (next === Infinity) return
     const wait = delay ?? Math.min(Math.max(0, next - Date.now()), CRON_TICK_MS)
-    this.cronTimer = setTimeout(() => this.#cronTick().catch(error => this.#write('error', { message: `定时：${error.message}` })), Math.min(wait, CRON_TICK_MS))
+    this.cronTimer = setTimeout(() => this.#track(this.#cronTick()).catch(error => this.#write('error', { message: `定时：${error.message}` })), Math.min(wait, CRON_TICK_MS))
     this.cronTimer.unref?.()
   }
 

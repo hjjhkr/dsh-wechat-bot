@@ -12,7 +12,7 @@ export class AdapterClient extends EventEmitter {
   info = null
   capabilities = parseCapabilities()
   #inFlightSends = new Set()
-  #sendAdmissionClosed = false
+  #closing = false
 
   constructor(peerOptions, { timeoutMs = 30_000, sendTimeoutMs = 90_000 } = {}) {
     super()
@@ -91,9 +91,8 @@ export class AdapterClient extends EventEmitter {
   }
 
   send(chatId, clientId, content) {
-    if (this.#sendAdmissionClosed) {
-      return Promise.reject(new ProtocolError('closed', 'adapter is shutting down'))
-    }
+    // Nothing was written to the adapter, so this send definitely did not happen.
+    if (this.#closing) return Promise.reject(new ProtocolError('closed', 'adapter is shutting down'))
     const request = this.#sendRequest(chatId, clientId, content)
     let tracked
     tracked = request.finally(() => this.#inFlightSends.delete(tracked))
@@ -101,11 +100,6 @@ export class AdapterClient extends EventEmitter {
     return tracked
   }
 
-  async waitForSends() {
-    while (this.#inFlightSends.size > 0) {
-      await Promise.allSettled([...this.#inFlightSends])
-    }
-  }
 
   async fetchMedia(chatId, messageId) {
     if (!this.capabilities.mediaFetch) throw new ProtocolError('unsupported', 'adapter cannot fetch media')
@@ -128,26 +122,19 @@ export class AdapterClient extends EventEmitter {
     return this.#call('sim/inject', params)
   }
 
-  async shutdown(options = {}) {
-    if (options?.strict === true) {
-      this.#sendAdmissionClosed = true
-      await this.waitForSends()
-      const timeoutMs = options.timeoutMs ?? 30_000
-      const result = await this.#call('shutdown', {}, timeoutMs)
-      if (result === null || typeof result !== 'object' || Array.isArray(result)) {
-        throw new ProtocolError('invalid_response', 'adapter shutdown acknowledgement was invalid')
-      }
-      return result
-    }
-    try {
-      await this.#call('shutdown', {}, 5_000)
-    } catch {}
+  // Takes no new sends, lets the ones in flight finish (each has its own timeout, so the
+  // outcome of every send is known before the adapter goes), then asks it to exit.
+  async shutdown() {
+    this.#closing = true
+    while (this.#inFlightSends.size) await Promise.allSettled([...this.#inFlightSends])
+    await this.#call('shutdown', {}, Math.min(this.timeoutMs, 5_000)).catch(() => {})
     this.peer.close()
   }
 }
 
 // Launches an adapter executable speaking the protocol on stdio.
-export function spawnAdapter({ command, args = [], cwd, env }, options) {
+// `stopGraceMs`: how long it may take to exit after a requested shutdown before it is killed.
+export function spawnAdapter({ command, args = [], cwd, env }, { stopGraceMs = 10_000, ...options } = {}) {
   const child = spawn(command, args, {
     cwd, env: { ...process.env, PYTHONIOENCODING: 'utf-8', ...env },
     stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true,
@@ -156,22 +143,14 @@ export function spawnAdapter({ command, args = [], cwd, env }, options) {
   createInterface({ input: child.stderr }).on('line', line => client.emit('log', { level: 'debug', message: line }))
   // Writing to a process that just died must not crash the host.
   child.stdin.on('error', () => client.peer.close())
-  let strictShutdownRequested = false
-  let peerCloseKillTimer
-  let startError
   // A closed connection means the process is of no further use; never leave it running.
-  client.peer.closed.then(() => {
-    if (!strictShutdownRequested && child.exitCode === null && child.signalCode === null) {
-      peerCloseKillTimer = setTimeout(() => {
-        if (!strictShutdownRequested && child.exitCode === null && child.signalCode === null) child.kill()
-      }, 1_000)
-      peerCloseKillTimer.unref()
-    }
-  })
+  // After a requested shutdown it gets longer to clean up (e.g. close its WeChat window).
+  let stopping = false
+  const kill = () => child.exitCode === null && child.signalCode === null && child.kill()
+  client.peer.closed.then(() => setTimeout(kill, stopping ? stopGraceMs : 1_000).unref())
   // Resolves with the exit code (or null if the process never started).
   client.exited = new Promise(resolve => {
     child.once('error', error => {
-      startError = error
       client.emit('log', { level: 'error', message: `adapter failed to start: ${error.message}` })
       client.peer.close()
       resolve(null)
@@ -182,54 +161,10 @@ export function spawnAdapter({ command, args = [], cwd, env }, options) {
     })
   })
   const shutdown = client.shutdown.bind(client)
-  client.shutdown = async (shutdownOptions = {}) => {
-    if (shutdownOptions?.strict === true) {
-      strictShutdownRequested = true
-      if (peerCloseKillTimer) clearTimeout(peerCloseKillTimer)
-      const timeoutMs = shutdownOptions.timeoutMs ?? 30_000
-      try {
-        await shutdown({ ...shutdownOptions, timeoutMs })
-      } catch (error) {
-        if (startError) {
-          throw new Error(`adapter process failed before shutdown acknowledgement: ${startError.message}`, { cause: error })
-        }
-        if (child.exitCode !== null || child.signalCode !== null) {
-          throw new Error(
-            `adapter exited before shutdown acknowledgement (exitCode=${child.exitCode}, signal=${child.signalCode})`,
-            { cause: error },
-          )
-        }
-        throw error
-      }
-      let exitCode
-      try {
-        exitCode = await waitForChildExit(client.exited, timeoutMs)
-      } catch (error) {
-        if (startError) {
-          throw new Error(`adapter process failed while shutting down: ${startError.message}`, { cause: error })
-        }
-        throw error
-      }
-      if (exitCode !== 0) {
-        throw new Error(`adapter exited after shutdown with code ${exitCode ?? 'unknown'} (signal=${child.signalCode})`)
-      }
-      return
-    }
-    await shutdown(shutdownOptions)
-    const timer = setTimeout(() => child.kill(), 3_000)
+  client.shutdown = async () => {
+    stopping = true
+    await shutdown()
     await client.exited
-    clearTimeout(timer)
   }
   return client
-}
-
-function waitForChildExit(exited, timeoutMs) {
-  let timer
-  return Promise.race([
-    exited,
-    new Promise((resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(`adapter process did not exit within ${timeoutMs}ms after shutdown`)), timeoutMs)
-      timer.unref?.()
-    }),
-  ]).finally(() => clearTimeout(timer))
 }
