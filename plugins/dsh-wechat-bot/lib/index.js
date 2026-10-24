@@ -15,7 +15,8 @@ export const Config = z.object({
     env: z.dict(z.string()).default({}),
   }).default({}),
   dataDir: z.string().default('').description('State directory. Empty = <DSH_HOME>/wechat-bot.'),
-  personaPath: z.string().default('').description('Persona markdown. Empty = bundled persona.'),
+  persona: z.string().default('大肥鱼').description('Default persona: a file name (without .md) in the persona library. /persona switches at runtime.'),
+  personasDir: z.string().default('').description('Persona library folder, maintained by hand. Empty = <dataDir>/personas, seeded with the bundled personas.'),
   commandsDir: z.string().default('').description('Directory of custom chat command scripts (*.js).'),
   model: z.object({
     provider: z.string().default('').description('Empty = the DSH default model.'),

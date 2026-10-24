@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -11,11 +10,12 @@ import { createThink } from './model.js'
 import { ModelControl } from './models.js'
 import { MemoryMaintenance } from './memory-maintenance.js'
 import { ChatSession, liveChatSessionId } from './session.js'
+import { PersonaLibrary } from './personas.js'
 import { Simulator } from './simulator.js'
 import { Store } from './store.js'
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url))
-export const DEFAULT_PERSONA = join(PACKAGE_ROOT, 'personas', 'persona_dafeiyu.md')
+export const BUNDLED_PERSONAS = join(PACKAGE_ROOT, 'personas')
 
 // The built-in simulator, connected in-process. Used until a real adapter is configured.
 function inProcessSimulator(options) {
@@ -61,24 +61,27 @@ export class WeChatBotApp {
 
   async #start() {
     const config = this.config
-    const persona = await readFile(config.personaPath || DEFAULT_PERSONA, 'utf8')
     const commands = new CommandRegistry()
     if (config.commandsDir) await commands.load(config.commandsDir)
     const saved = await this.store.loadBot()
+    this.personas = new PersonaLibrary({
+      dir: config.personasDir || join(this.dataDir, 'personas'), fallback: config.persona, current: saved.persona ?? undefined,
+      save: name => this.store.updateBot({ persona: name ?? null }),
+    })
+    await this.personas.seed(BUNDLED_PERSONAS)
     this.setup = saved.setup ?? null
     this.models = new ModelControl({
       llm: this.ctx.llm, base: () => this.#configuredRoute(), override: saved.modelOverride,
       save: modelOverride => this.store.updateBot({ modelOverride }),
     })
     const { adapter } = config
-    this.persona = persona
     this.memoryMaintenance = new MemoryMaintenance({
       memoryFor: chatId => this.store.memoryFor(chatId),
       think: args => this.#compactThink(args),
       onEvent: event => this.#memoryEvent(event),
     })
     this.bot = new Bot({
-      dataDir: this.dataDir, store: this.store, persona, commands, models: this.models,
+      dataDir: this.dataDir, store: this.store, personas: this.personas, commands, models: this.models,
       settings: {
         ...config.behavior,
         staleMs: config.behavior.staleMinutes * 60_000,
@@ -295,7 +298,7 @@ export class WeChatBotApp {
   async evaluate(efforts = [this.config.model.reasoningEffort]) {
     const think = createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route() })
     const settings = { ...this.bot.settings, typingDelay: false }
-    return formatEval(await runEval({ think, persona: this.persona, settings, efforts }))
+    return formatEval(await runEval({ think, persona: await this.personas.text(), settings, efforts }))
   }
 
   windowState() {

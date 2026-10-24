@@ -99,10 +99,11 @@ export class ChatRunner {
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, account, link, think, learn, commands, emit, persist, models, memoryDocuments }) {
+  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memoryDocuments }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
-    this.persona = persona
+    this.persona = persona // text, or a function reading the current persona before each reply
+    this.personas = personas
     this.account = account
     this.link = link
     this.think = think
@@ -435,6 +436,7 @@ export class ChatRunner {
         }),
         commands: this.commands.list(),
         models: this.models,
+        personas: this.personas,
         selfId: this.account().id,
         members: () => this.#members({ fresh: true }),
         engagement: {
@@ -749,7 +751,8 @@ export class ChatRunner {
     const recent = this.#recent(batch).map(m => this.#withQuoteSender(m))
     const memoryAuthors = this.learner ? batch : [...recent, ...batch]
     const savedMemory = this.memoryDocuments && await this.memoryDocuments.context([...new Set(memoryAuthors.filter(m => !m.fromSelf).map(m => m.sender.id))])
-    const system = systemPrompt(this.persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
+    const persona = typeof this.persona === 'function' ? await this.persona() : this.persona
+    const system = systemPrompt(persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
     const members = await this.#members()
     const input = turnInput({
       chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],

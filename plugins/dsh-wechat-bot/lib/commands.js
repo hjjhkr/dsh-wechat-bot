@@ -232,6 +232,21 @@ export const builtinCommands = [
   engageCommand('comfort', ['安慰']),
   disengageCommand('comfort', ['停止安慰']),
   {
+    name: 'persona',
+    aliases: ['人设'],
+    usage: '/persona [名字|reset]',
+    summary: '查看或切换人设（人设库里的 Markdown 文件，可手工维护）',
+    interrupts: true,
+    run: async ({ args, personas }) => {
+      if (!personas) return '没有配置人设库'
+      const names = await personas.list()
+      if (!args.length) return `当前人设：${personas.name}\n人设库：${names.join('、') || '（空）'}\n用法：/persona 名字，/persona reset 恢复默认（${personas.fallback}）`
+      const reset = ['reset', '默认', '恢复'].includes(args[0].toLowerCase())
+      if (!(await personas.use(reset ? undefined : args.join(' ')))) return `没改成：人设库里没有「${args.join(' ')}」，可选：${names.join('、')}`
+      return `已执行：人设切换为 ${personas.name}`
+    },
+  },
+  {
     name: 'model',
     aliases: ['模型'],
     usage: '/model [模型名 | provider/模型名 | reset]',

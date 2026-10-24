@@ -4,6 +4,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { CommandRegistry, parseCommand } from '../lib/commands.js'
+import { PersonaLibrary } from '../lib/personas.js'
 import { sleep, startBot, until } from './helpers.js'
 
 const GROUP = 'demo@chatroom'
@@ -234,4 +235,52 @@ test('a command reply waiting for an unlock does not disturb the status of the t
   await sleep(50)
   assert.equal(env.bot.runner.status, 'idle', 'not restored to a stale "thinking"')
   assert.equal(env.bot.runner.stuckFor(), 0, 'nothing for the watchdog to mistake as stuck')
+})
+
+test('/persona lists the library, switches, rejects unknown names, and the next reply uses the new persona', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'personas-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(join(dir, '大肥鱼.md'), '你是大肥鱼。')
+  await writeFile(join(dir, '小鲸鱼.md'), '你是小鲸鱼。')
+  let saved = 'unset'
+  const personas = new PersonaLibrary({ dir, fallback: '大肥鱼', save: async name => { saved = name } })
+  const systems = []
+  const env = await startBot(t, { settings: { mode: 'free' }, reply: () => ({ reply: ['好'] }) })
+  env.bot.personas = personas
+  await until(() => env.bot.ready)
+  await env.bot.setChat(GROUP)
+  const think = env.bot.think
+  env.bot.think = args => { systems.push(args.system); return think(args) }
+  const sent = () => env.simulator.messages.get(GROUP).filter(m => m.fromSelf).map(m => m.text)
+  const say = text => env.simulator.inject({ chatId: GROUP, from: 'wxid_alice', text })
+
+  say('/persona')
+  await until(() => sent().some(s => s.startsWith('当前人设：大肥鱼')))
+  assert.match(sent().at(-1), /人设库：大肥鱼、小鲸鱼/)
+  say('/persona 不存在')
+  await until(() => sent().at(-1)?.startsWith('没改成：人设库里没有「不存在」'))
+  say('/persona 小鲸鱼')
+  await until(() => sent().includes('已执行：人设切换为 小鲸鱼'))
+  assert.equal(saved, '小鲸鱼')
+  await writeFile(join(dir, '小鲸鱼.md'), '你是改过的小鲸鱼。') // edited by hand
+  say('大家好')
+  await until(() => systems.length)
+  assert.ok(systems.at(-1).startsWith('你是改过的小鲸鱼。'), 'the edited file is read for the next reply')
+  say('/persona reset')
+  await until(() => sent().includes('已执行：人设切换为 大肥鱼'))
+  assert.equal(saved, undefined)
+})
+
+test('the library is seeded with the bundled personas once; hand edits are never overwritten', async t => {
+  const { readFile } = await import('node:fs/promises')
+  const dir = await mkdtemp(join(tmpdir(), 'personas-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  const bundled = (await import('node:url')).fileURLToPath(new URL('../personas/', import.meta.url))
+  const library = new PersonaLibrary({ dir, fallback: '大肥鱼' })
+  await writeFile(join(dir, '小鲸鱼.md'), '我改过')
+  await library.seed(bundled)
+  assert.deepEqual(await library.list(), ['大肥鱼', '大肥鱼-pro', '小鲸鱼'])
+  assert.equal(await readFile(join(dir, '小鲸鱼.md'), 'utf8'), '我改过')
+  assert.match(await library.text(), /MINI_WHALE_V4/, 'the default persona is 大肥鱼 (mini)')
+  assert.doesNotMatch(await readFile(join(dir, '大肥鱼-pro.md'), 'utf8'), /每条回复最开头必须带/, 'no hidden tag that would be posted to WeChat')
 })
