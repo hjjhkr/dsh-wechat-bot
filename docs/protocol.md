@@ -210,7 +210,7 @@ window/set  params: { visible: boolean }  result: { visible: boolean, running?: 
 params: {}  result: {}
 ```
 
-返回后尽快退出进程（插件 3 秒后会强制结束）。
+插件先停止发新消息、等正在发送的请求都有结果，再发 shutdown。返回后尽快退出进程（插件最多等 10 秒，之后结束进程）。
 
 ---
 
