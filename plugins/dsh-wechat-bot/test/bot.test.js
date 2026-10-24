@@ -332,7 +332,7 @@ test('Markdown memory survives exit while raw chat history is cleared', async t 
   assert.equal(saved.transcript, undefined)
   assert.equal(saved.log, undefined)
   assert.equal(saved.memory, undefined)
-  const path = second.bot.store.memoryFor(GROUP).memoryPath('wxid_alice')
+  const path = second.bot.store.memoryFor(GROUP).pathOf('wxid_alice')
   const document = await readFile(path, 'utf8')
   await writeFile(path, document.replace('养了一只叫豆豆的猫', '喜欢直说重点，回答先给结论'))
   second.simulator.inject({ chatId: GROUP, from: 'wxid_bob', text: '讲讲今天的安排' })

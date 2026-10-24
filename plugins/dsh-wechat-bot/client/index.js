@@ -258,7 +258,7 @@ window.__ModuleLoader__.load({
           h('summary', null, '查看整理结果'),
           state.results.map(result => h('div', { key: result.who, className: result.status === 'failed' ? 'wxb-error' : 'wxb-muted' },
             result.status === 'failed' ? `${result.who}：${result.error}`
-              : result.status === 'skipped' ? `${result.who}：${result.reason === 'cancelled' || result.reason === 'disposed' ? '任务已取消' : result.reason === 'below_threshold' ? '未达 30 个主题，无需自动整理' : '无自动主题，无需整理'}`
+              : result.status === 'skipped' ? `${result.who}：${result.reason === 'cancelled' ? '任务已取消' : '无自动主题，无需整理'}`
                 : `${result.who}：${result.before} → ${result.after} 个主题`))))
     }
 

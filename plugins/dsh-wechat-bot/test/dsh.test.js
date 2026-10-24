@@ -288,8 +288,7 @@ async function maintenanceApp(t, llm, counts) {
   const memory = store.memoryFor(CHAT.id)
   for (const [who, count] of Object.entries(counts)) {
     const evidence = Array.from({ length: count }, (_, i) => ({ id: `${who}-${i}`, sender: { id: who, name: who }, fromSelf: false, text: '我长期保持这个习惯' }))
-    const saved = await memory.context([who])
-    const result = await memory.apply(evidence.map((m, i) => ({ who, topic: `主题${i}`, note: `稳定事实${i}`, evidence: m.id })), evidence, saved.versions)
+    const result = await memory.apply(evidence.map((m, i) => ({ who, topic: `主题${i}`, note: `稳定事实${i}`, evidence: m.id })), evidence)
     assert.equal(result.applied.length, count)
   }
   const config = { dataDir, adapter: { command: '' }, model: ROUTE, aliases: ['小鲸鱼'],
@@ -314,7 +313,7 @@ function retainingLlm() {
 
 test('the console action runs all current-group memories through max native turns without sending WeChat', async t => {
   const llm = retainingLlm()
-  const { app, ctx, attached } = await maintenanceApp(t, llm, { bob: 2, alice: 1 })
+  const { app, ctx, attached } = await maintenanceApp(t, llm, { bob: 2, alice: 3 })
   const routes = []
   const unregister = registerRoutes({ connection: { fetch: { register: route => { routes.push(route); return () => {} } } } }, app,
     { snapshot: () => ({}), handle: () => new Response(null, { status: 204 }) })
@@ -325,7 +324,7 @@ test('the console action runs all current-group memories through max native turn
   }))
   assert.equal(response.status, 200)
   assert.equal((await response.json()).ok, true)
-  await app.memoryMaintenance.whenIdle()
+  await app.memoryMaintenance.flush()
   assert.equal(llm.requests.length, 2)
   assert.deepEqual(llm.requests.map(r => JSON.parse(r.messages.at(-1).content[0].text).who), ['alice', 'bob'])
   assert.ok(llm.requests.every(r => r.reasoningEffort === 'max' && r.maxTokens >= 32768))
@@ -349,27 +348,23 @@ test('startup automatically compacts 30 topics once and preserves 30 independent
   const llm = retainingLlm()
   const { app, memory } = await maintenanceApp(t, llm, { alice: 30 })
   await until(() => llm.requests.length === 1)
-  await app.memoryMaintenance.whenIdle()
+  await app.memoryMaintenance.flush()
   await app.memoryMaintenance.observe(CHAT)
-  await app.memoryMaintenance.whenIdle()
+  await app.memoryMaintenance.flush()
   assert.equal(llm.requests.length, 1)
   assert.equal((await memory.snapshot('alice')).automatic.length, 30)
-  assert.equal(app.state().memoryMaintenance.results[0].changed, false)
 })
 
-test('max-unsupported models fail maintenance explicitly instead of silently lowering effort', async t => {
+test('a model without max thinking tidies memory with the deepest effort it has', async t => {
   const llm = retainingLlm()
-  llm.resolveModelInfo = () => ({ reasoning: { efforts: [{ id: 'off' }] } })
-  const { app, memory } = await maintenanceApp(t, llm, { alice: 1 })
-  const before = await memory.snapshot('alice')
+  llm.resolveModelInfo = () => ({ reasoning: { efforts: [{ id: 'off' }, { id: 'high' }] } })
+  const { app, ctx } = await maintenanceApp(t, llm, { alice: 2 })
   await app.compactMemory(CHAT.id)
-  await app.memoryMaintenance.whenIdle()
-  assert.equal(llm.requests.length, 0)
-  const result = app.state().memoryMaintenance.results[0]
-  assert.equal(result.status, 'failed')
-  assert.match(result.error, /不支持 max/)
-  assert.equal((await memory.snapshot('alice')).version, before.version)
-  assert.equal(app.maintenanceSessions.size, 0)
+  await app.memoryMaintenance.flush()
+  assert.deepEqual(llm.requests.map(r => r.reasoningEffort), ['high'])
+  assert.equal(app.state().memoryMaintenance.results[0].status, 'completed')
+  const mirror = await [...app.maintenanceSessions.values()][0]
+  assert.equal(ctx.sessionTitle.get(mirror.session).title, `记忆整理 · ${CHAT.name} · high`)
 })
 
 test('production reply and learning calls load only their own AGENTS contract', async t => {
@@ -401,7 +396,7 @@ test('the thirtieth learned theme automatically enters maintenance through the l
   app.bot.runner.receive({ id: 'last-stable-fact', chatId: CHAT.id, time: Date.now(),
     kind: 'text', text: '我长期在维护一个编译器项目', fromSelf: false, sender: { id: 'alice', name: '阿甲' }, mentions: [] })
   await until(() => llm.requests.some(request => request.reasoningEffort === 'max'), { timeoutMs: 5000, what: '30th learned theme triggers max maintenance' })
-  await app.memoryMaintenance.whenIdle()
+  await app.memoryMaintenance.flush()
   assert.equal(llm.requests.filter(request => request.reasoningEffort === 'max').length, 1)
   assert.equal((await memory.snapshot('alice')).automatic.length, 30)
   assert.equal(app.state().memoryMaintenance.results[0].status, 'completed')

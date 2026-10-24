@@ -1,350 +1,108 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MarkdownMemory } from '../lib/markdown-memory.js'
 import { MemoryMaintenance, parseCompactionProposal } from '../lib/memory-maintenance.js'
 
-const chat = id => ({ id, name: id, kind: 'group' })
-
-function record(who, automatic = [], manual = '') {
-  return { who, version: `${who}-v1`, automatic: automatic.map(([topic, note]) => ({ topic, note })), manual }
-}
-
-function createStore(records) {
-  const data = new Map(records.map(item => [item.who, structuredClone(item)]))
-  return {
-    data,
-    async listMembers() {
-      return [...data.values()].map(item => ({ who: item.who, count: item.automatic.length, version: item.version }))
-    },
-    async snapshot(who) {
-      const item = data.get(who)
-      if (!item) return { who, version: null, automatic: [], manual: '' }
-      return structuredClone(item)
-    },
-    async compact(who, proposal, expectedVersion) {
-      const item = data.get(who)
-      if (!item || item.version !== expectedVersion) {
-        const error = new Error('version conflict')
-        error.code = 'version_conflict'
-        throw error
-      }
-      const before = item.automatic.length
-      item.automatic = proposal.notes.map(({ topic, note }) => ({ topic, note }))
-      item.version = `${who}-v${Number(item.version.slice(-1)) + 1}`
-      return { who, before, after: item.automatic.length, changed: true, version: item.version }
-    },
+const CHAT = { id: 'g@chatroom', name: '群' }
+const evidence = who => [{ id: 'm1', sender: { id: who, name: who }, text: '我说的', fromSelf: false }]
+const until = async (predicate, ms = 2000) => {
+  const deadline = Date.now() + ms
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error('timed out')
+    await new Promise(resolve => setTimeout(resolve, 5))
   }
 }
 
-function proposalFor(input) {
-  return JSON.stringify({
-    who: input.who,
-    notes: input.automatic.map(({ topic, note }) => ({ topic, note, sourceTopics: [topic] })),
-    discard: [],
-  })
-}
-
-function modelFromInput(onCall = () => {}) {
-  return async request => {
-    const text = request.messages.at(-1)?.text
-    onCall(request, text)
-    return proposalFor(JSON.parse(text))
-  }
-}
-
-test('automatic compaction fires at 30 once, stays latched at 30, and rearms below threshold', async () => {
-  const topics = Array.from({ length: 30 }, (_, index) => [`主题${index}`, `长期事实${index}`])
-  const store = createStore([record('alice', topics)])
-  let calls = 0
-  const maintenance = new MemoryMaintenance({ memoryFor: () => store, think: modelFromInput(() => calls++) })
-
-  await maintenance.observe(chat('room'))
-  await maintenance.flush()
-  assert.equal(calls, 1)
-  assert.equal(maintenance.view('room').results[0].status, 'completed')
-
-  await maintenance.observe(chat('room'))
-  await maintenance.flush()
-  assert.equal(calls, 1)
-
-  store.data.get('alice').automatic.pop()
-  await maintenance.observe(chat('room'))
-  await maintenance.flush()
-  assert.equal(calls, 1)
-  store.data.get('alice').automatic.push({ topic: '新主题', note: '稳定事实' })
-  await maintenance.observe(chat('room'))
-  await maintenance.flush()
-  assert.equal(calls, 2)
-  await maintenance.dispose()
-})
-
-test('successful automatic compaction below 30 rearms immediately for the next threshold crossing', async () => {
-  const topics = Array.from({ length: 30 }, (_, index) => [`主题${index}`, `长期事实${index}`])
-  const store = createStore([record('alice', topics)])
-  let calls = 0
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: async request => {
-      const input = JSON.parse(request.messages.at(-1).text)
-      calls++
-      if (calls === 1) {
-        return JSON.stringify({
-          who: input.who,
-          notes: input.automatic.slice(0, 29).map(({ topic, note }) => ({ topic, note, sourceTopics: [topic] })),
-          discard: [{ topic: input.automatic[29].topic, reason: 'duplicate' }],
-        })
-      }
-      return proposalFor(input)
-    },
-  })
-
-  await maintenance.observe(chat('room'))
-  await maintenance.whenIdle()
-  assert.equal(store.data.get('alice').automatic.length, 29)
-  assert.equal(calls, 1)
-  await maintenance.observe(chat('room'))
-  await maintenance.whenIdle()
-  assert.equal(calls, 1)
-  store.data.get('alice').automatic.push({ topic: '新主题', note: '新增的稳定事实' })
-  await maintenance.observe(chat('room'))
-  await maintenance.whenIdle()
-  assert.equal(calls, 2)
-  await maintenance.dispose()
-})
-
-test('manual compaction visits every member sequentially and skips manual-only ids without a model call', async () => {
-  const store = createStore([
-    record('alice', [['偏好', '喜欢简洁回答']]),
-    record('manual-only', [], '始终保留的人工说明'),
-    record('bob', [['兴趣', '长期喜欢骑行']]),
-  ])
-  let inFlight = 0
-  let maxInFlight = 0
-  const seen = []
-  const events = []
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: async request => {
-      inFlight++
-      maxInFlight = Math.max(maxInFlight, inFlight)
-      const text = request.messages.at(-1)?.text
-      const input = JSON.parse(text)
-      seen.push({ input, request })
-      await new Promise(resolve => setTimeout(resolve, 5))
-      inFlight--
-      return proposalFor(input)
-    },
-    onEvent: event => events.push(event),
-  })
-
-  await maintenance.start(chat('room'))
-  await maintenance.flush()
-  assert.deepEqual(seen.map(item => item.input.who), ['alice', 'bob'])
-  assert.equal(seen[0].input.automatic[0].topic, '偏好')
-  assert.equal(seen[0].input.manual, '')
-  assert.equal(seen[0].request.effort, 'max')
-  assert.equal(maxInFlight, 1)
-  assert.equal(maintenance.view('room').completed, 3)
-  assert.deepEqual(maintenance.view('room').results.map(item => item.status), ['completed', 'skipped', 'completed'])
-  assert.equal(events.length, 3)
-  assert.ok(events.every(event => event.type === 'result' && event.chatId === 'room' && event.trigger === 'manual'))
-  assert.equal(events[1].result.who, 'manual-only')
-  assert.equal(events[1].result.status, 'skipped')
-  await maintenance.dispose()
-})
-
-test('a successful manual pass at 30 latches automatic compaction for that member', async () => {
-  const topics = Array.from({ length: 30 }, (_, index) => [`主题${index}`, `长期事实${index}`])
-  const store = createStore([record('alice', topics)])
-  let calls = 0
-  const maintenance = new MemoryMaintenance({ memoryFor: () => store, think: modelFromInput(() => calls++) })
-
-  await maintenance.start(chat('room'))
-  await maintenance.whenIdle()
-  assert.equal(calls, 1)
-  await maintenance.observe(chat('room'))
-  await maintenance.whenIdle()
-  assert.equal(calls, 1)
-  await maintenance.dispose()
-})
-
-test('CAS conflict is reported without retry and does not block the next member', async () => {
-  const store = createStore([
-    record('alice', [['偏好', '喜欢简洁回答']]),
-    record('bob', [['兴趣', '喜欢骑行']]),
-  ])
-  const compact = store.compact.bind(store)
-  store.compact = async (who, proposal, version) => {
-    if (who === 'alice') {
-      const error = new Error('version conflict')
-      error.code = 'version_conflict'
-      throw error
-    }
-    return compact(who, proposal, version)
-  }
+async function setup(t, think) {
+  const root = await mkdtemp(join(tmpdir(), 'maintenance-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const memory = new MarkdownMemory(root, 'b'.repeat(24))
   const calls = []
   const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: async request => {
-      const input = JSON.parse(request.messages.at(-1).text)
-      calls.push(input.who)
-      return proposalFor(input)
-    },
+    memoryFor: () => memory,
+    think: async args => { calls.push(JSON.parse(args.messages[0].text)); return think(JSON.parse(args.messages[0].text), args) },
+    timeoutMs: 300,
   })
+  t.after(() => maintenance.dispose())
+  const give = (who, count, prefix = '主题') => memory.apply(
+    Array.from({ length: count }, (_, i) => ({ who, topic: `${prefix}${i}`, note: `事实${i}`, evidence: 'm1' })), evidence(who))
+  return { memory, maintenance, calls, give }
+}
 
-  await maintenance.start(chat('room'))
-  await maintenance.flush()
-  assert.deepEqual(calls, ['alice', 'bob'])
-  assert.deepEqual(maintenance.view('room').results.map(item => item.status), ['failed', 'completed'])
-  assert.equal(maintenance.view('room').results[0].error, 'version_conflict')
-  await maintenance.dispose()
+// Merges the first two topics; leaves the rest alone.
+const mergeTwo = input => JSON.stringify({
+  who: input.who,
+  notes: [{ topic: '合并', note: `${input.automatic[0].note}、${input.automatic[1].note}`, sourceTopics: [input.automatic[0].topic, input.automatic[1].topic] }],
+  discard: [],
 })
 
-test('uncoded model/configuration failures retain a bounded human-readable error', async () => {
-  const store = createStore([record('alice', [['偏好', '喜欢简洁回答']])])
-  const message = '模型不支持 max：' + 'x'.repeat(600)
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: async () => { throw new Error(message) },
-  })
-
-  await maintenance.start(chat('room'))
-  await maintenance.whenIdle()
-  const result = maintenance.view('room').results[0]
-  assert.equal(result.error, message.slice(0, 500))
-  assert.equal(result.errorCode, 'compaction_failed')
-  await maintenance.dispose()
+test('a member reaching 30 notes is tidied automatically, once per cooldown', async t => {
+  const { memory, maintenance, calls, give } = await setup(t, mergeTwo)
+  await give('alice', 29)
+  await maintenance.observe(CHAT)
+  assert.equal(calls.length, 0, 'below the threshold')
+  await give('alice', 1, '再来')
+  await maintenance.observe(CHAT)
+  await until(() => !maintenance.view(CHAT.id).running && calls.length === 1)
+  assert.equal(Object.keys(await memory.recall('alice')).length, 29)
+  assert.deepEqual(maintenance.view(CHAT.id).results.map(r => [r.who, r.status, r.before, r.after]), [['alice', 'completed', 30, 29]])
+  await give('alice', 1, '又来')
+  await maintenance.observe(CHAT)
+  await new Promise(resolve => setTimeout(resolve, 50))
+  assert.equal(calls.length, 1, 'not again within the cooldown, even though it is back at 30')
 })
 
-test('a manual task reserves its chat immediately, while another chat remains independent', async () => {
-  const stores = new Map([
-    ['room-a', createStore([record('alice', [['偏好', '喜欢简洁回答']])])],
-    ['room-b', createStore([record('bob', [['兴趣', '喜欢骑行']])])],
-  ])
-  const releases = new Map()
-  const maintenance = new MemoryMaintenance({
-    memoryFor: id => stores.get(id),
-    think: request => new Promise(resolve => {
-      const input = JSON.parse(request.messages.at(-1).text)
-      releases.set(input.who, () => resolve(proposalFor(input)))
-    }),
-  })
-
-  await maintenance.start(chat('room-a'))
-  await assert.rejects(maintenance.start(chat('room-a')), error => error.code === 'busy')
-  await maintenance.start(chat('room-b'))
-  await new Promise(resolve => setImmediate(resolve))
-  assert.equal(releases.size, 2)
-  releases.get('alice')()
-  releases.get('bob')()
-  await maintenance.flush()
-  await maintenance.dispose()
+test('the manual pass visits members with at least two notes; the manual section is never sent', async t => {
+  const { memory, maintenance, calls, give } = await setup(t, mergeTwo)
+  await give('alice', 3)
+  await give('bob', 1)
+  await maintenance.start(CHAT)
+  await until(() => !maintenance.view(CHAT.id).running)
+  assert.deepEqual(calls.map(c => c.who), ['alice'])
+  assert.deepEqual(Object.keys(calls[0]), ['who', 'automatic'])
+  assert.deepEqual(await memory.recall('alice'), { 主题2: '事实2', 合并: '事实0、事实1' })
+  await assert.rejects(Promise.all([maintenance.start(CHAT), maintenance.start(CHAT)]), /busy/)
 })
 
-test('an automatic threshold reached while a chat is busy is rechecked after the current run', async () => {
-  const store = createStore([record('alice', [['偏好', '喜欢简洁回答']])])
-  let releaseAlice
-  const calls = []
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: async request => {
-      const input = JSON.parse(request.messages.at(-1).text)
-      calls.push(input.who)
-      if (input.who === 'alice') await new Promise(resolve => { releaseAlice = resolve })
-      return proposalFor(input)
-    },
-  })
-
-  await maintenance.start(chat('room'))
-  await new Promise(resolve => setImmediate(resolve))
-  const bobNotes = Array.from({ length: 30 }, (_, index) => ({ topic: `B${index}`, note: `长期事实${index}` }))
-  store.data.set('bob', { who: 'bob', version: 'bob-v1', automatic: bobNotes, manual: '' })
-  assert.deepEqual(await maintenance.observe(chat('room')), { enqueued: false, reason: 'busy' })
-  releaseAlice()
-  await maintenance.whenIdle()
-  assert.deepEqual(calls, ['alice', 'bob'])
-  assert.equal(maintenance.view('room').trigger, 'automatic')
-  await maintenance.dispose()
+test('a failing or slow member is reported and the pass goes on to the next one', async t => {
+  const { maintenance, give } = await setup(t, input => input.who === 'alice' ? new Promise(() => {}) : 'not json')
+  await give('alice', 2)
+  await give('bob', 2)
+  await maintenance.start(CHAT)
+  await until(() => !maintenance.view(CHAT.id).running)
+  const results = maintenance.view(CHAT.id).results
+  assert.deepEqual(results.map(r => r.status), ['failed', 'failed'])
+  assert.deepEqual(results.map(r => r.error).sort(), ['compaction_response_not_json', 'timeout'])
 })
 
-test('dispose aborts the current call, skips the rest, and waits until no model call can write', async () => {
-  const store = createStore([
-    record('alice', [['偏好', '喜欢简洁回答']]),
-    record('bob', [['兴趣', '喜欢骑行']]),
-  ])
-  let receivedSignal
-  let calls = 0
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    think: request => {
-      calls++
-      receivedSignal = request.signal
-      return new Promise(() => {})
-    },
-  })
-
-  await maintenance.start(chat('room'))
-  await new Promise(resolve => setImmediate(resolve))
-  await maintenance.dispose()
-  assert.equal(receivedSignal.aborted, true)
-  assert.equal(calls, 1)
-  assert.equal(maintenance.view('room').running, false)
-  assert.deepEqual(maintenance.view('room').results.map(item => item.status), ['skipped', 'skipped'])
-  assert.deepEqual(maintenance.view('room').results.map(item => item.reason), ['cancelled', 'cancelled'])
+test('dispose aborts the call in progress; nothing it returns is written', async t => {
+  let finish
+  const { memory, maintenance, give } = await setup(t, input => new Promise(resolve => { finish = () => resolve(mergeTwo(input)) }))
+  await give('alice', 2)
+  await maintenance.start(CHAT)
+  await until(() => finish)
+  const disposed = maintenance.dispose()
+  finish()
+  await disposed
+  assert.equal(Object.keys(await memory.recall('alice')).length, 2)
+  assert.equal(maintenance.view(CHAT.id).results[0].reason, 'cancelled')
 })
 
-test('timeout fails only the timed-out member and continues to the next id', async () => {
-  const store = createStore([
-    record('alice', [['偏好', '喜欢简洁回答']]),
-    record('bob', [['兴趣', '喜欢骑行']]),
-  ])
-  const calls = []
-  const maintenance = new MemoryMaintenance({
-    memoryFor: () => store,
-    timeoutMs: 10,
-    think: async request => {
-      const input = JSON.parse(request.messages.at(-1).text)
-      calls.push(input.who)
-      if (input.who === 'alice') return new Promise(() => {})
-      return proposalFor(input)
-    },
-  })
-
-  await maintenance.start(chat('room'))
-  await maintenance.flush()
-  assert.deepEqual(calls, ['alice', 'bob'])
-  assert.equal(maintenance.view('room').results[0].error, 'timeout')
-  assert.equal(maintenance.view('room').results[1].status, 'completed')
-  await maintenance.dispose()
-})
-
-test('compaction parser requires complete source coverage while allowing a source-backed normalized title', () => {
-  const snapshot = { who: 'alice', version: 'a'.repeat(64), manual: '', automatic: [
-    { topic: '游戏', note: '喜欢策略游戏' },
-    { topic: '工作', note: '从事设计' },
-  ] }
-  const valid = {
-    who: 'alice',
-    notes: [{ topic: '游戏', note: '喜欢策略游戏，也玩合作模式', sourceTopics: ['游戏'] }],
-    discard: [{ topic: '工作', reason: 'outdated' }],
-  }
-  assert.deepEqual(parseCompactionProposal(JSON.stringify(valid), snapshot), valid)
-  const normalized = {
-    who: 'alice',
-    notes: [{ topic: '策略与设计', note: '喜欢策略游戏，也从事设计', sourceTopics: ['游戏', '工作'] }],
-    discard: [],
-  }
-  assert.deepEqual(parseCompactionProposal(JSON.stringify(normalized), snapshot), normalized)
-  assert.throws(() => parseCompactionProposal(JSON.stringify({ ...valid, who: 'bob' }), snapshot), error => error.code === 'compaction_who_mismatch')
-  assert.throws(() => parseCompactionProposal(JSON.stringify({ ...valid, discard: [] }), snapshot), error => error.code === 'compaction_source_coverage_incomplete')
-  assert.throws(() => parseCompactionProposal(JSON.stringify({
-    who: 'alice', notes: [
-      { topic: '游戏', note: '喜欢策略游戏', sourceTopics: ['游戏'] },
-      { topic: '工作', note: '从事设计', sourceTopics: ['游戏'] },
-    ], discard: [{ topic: '工作', reason: 'outdated' }],
-  }), snapshot), error => error.code === 'compaction_source_overlap')
-  assert.throws(() => parseCompactionProposal(JSON.stringify({
-    who: 'alice', notes: [{ topic: '策略', note: '喜欢策略游戏', sourceTopics: ['陌生来源'] }],
-    discard: [{ topic: '工作', reason: 'outdated' }],
-  }), snapshot), error => error.code === 'compaction_source_unknown')
-  assert.throws(() => parseCompactionProposal('```json\n' + JSON.stringify(valid) + '\n```', snapshot), error => error.code === 'compaction_response_not_json')
+test('the proposal parser: only topics it was given, each once, never longer than its sources', () => {
+  const snapshot = { who: 'alice', automatic: [{ topic: 'a', note: '一二三' }, { topic: 'b', note: '四五六' }, { topic: 'c', note: '七' }] }
+  const proposal = (notes, discard = []) => JSON.stringify({ who: 'alice', notes, discard })
+  assert.deepEqual(parseCompactionProposal(proposal([{ topic: 'ab', note: '一二三四五六', sourceTopics: ['a', 'b'] }]), snapshot).notes.length, 1,
+    'c is not mentioned: it simply stays')
+  for (const [raw, code] of [
+    ['不是 JSON', 'compaction_response_not_json'],
+    [JSON.stringify({ who: 'bob', notes: [], discard: [] }), 'compaction_proposal_invalid'],
+    [proposal([{ topic: 'x', note: '一', sourceTopics: ['zzz'] }]), 'compaction_source_unknown'],
+    [proposal([{ topic: 'x', note: '一', sourceTopics: ['a'] }], [{ topic: 'a', reason: 'duplicate' }]), 'compaction_source_overlap'],
+    [proposal([{ topic: 'x', note: '七'.repeat(30), sourceTopics: ['c'] }]), 'compaction_note_grew'],
+    [proposal([{ topic: 'x', note: '我的密码', sourceTopics: ['a'] }]), 'compaction_note_invalid'],
+    [proposal([{ topic: 'x', note: '一', sourceTopics: ['a'] }, { topic: 'x', note: '四', sourceTopics: ['b'] }]), 'compaction_duplicate_target'],
+  ]) assert.throws(() => parseCompactionProposal(raw, snapshot), error => error.code === code, code)
 })

@@ -94,7 +94,8 @@ export class WeChatBotApp {
       },
       think: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'reply', route: () => this.route(), mirror: chat => this.#mirror(chat) })),
       learn: this.#thinkWithSupportedEffort(createThink({ llm: this.ctx.llm, role: 'memory',
-        route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 600 }) })),
+        // Room for a few merged notes of up to 480 characters each.
+        route: () => ({ ...this.route(), reasoningEffort: 'off', maxTokens: 2400 }) })),
       createAdapter: () => adapter.command
         ? spawnAdapter({ command: adapter.command, args: adapter.args, cwd: adapter.cwd || undefined, env: adapter.env })
         // Like a real client, the simulated account stays logged in once set up.
@@ -181,9 +182,11 @@ export class WeChatBotApp {
 
   async #compactThink(args) {
     if (!this.setup?.completedAt) throw new Error('请先完成微信机器人初始化')
-    const route = { ...this.route(), reasoningEffort: 'max', maxTokens: Math.max(4096, this.config.model.maxTokens) }
-    const efforts = await this.models.efforts(route.provider, route.model)
-    if (!efforts.includes('max')) throw new Error(`${route.model} 不支持 max 记忆整理，请切换支持 max 的模型`)
+    // The deepest thinking the current model offers: max where it can.
+    const base = this.route()
+    const efforts = await this.models.efforts(base.provider, base.model)
+    const effort = ['max', 'high', 'low', 'off'].find(level => efforts.includes(level)) ?? 'off'
+    const route = { ...base, reasoningEffort: effort, maxTokens: Math.max(4096, this.config.model.maxTokens) }
     args.signal.throwIfAborted()
     const self = this.bot.account.self ?? this.setup.self
     const key = `${self.id}\0${args.chat.id}`
@@ -196,13 +199,13 @@ export class WeChatBotApp {
     if (!session) {
       const opening = ChatSession.openLive(this.ctx, {
         id: liveChatSessionId(self.id, `memory\0${args.chat.id}`), cwd: this.setup.workspace,
-        title: `记忆整理 · ${args.chat.name} · max`, route,
+        title: `记忆整理 · ${args.chat.name} · ${effort}`, route,
       }).catch(error => { this.maintenanceSessions.delete(key); throw error })
       this.maintenanceSessions.set(key, opening)
       session = await opening
     }
     args.signal.throwIfAborted()
-    return createThink({ llm: this.ctx.llm, role: 'memory', route: () => route, mirror: async () => session })({ ...args, effort: 'max' })
+    return createThink({ llm: this.ctx.llm, role: 'memory', route: () => route, mirror: async () => session })({ ...args, effort })
   }
 
   compactMemory(chatId) {

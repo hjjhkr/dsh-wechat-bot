@@ -23,7 +23,7 @@ export const MEMORY_LEARNING_SYSTEM = `
 - 记忆贵精不贵多：只有以后与此人交流仍有用才记录；技术问答、临时安排、账号故障、一次测试和随口聊天不记。明确的表达偏好写成可执行的交流建议（例如“回答先给结论，再解释原因”），不能从一次问题推断长期喜好。
 - 每人最多30个稳定主题。写入前按内容判断是否属于已有主题，不按标题字面区分：同一游戏、兴趣、偏好或持续事项只留一条；不要用“游戏兴趣”“某游戏”“某游戏兴趣”等近义标题重复记录。
 - 同主题有新细节时沿用原 topic，在该条里保留仍有效的旧信息、补充有用的新信息、去掉重复说法，输出合并后的完整 note；不要只写新细节而覆盖旧内容。已有多条近义主题时，选一个稳定 topic，以 mergeTopics 列出其余需要合并的原始主题名，逐字引用，note 汇总这些条目中不同且仍有用的事实。没有新细节但发现重复，也可合并；不要把不同兴趣硬塞成一个宽泛主题，不逐条抄录战利品流水账或临时感叹。
-- mergeTopics 只能列同一 who 的现有自动主题，不得包含目标 topic，不得包含人工补充主题、重复名或未知名；仅在 note 非 null 时使用。人工补充原样保留。memoryReadOnlyIds 中的用户缺少完整旧记忆，本轮不得提出任何记忆修改。
+- mergeTopics 只能列同一 who 的现有自动主题，不得包含目标 topic，不得包含人工补充主题、重复名或未知名；仅在 note 非 null 时使用。人工补充原样保留。memoryPartialIds 中的用户只展示了部分旧记忆：可以为他们新增主题，但不能改写、删除或合并没给你看全的已有主题。
 - 一次合并只输出一个完整更新；同一批中不要再更新或合并该操作涉及的任一目标或来源主题，以免互相覆盖。
 - 优先保留交流偏好、长期背景、持续事项；容量满且没有同主题修正或合并时不新增，不因凑数牺牲准确性。
 - 若成员明确要求记住一个玩笑身份，例如“我是某人的爸爸，记住”，最多写成“本人自称某人的爸爸（群内玩笑/互动约定，非已确认的真实亲属关系）”；绝不能写成真实父子或家庭关系。没有明确记住要求的单次关系玩笑不要保存。
@@ -158,8 +158,8 @@ function removeAlias(input) {
 
 function serializeBounded(input, recentMessages, originalMemory, senders) {
   const serialize = () => {
-    // A model cannot safely merge or rewrite notes it has not seen in full.
-    input.memoryReadOnlyIds = [...senders].filter(id => Object.entries(originalMemory?.[id] ?? {})
+    // Members whose notes did not all fit: the model has not seen everything it might rewrite.
+    input.memoryPartialIds = [...senders].filter(id => Object.entries(originalMemory?.[id] ?? {})
       .some(([topic, note]) => input.memory[id]?.[topic] !== note))
     return JSON.stringify(input)
   }
@@ -214,7 +214,7 @@ export function memoryInput({ chat, self, members = [], batch = [], recent = [],
   }
   const serialized = serializeBounded(input, recentMessages, memory, senders)
   const evidence = [...recentMessages, ...batchMessages]
-  return { system: MEMORY_LEARNING_SYSTEM, input: serialized, evidence, readOnlyIds: input.memoryReadOnlyIds }
+  return { system: MEMORY_LEARNING_SYSTEM, input: serialized, evidence, partialIds: input.memoryPartialIds }
 }
 
 export function hasMemoryCandidate(messages) {
@@ -272,7 +272,7 @@ export class MemoryLearner {
    * @param {({system, messages, readable, effort, signal}) => Promise<string>} o.learn  the model call
    * @param {object} o.settings     memoryQuietMs, memoryMaxWaitMs, memoryCallsPerMinute, memoryRateWindowMs, memoryTimeoutMs, maxMessages
    * @param {(batch) => Promise<object>} o.context  chat, self, members, recent, memory for memoryInput()
-   * @param {(updates, evidence, versions) => Promise<{applied, rejected}> | {applied, rejected}} o.apply  validates and persists member notes
+   * @param {(updates, evidence) => Promise<{applied, rejected}>} o.apply  validates and persists member notes
    * @param {(id) => boolean} o.forgotten  messages whose author asked to be forgotten
    * @param {(type, data) => void} o.write  chat log
    * @param {(type, data) => void} o.notice rate-limited chat log
@@ -347,7 +347,7 @@ export class MemoryLearner {
     const epoch = this.#epoch
     const { batch, chars } = this.#take()
     try {
-      const { chat, self, members, recent: context, memory, versions } = await this.context(batch)
+      const { chat, self, members, recent: context, memory } = await this.context(batch)
       const recent = []
       let total = chars
       for (const m of [...context].reverse()) {
@@ -365,13 +365,11 @@ export class MemoryLearner {
       }), this.settings.memoryTimeoutMs, controller.signal)
       if (this.disposed || epoch !== this.#epoch) return
       const proposals = parseMemoryDecision(raw)
-      const readOnly = new Set(request.readOnlyIds)
-      const blocked = proposals.filter(update => readOnly.has(update.who))
-        .map(update => ({ update, problem: 'memory_context_incomplete' }))
-      const { applied, rejected } = await this.apply(proposals.filter(update => !readOnly.has(update.who)),
-        request.evidence.filter(m => !this.forgotten(m.id)), versions)
-      rejected.push(...blocked)
-      if (readOnly.size) this.write('memory_context_incomplete', { ids: [...readOnly] })
+      // Notes not shown in full may only gain new topics: rewriting or merging needs the old text.
+      const partial = new Set(request.partialIds)
+      const unseen = update => partial.has(update.who) && (update.mergeTopics || Object.hasOwn(memory[update.who] ?? {}, update.topic.trim()))
+      const { applied, rejected } = await this.apply(proposals.filter(update => !unseen(update)), request.evidence.filter(m => !this.forgotten(m.id)))
+      rejected.push(...proposals.filter(unseen).map(update => ({ update, problem: 'memory_not_shown' })))
       this.write('memory_learning', { count: batch.length, applied, rejected })
       // Saving is not learning: a failed save must not send the same messages to the model again.
       if (applied.length) await this.saved().catch(error => this.write('error', { message: `保存记忆失败：${error.message}` }))
@@ -379,8 +377,7 @@ export class MemoryLearner {
       if (this.disposed || epoch !== this.#epoch) return
       this.write('memory_error', { code: error.code ?? error.name })
       // One more try for messages that have not been retried yet.
-      const retry = error.retryable === false ? [] : batch.filter(m => !this.#retried.has(m.id))
-      if (error.retryable === false) this.write('error', { message: `记忆任务配置失败，本批 ${batch.length} 条未写入：${error.message}` })
+      const retry = batch.filter(m => !this.#retried.has(m.id))
       for (const m of retry) this.#retried.add(m.id)
       while (this.#retried.size > 1000) this.#retried.delete(this.#retried.values().next().value)
       this.queue(retry)

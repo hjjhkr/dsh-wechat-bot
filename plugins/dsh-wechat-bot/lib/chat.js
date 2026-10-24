@@ -6,7 +6,7 @@ import { CronBook, cronLimits, parseSchedule } from './cron.js'
 import { DecisionError, parseDecision } from './decision.js'
 import { ENGAGEMENT_IDLE_MS, STYLES } from './engagement.js'
 import { CircuitBreaker, RateWindow, SendLane, withDeadline } from './guard.js'
-import { MemoryBook } from './memory.js'
+import { StateMemory } from './memory.js'
 import { MemoryLearner } from './memory-learning.js'
 import { readableBatch, systemPrompt, turnInput } from './prompt.js'
 import { ErrorCode } from './protocol.js'
@@ -64,6 +64,8 @@ const validWait = w => Number.isFinite(w?.quietMs) && Number.isFinite(w?.maxWait
   && w.quietMs >= WAIT_LIMITS.minQuietMs && w.quietMs <= WAIT_LIMITS.maxQuietMs
   && w.maxWaitMs >= w.quietMs && w.maxWaitMs <= WAIT_LIMITS.maxMaxWaitMs
 
+const authorsOf = messages => [...new Set(messages.filter(m => !m.fromSelf).map(m => m.sender.id))]
+
 // Pace multi-part replies like someone typing.
 const typingMs = text => Math.min(600 + 150 * [...text].length, 4000)
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -97,7 +99,7 @@ export class ChatRunner {
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memoryDocuments }) {
+  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memory }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona // text, or a function reading the current persona before each reply
@@ -111,8 +113,8 @@ export class ChatRunner {
     this.persist = persist ?? (async () => {})
     this.models = models
     this.transcript = state.transcript ?? []
-    this.memory = new MemoryBook(state.memory)
-    this.memoryDocuments = memoryDocuments
+    // Long-term member notes: MarkdownMemory files, or (tests, evaluation) StateMemory kept in this state.
+    this.memory = memory ?? new StateMemory(state.memory)
     this.log = state.log ?? []
     // Whom the bot answered recently, one entry per member: their next message may be a follow-up.
     this.lastBotTurns = Array.isArray(state.lastBotTurns) ? state.lastBotTurns : state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : []
@@ -154,14 +156,12 @@ export class ChatRunner {
     })
     this.learner = learn && this.settings.memoryLearning ? new MemoryLearner({
       learn, settings: this.settings,
-      context: async batch => {
-        const recent = this.#recent(batch)
-        const saved = this.memoryDocuments && await this.memoryDocuments.context([...new Set([...batch, ...recent].filter(m => !m.fromSelf).map(m => m.sender.id))])
-        return { chat: this.chat, self: this.account(), members: await this.#members(), recent,
-          memory: saved ? saved.notes : this.#memoryFor(batch), versions: saved?.versions }
-      },
-      apply: (updates, evidence, versions) => this.memoryDocuments
-        ? this.memoryDocuments.apply(updates, evidence, versions) : this.memory.apply(updates, evidence),
+      // The learner sees (and may change) the notes of the batch's authors only.
+      context: async batch => ({
+        chat: this.chat, self: this.account(), members: await this.#members(), recent: this.#recent(batch),
+        memory: (await this.memory.context(authorsOf(batch))).notes,
+      }),
+      apply: (updates, evidence) => this.memory.apply(updates, evidence),
       forgotten: id => this.forgottenEvidence.has(id),
       write: (type, data) => this.#write(type, data),
       notice: (type, data) => this.#notice(type, data),
@@ -192,7 +192,7 @@ export class ChatRunner {
   snapshot() {
     return {
       transcript: this.transcript.slice(-this.settings.recentLimit * 2),
-      ...(this.memoryDocuments ? {} : { memory: this.memory.toJSON() }),
+      memory: this.memory.toJSON?.(), // only StateMemory lives in the state
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurns: this.lastBotTurns,
       forgottenEvidence: [...this.forgottenEvidence].slice(-SEEN_LIMIT),
@@ -224,7 +224,7 @@ export class ChatRunner {
   async quiesce() {
     this.dispose()
     while (this.#work.size) await Promise.allSettled([...this.#work])
-    await this.memoryDocuments?.flush()
+    await this.memory.flush()
   }
 
   #track(promise) {
@@ -405,14 +405,12 @@ export class ChatRunner {
         wait: { current: () => this.wait, set: wait => this.setWait(wait) },
         mute: ms => this.mute(ms),
         memory: {
-          recall: async id => this.memoryDocuments
-            ? { 'MEMORY.md': (await this.memoryDocuments.context([id])).documents[id] ?? '' }
-            : this.memory.recall([id])[id] ?? {},
+          recall: id => this.memory.recall(id),
           forget: async (id, topic) => {
             this.learner?.cancel()
             for (const m of this.transcript) if (m.sender.id === id) this.forgottenEvidence.add(m.id)
             while (this.forgottenEvidence.size > SEEN_LIMIT) this.forgottenEvidence.delete(this.forgottenEvidence.values().next().value)
-            const result = this.memoryDocuments ? await this.memoryDocuments.forget(id, topic) : this.memory.forget(id, topic)
+            const result = await this.memory.forget(id, topic)
             this.emit('memory-changed')
             return result
           },
@@ -424,7 +422,7 @@ export class ChatRunner {
         },
         status: async () => ({
           mode: this.mode, mutedUntil: this.mutedUntil, today: this.stats,
-          context: this.transcript.length, members: this.memoryDocuments ? await this.memoryDocuments.count() : Object.keys(this.memory.members).length,
+          context: this.transcript.length, members: await this.memory.count(),
           engagement: this.#activeEngagement(),
         }),
         commands: this.commands.list(),
@@ -546,10 +544,11 @@ export class ChatRunner {
     return this.transcript.filter(m => !skip.has(m.id)).slice(-this.settings.recentLimit)
   }
 
-  #memoryFor(batch) {
-    const ids = new Set(batch.map(m => m.sender.id))
+  // Members whose memory goes with a turn: the batch's authors and whoever spoke just before.
+  #memoryIds(batch) {
+    const ids = new Set(authorsOf(batch))
     for (const m of this.transcript.slice(-10)) if (!m.fromSelf) ids.add(m.sender.id)
-    return this.memory.recall(ids)
+    return [...ids]
   }
 
   // Asks the model about `batch` without sending or remembering anything (dry runs, evaluation).
@@ -687,10 +686,10 @@ export class ChatRunner {
         // Notes come from the separate learner, which reads the raw evidence without the persona.
         this.learner.queue(batch)
       } else {
-        const evidence = decision.evidence.filter(m => !this.forgottenEvidence.has(m.id))
-        const { applied, rejected } = this.memoryDocuments
-          ? await this.memoryDocuments.apply(decision.memory, evidence, decision.memoryVersions)
-          : this.memory.apply(decision.memory, evidence)
+        // Only about members whose memory the model was shown: the batch's authors.
+        const authors = new Set(authorsOf(batch))
+        const evidence = decision.evidence.filter(m => authors.has(m.sender.id) && !this.forgottenEvidence.has(m.id))
+        const { applied, rejected } = await this.memory.apply(decision.memory, evidence)
         if (applied.length || rejected.length) this.#write('memory', { applied, rejected })
         if (applied.length) this.emit('memory-changed')
       }
@@ -739,15 +738,15 @@ export class ChatRunner {
     const settings = this.settings
     const stickers = Object.keys(settings.stickers ?? {})
     const recent = this.#recent(batch).map(m => this.#withQuoteSender(m))
-    const memoryAuthors = this.learner ? batch : [...recent, ...batch]
-    const savedMemory = this.memoryDocuments && await this.memoryDocuments.context([...new Set(memoryAuthors.filter(m => !m.fromSelf).map(m => m.sender.id))])
+    const saved = await this.memory.context(this.#memoryIds(batch))
     const persona = typeof this.persona === 'function' ? await this.persona() : this.persona
     const system = systemPrompt(persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
     const members = await this.#members()
     const input = turnInput({
       chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],
       members, recent, batch: batch.map(m => this.#withQuoteSender(m)), address,
-      memory: savedMemory ? {} : this.#memoryFor(batch), memoryDocuments: savedMemory?.documents, event,
+      // Markdown documents (the full MEMORY.md) when the store has them, else plain notes.
+      memory: saved.documents ? {} : saved.notes, memoryDocuments: saved.documents, event,
     })
     const messages = [{ role: 'user', text: input }]
     const readable = event?.kind === 'idle' ? `${this.chat.name}：冷场 ${event.minutes} 分钟，看看要不要主动说话` : readableBatch(this.chat, batch, address, event)
@@ -768,7 +767,7 @@ export class ChatRunner {
         } else {
           this.#write('decision', { to: decision.to, reply: decision.reply, raw: output })
           // Memory may cite any message the model was shown, recent or new, by its id.
-          return { ...decision, evidence: [...recent, ...batch], memoryVersions: savedMemory?.versions, modelMs: Date.now() - modelStarted }
+          return { ...decision, evidence: [...recent, ...batch], modelMs: Date.now() - modelStarted }
         }
       } catch (error) {
         if (!(error instanceof DecisionError)) throw error

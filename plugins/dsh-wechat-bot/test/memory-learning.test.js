@@ -219,20 +219,23 @@ test('learner rejects malformed merge operations instead of treating them as ord
   }
 })
 
-test('trimmed memory is explicitly read-only and cannot be overwritten by a learner proposal', async () => {
+test('notes that did not fit in the input can gain new topics but are never rewritten unseen', async () => {
   const { memoryInput, MemoryLearner } = await learnerApi()
   const oldNotes = Object.fromEntries(Array.from({ length: 30 }, (_, i) => [`主题${i}`, '稳定背景'.repeat(100)]))
   const batch = [message('new-fact', 'alice', '我也喜欢三角洲行动')]
   const context = { chat: { name: '测试群', kind: 'group' }, batch, recent: [], memory: { alice: oldNotes } }
   const request = memoryInput(context)
-  assert.deepEqual(JSON.parse(request.input).memoryReadOnlyIds, ['alice'])
-  assert.deepEqual(request.readOnlyIds, ['alice'])
+  assert.deepEqual(JSON.parse(request.input).memoryPartialIds, ['alice'])
+  assert.deepEqual(request.partialIds, ['alice'])
   const book = new MemoryBook({ members: { alice: { name: 'alice', notes: [
     { topic: '游戏', text: '喜欢三角洲行动' },
   ] } } })
   const done = Promise.withResolvers()
   const learner = new MemoryLearner({
-    learn: async () => JSON.stringify({ memory: [{ who: 'alice', topic: '新游戏兴趣', note: '喜欢三角洲行动', evidence: 'new-fact' }] }),
+    learn: async () => JSON.stringify({ memory: [
+      { who: 'alice', topic: '新游戏兴趣', note: '喜欢三角洲行动', evidence: 'new-fact' },
+      { who: 'alice', topic: '主题0', note: '改写了没看全的旧笔记', evidence: 'new-fact' },
+    ] }),
     settings: { memoryCallsPerMinute: 2, memoryRateWindowMs: 1000, memoryQuietMs: 1, memoryMaxWaitMs: 5, memoryTimeoutMs: 1000, maxMessages: 20 },
     context: async () => context,
     apply: (updates, evidence) => book.apply(updates, evidence),
@@ -243,9 +246,9 @@ test('trimmed memory is explicitly read-only and cannot be overwritten by a lear
   try {
     learner.queue(batch)
     const result = await done.promise
-    assert.equal(result.applied.length, 0)
-    assert.equal(result.rejected[0].problem, 'memory_context_incomplete')
-    assert.deepEqual(book.recall(['alice']), { alice: { 游戏: '喜欢三角洲行动' } })
+    assert.deepEqual(result.applied.map(u => u.topic), ['新游戏兴趣'])
+    assert.deepEqual(result.rejected.map(r => [r.update.topic, r.problem]), [['主题0', 'memory_not_shown']])
+    assert.deepEqual(book.recall(['alice']), { alice: { 游戏: '喜欢三角洲行动', 新游戏兴趣: '喜欢三角洲行动' } })
   } finally {
     clearTimeout(timeout)
     learner.dispose()

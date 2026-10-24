@@ -1,9 +1,8 @@
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises'
-import { basename, dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+import { basename, join } from 'node:path'
+import { writeText } from './files.js'
 import { MarkdownMemory } from './markdown-memory.js'
-
-const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
 
 async function readJson(path, fallback) {
   try {
@@ -14,27 +13,12 @@ async function readJson(path, fallback) {
   }
 }
 
-// Atomic replace. On Windows a rename can briefly fail while another process
-// (antivirus, indexer, a reader) holds the target open, so retry a few times.
-async function writeJson(path, value) {
-  await mkdir(dirname(path), { recursive: true })
-  const temp = `${path}.${randomUUID()}.tmp`
-  await writeFile(temp, JSON.stringify(value, null, 1))
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return await rename(temp, path)
-    } catch (error) {
-      if (attempt >= 5 || !['EPERM', 'EBUSY', 'EACCES'].includes(error.code)) {
-        await rm(temp, { force: true })
-        throw error
-      }
-      await sleep(20 * (attempt + 1))
-    }
-  }
-}
+const writeJson = (path, value) => writeText(path, JSON.stringify(value, null, 1))
 
 // Plugin state under one data directory: `bot.json` for settings changed by the
-// console, commands and onboarding; `chats/<hash>.json` for each chat's context.
+// console, commands and onboarding; `chats/<hash>.json` for each chat's controls
+// (mode, mute, /cron, …: raw conversations are never written to disk);
+// `memories/<hash>/…/MEMORY.md` for members' long-term notes.
 // Chat writes are coalesced and serialized per file.
 export class Store {
   #timers = new Map()
@@ -66,37 +50,22 @@ export class Store {
     })
   }
 
-  memoryFor(chatId) {
-    return this.#memoryForKey(basename(this.chatPath(chatId), '.json'))
-  }
-
-  #memoryForKey(key) {
-    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key))
+  // `onProblem` reports memory files that cannot be read (first caller's is kept).
+  memoryFor(chatId, onProblem) {
+    const key = basename(this.chatPath(chatId), '.json')
+    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key, onProblem))
     return this.#memories.get(key)
   }
 
+  // A state written by an older version may still hold memory and history: the memory
+  // moves to MEMORY.md files and the file is rewritten with the controls only.
   async loadChat(chatId) {
-    const state = await readJson(this.chatPath(chatId), {})
-    await migrateVerified(this.memoryFor(chatId), state.memory)
-    return state
-  }
-
-  // Raw conversations are temporary. Keep only controls and recovery identifiers.
-  async clearHistory() {
-    await this.flush()
-    let entries
-    try { entries = await readdir(join(this.dir, 'chats'), { withFileTypes: true }) }
-    catch (error) { if (error.code === 'ENOENT') return; throw error }
-    for (const entry of entries) {
-      if (!entry.isFile() || !/^[a-f0-9]{24}\.json$/.test(entry.name)) continue
-      const path = join(this.dir, 'chats', entry.name)
-      await this.#serialize(path, async () => {
-        const state = await readJson(path, {})
-        await migrateVerified(this.#memoryForKey(basename(entry.name, '.json')), state.memory)
-        await writeJson(path, durableState(state))
-      })
+    const path = this.chatPath(chatId)
+    const state = await readJson(path, {})
+    if ((state.memory || state.transcript || state.log) && await this.memoryFor(chatId).migrate(state.memory)) {
+      await this.#serialize(path, () => writeJson(path, durableState(state)))
     }
-    await Promise.all([...this.#memories.values()].map(memory => memory.flush()))
+    return state
   }
 
   // Schedule a write; the latest value (or value factory) wins.
@@ -134,17 +103,4 @@ export class Store {
 function durableState(state) {
   return Object.fromEntries(['mode', 'wait', 'mutedUntil', 'stats', 'cron', 'engagement', 'forgottenEvidence']
     .filter(key => state[key] !== undefined).map(key => [key, state[key]]))
-}
-
-async function migrateVerified(memory, legacy) {
-  await memory.migrate(legacy)
-  const members = legacy?.members ?? {}
-  const saved = await memory.context(Object.keys(members))
-  for (const [id, member] of Object.entries(members)) {
-    for (const note of member.notes ?? []) {
-      if (saved.notes[id]?.[note.topic] !== note.text) {
-        throw new Error(`legacy_memory_conflict: ${id}; resolve MEMORY.md before clearing the old snapshot`)
-      }
-    }
-  }
 }

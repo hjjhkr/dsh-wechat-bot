@@ -25,37 +25,38 @@ test('new snapshots retain controls without writing chat bodies or duplicate mem
   assert.deepEqual(JSON.parse(raw), { mode: 'at', wait: { quietMs: 1000, maxWaitMs: 3000 }, forgottenEvidence: ['old-id'] })
 })
 
-test('exit migrates old notes before clearing raw snapshots for previously watched chats', async t => {
+test('loading a chat saved by an older version moves its memory to files and drops the history', async t => {
   const store = await fixture(t)
   const path = store.chatPath('previous-group')
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, JSON.stringify({ mode: 'infer', transcript: [{ text: 'old raw message' }], log: [{}],
     memory: { members: { alice: { name: 'Alice', notes: [{ topic: '表达偏好', text: '先给结论，再解释', at: 1, evidence: 'old-message' }] } } } }))
-  await store.clearHistory()
+  const state = await store.loadChat('previous-group')
+  assert.equal(state.mode, 'infer')
   assert.deepEqual(JSON.parse(await readFile(path, 'utf8')), { mode: 'infer' })
-  assert.match((await store.memoryFor('previous-group').context(['alice'])).documents.alice, /先给结论，再解释/)
+  assert.deepEqual(await store.memoryFor('previous-group').recall('alice'), { 表达偏好: '先给结论，再解释' })
 })
 
-test('a failed legacy migration retains the only copy of the source snapshot', async t => {
+test('a member whose file cannot be migrated keeps the old copy, and the chat still loads', async t => {
   const store = await fixture(t)
+  const memory = store.memoryFor('group')
+  await mkdir(dirname(memory.pathOf('alice')), { recursive: true })
+  await writeFile(memory.pathOf('alice'), 'edited by hand into something unreadable')
   const path = store.chatPath('group')
   await mkdir(dirname(path), { recursive: true })
-  const original = JSON.stringify({ transcript: [{ text: 'source evidence' }],
-    memory: { members: { alice: { notes: [{ topic: '主题', text: 'x'.repeat(481) }] } } } })
+  const original = JSON.stringify({ mode: 'at', memory: { members: { alice: { notes: [{ topic: '主题', text: '旧笔记' }] } } } })
   await writeFile(path, original)
-  await assert.rejects(store.clearHistory())
+  assert.equal((await store.loadChat('group')).mode, 'at')
   assert.equal(await readFile(path, 'utf8'), original)
 })
 
-test('an existing divergent Markdown file blocks destructive legacy cleanup', async t => {
+test('an existing MEMORY.md is never overwritten by the old copy', async t => {
   const store = await fixture(t)
   const memory = store.memoryFor('group')
   await memory.migrate({ members: { alice: { notes: [{ topic: '偏好', text: '新偏好' }] } } })
   const path = store.chatPath('group')
   await mkdir(dirname(path), { recursive: true })
-  const original = JSON.stringify({ memory: { members: { alice: { notes: [{ topic: '偏好', text: '旧偏好' }] } } } })
-  await writeFile(path, original)
-  await assert.rejects(store.clearHistory(), /legacy_memory_conflict/)
-  assert.equal(await readFile(path, 'utf8'), original)
-  assert.equal((await memory.context(['alice'])).notes.alice.偏好, '新偏好')
+  await writeFile(path, JSON.stringify({ memory: { members: { alice: { notes: [{ topic: '偏好', text: '旧偏好' }] } } } }))
+  await store.loadChat('group')
+  assert.deepEqual(await memory.recall('alice'), { 偏好: '新偏好' })
 })

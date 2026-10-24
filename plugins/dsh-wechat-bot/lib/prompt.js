@@ -191,6 +191,9 @@ function newView(message, address, identities, messages) {
   }
 }
 
+// Characters of members' MEMORY.md one turn may carry (the documents are up to 16 KiB each).
+const MEMORY_DOCUMENT_BUDGET = 24_000
+
 // `turn`: { chat, self, aliases, recent, batch, address(Map id→{addressed,reasons}), memory({id→notes}), event?, now? }
 export function turnInput(turn) {
   const identities = identityIndex(turn)
@@ -220,8 +223,14 @@ export function turnInput(turn) {
     },
   }
   const mentioned = mentionedMembers(turn, identities)
-  for (const member of input.new.members) {
-    if (turn.memoryDocuments?.[member.id]) member.memoryDocument = turn.memoryDocuments[member.id]
+  // Memory documents within a budget per turn, people talking to the bot first.
+  const rank = member => Math.max(...member.messages.map(m => ({ you: 2, maybe: 1 })[m.addressed] ?? 0))
+  let budget = MEMORY_DOCUMENT_BUDGET
+  for (const member of [...input.new.members].sort((a, b) => rank(b) - rank(a))) {
+    const document = turn.memoryDocuments?.[member.id]
+    if (!document || document.length > budget) continue
+    member.memoryDocument = document
+    budget -= document.length
   }
   if (mentioned.length) input.chat.mentioned = mentioned
   if (turn.event) input.event = turn.event

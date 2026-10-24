@@ -261,7 +261,7 @@ export class Bot extends EventEmitter {
     const runner = new ChatRunner({
       chat, state, persona: this.personas ? () => this.personas.text() : this.persona, personas: this.personas,
       commands: this.commands, settings: this.settings, models: this.models,
-      memoryDocuments: this.store.memoryFor(chat.id),
+      memory: this.store.memoryFor(chat.id, message => this.note('warn', message)),
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,
       think: args => this.think(args),

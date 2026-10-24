@@ -4,7 +4,6 @@
 
 const SENSITIVE = /密码|口令|验证码|api[\s_-]*key|私钥|助记词|身份证|银行卡|病史|确诊|password|secret|token|sk-[a-z0-9]{8,}|\b\d{15,19}\b/i
 const MAX_TOPIC = 30
-const DEFAULT_MAX_NOTE_CHARS = 120
 export const MAX_AUTOMATIC_NOTE_CHARS = 480
 const FORGET_REQUEST = /忘(?:了|掉|记)|删(?:掉|除)?|别(?:再)?记|不要(?:再)?记|不用记|\b(?:forget|delete|remove)\b/i
 
@@ -13,7 +12,7 @@ export function isSensitiveMemoryContent(value) {
 }
 
 export class MemoryBook {
-  constructor({ members = {} } = {}, { maxNotesPerMember = 20, maxNoteChars = DEFAULT_MAX_NOTE_CHARS } = {}) {
+  constructor({ members = {} } = {}, { maxNotesPerMember = 30, maxNoteChars = MAX_AUTOMATIC_NOTE_CHARS } = {}) {
     this.members = structuredClone(members)
     this.maxNotesPerMember = maxNotesPerMember
     this.maxNoteChars = maxNoteChars
@@ -144,3 +143,38 @@ export class MemoryBook {
     return null
   }
 }
+
+// MemoryBook behind the same asynchronous interface as MarkdownMemory, kept in the chat's
+// state instead of files: for tests, evaluation and runs without a data directory.
+export class StateMemory {
+  constructor(state) {
+    this.book = new MemoryBook(state)
+  }
+
+  async context(ids) {
+    return { notes: this.book.recall(ids) }
+  }
+
+  async recall(id) {
+    return this.book.recall([id])[id] ?? {}
+  }
+
+  async apply(updates, evidence) {
+    return this.book.apply(updates, evidence)
+  }
+
+  async forget(id, topic) {
+    return this.book.forget(id, topic)
+  }
+
+  async count() {
+    return Object.values(this.book.members).filter(member => member.notes.length).length
+  }
+
+  async flush() {}
+
+  toJSON() {
+    return this.book.toJSON()
+  }
+}
+
