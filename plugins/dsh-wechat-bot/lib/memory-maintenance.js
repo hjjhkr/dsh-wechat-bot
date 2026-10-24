@@ -54,6 +54,8 @@ export function parseCompactionProposal(raw, snapshot) {
     if (!topic || topic.length > 30 || !note || note.length > MAX_AUTOMATIC_NOTE_CHARS || !item.sourceTopics?.length
       || isSensitiveMemoryContent(`${topic} ${note}`)) throw fail('compaction_note_invalid')
     item.sourceTopics.forEach(cover)
+    // Taking the name of a topic it does not merge would leave two notes under one name.
+    if (existing.has(topic) && !item.sourceTopics.includes(topic)) throw fail('compaction_topic_taken')
     // Tidying may shorten and combine, not add: a note is no longer than its sources together.
     if (note.length > item.sourceTopics.reduce((sum, source) => sum + existing.get(source).length, 0) + 20) throw fail('compaction_note_grew')
     return { topic, note, sourceTopics: item.sourceTopics }
@@ -88,7 +90,8 @@ export class MemoryMaintenance {
   observe(chat) {
     return this.#admit(chat.id, async () => {
       const now = Date.now()
-      const due = (await this.memoryFor(chat.id).listMembers()).filter(member => (member.count >= AUTO_COUNT || member.bytes >= AUTO_BYTES)
+      // By the notes' own size: a large manual section is not something tidying can shrink.
+      const due = (await this.memoryFor(chat.id).listMembers()).filter(member => (member.count >= AUTO_COUNT || member.noteBytes >= AUTO_BYTES)
         && now - (this.#tried.get(`${chat.id}\0${member.who}`) ?? 0) >= AUTO_COOLDOWN_MS)
       if (!due.length) return
       if (this.#running.has(chat.id)) return void this.#recheck.set(chat.id, chat)
@@ -135,6 +138,7 @@ export class MemoryMaintenance {
   }
 
   #launch(chat, whoList, trigger) {
+    if (this.#closed) return
     const state = { chatId: chat.id, running: true, total: whoList.length, completed: 0, results: [], error: null, trigger, currentWho: null }
     const controller = new AbortController()
     this.#states.set(chat.id, state)
@@ -172,7 +176,7 @@ export class MemoryMaintenance {
       readable: `${chat.name || chat.id}：整理成员记忆 ${who}`, signal: callSignal,
     }), this.timeoutMs, signal)
     signal.throwIfAborted()
-    const { before, after } = await store.compact(who, parseCompactionProposal(raw, snapshot))
+    const { before, after } = await store.compact(who, parseCompactionProposal(raw, snapshot), snapshot)
     return { who, status: 'completed', before, after, error: null }
   }
 }

@@ -104,5 +104,6 @@ test('the proposal parser: only topics it was given, each once, never longer tha
     [proposal([{ topic: 'x', note: '七'.repeat(30), sourceTopics: ['c'] }]), 'compaction_note_grew'],
     [proposal([{ topic: 'x', note: '我的密码', sourceTopics: ['a'] }]), 'compaction_note_invalid'],
     [proposal([{ topic: 'x', note: '一', sourceTopics: ['a'] }, { topic: 'x', note: '四', sourceTopics: ['b'] }]), 'compaction_duplicate_target'],
+    [proposal([{ topic: 'c', note: '一', sourceTopics: ['a'] }]), 'compaction_topic_taken'],
   ]) assert.throws(() => parseCompactionProposal(raw, snapshot), error => error.code === code, code)
 })

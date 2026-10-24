@@ -47,7 +47,11 @@ test('a member whose file cannot be migrated keeps the old copy, and the chat st
   const original = JSON.stringify({ mode: 'at', memory: { members: { alice: { notes: [{ topic: '主题', text: '旧笔记' }] } } } })
   await writeFile(path, original)
   assert.equal((await store.loadChat('group')).mode, 'at')
-  assert.equal(await readFile(path, 'utf8'), original)
+  store.saveChatLater('group', { mode: 'at' }) // the running chat saves its state
+  await store.flush()
+  const saved = JSON.parse(await readFile(path, 'utf8'))
+  assert.deepEqual(saved.legacyMemory, JSON.parse(original).memory, 'kept until it can be migrated')
+  assert.equal(saved.mode, 'at')
 })
 
 test('an existing MEMORY.md is never overwritten by the old copy', async t => {

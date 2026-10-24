@@ -18,7 +18,7 @@
 // to stop replying to the whole group. Content checks (evidence, sensitive words, sizes)
 // happen when writing, in MemoryBook.validate and here.
 import { createHash } from 'node:crypto'
-import { readFile, readdir, rm } from 'node:fs/promises'
+import { readFile, readdir, rm, rmdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { writeText } from './files.js'
 import { MAX_AUTOMATIC_NOTE_CHARS, MemoryBook } from './memory.js'
@@ -51,20 +51,31 @@ function entries(section, decode) {
   return { prefix, list }
 }
 
-// Returns null when the text is not a memory document.
+// Returns null when the text is not a memory document, or has text where the program would
+// not keep it (outside the manual section): such a file is skipped and never rewritten.
 export function parseDocument(content) {
   const text = content.replace(/\r\n/g, '\n')
   const id = /^<!-- dsh-memory-id: (".*") -->$/m.exec(text)
   const manualAt = text.indexOf(MANUAL_HEADING + '\n')
-  const automaticAt = text.lastIndexOf('\n' + AUTOMATIC_HEADING + '\n') // notes cannot contain it: their headings are escaped
+  // The last one: notes cannot contain the heading, theirs are escaped.
+  const automaticAt = [...text.matchAll(/\n## 自动记忆(?:\n|$)/g)].at(-1)?.index ?? -1
   if (!id || manualAt < 0 || automaticAt < manualAt) return null
+  let memberId
+  try {
+    memberId = JSON.parse(id[1])
+  } catch {
+    return null
+  }
+  if (text.slice(0, manualAt).replace(TITLE, '').replace(id[0], '').trim()) return null
+  const automatic = entries(text.slice(automaticAt + AUTOMATIC_HEADING.length + 2), true)
+  if (automatic.prefix) return null
   const manualRaw = text.slice(manualAt + MANUAL_HEADING.length + 1, automaticAt + 1)
   const manual = entries(manualRaw, false)
   return {
-    id: JSON.parse(id[1]),
+    id: memberId,
     manualRaw,
     manual: [...(manual.prefix ? [{ topic: MANUAL_PREFIX_TOPIC, text: manual.prefix }] : []), ...manual.list],
-    automatic: entries(text.slice(automaticAt + AUTOMATIC_HEADING.length + 2), true).list,
+    automatic: automatic.list,
   }
 }
 
@@ -116,14 +127,23 @@ export class MarkdownMemory {
     const { valid, rejected } = new MemoryBook({}, { maxNoteChars: MAX_AUTOMATIC_NOTE_CHARS }).validate(updates, evidence)
     const applied = []
     const byWho = Map.groupBy(valid, update => update.who)
-    await Promise.all([...byWho].map(([id, list]) => this.#update(id, ({ manual, automatic }) => {
-      const blocked = new Set(manual.map(entry => entry.topic))
-      for (const update of list) {
-        const problem = mergeInto(automatic, update, blocked)
-        if (problem) rejected.push({ update, problem })
-        else applied.push(update)
+    await Promise.all([...byWho].map(async ([id, list]) => {
+      const done = [], refused = []
+      try {
+        await this.#update(id, ({ manual, automatic }) => {
+          const blocked = new Set(manual.map(entry => entry.topic))
+          for (const update of list) {
+            const problem = mergeInto(automatic, update, blocked)
+            if (problem) refused.push({ update, problem })
+            else done.push(update)
+          }
+        })
+        applied.push(...done)
+        rejected.push(...refused)
+      } catch (error) {
+        rejected.push(...list.map(update => ({ update, problem: error.code ?? 'write_failed' })))
       }
-    }).catch(error => rejected.push(...list.map(update => ({ update, problem: error.code ?? 'write_failed' }))))))
+    }))
     return { applied, rejected }
   }
 
@@ -143,28 +163,42 @@ export class MarkdownMemory {
     return { who, automatic: ((await this.#read(who))?.parsed.automatic ?? []).map(({ topic, text }) => ({ topic, note: text })) }
   }
 
-  // Applies a compaction (see memory-maintenance.js): the source topics it covered are replaced
-  // by its notes and discarded topics go; anything learned meanwhile is kept.
-  async compact(who, { notes, discard }) {
+  // Applies a compaction (see memory-maintenance.js) of `snapshot`: its notes replace their
+  // sources and discarded topics go — but only where the file still holds what the model saw.
+  // A topic forgotten or relearned meanwhile is left as it is now, and a note never takes the
+  // name of a topic it did not merge (or of a manual one).
+  async compact(who, { notes, discard }, snapshot) {
     let before = 0, after = 0
-    await this.#update(who, ({ automatic }) => {
+    const seen = new Map(snapshot.automatic.map(item => [item.topic, item.note]))
+    await this.#update(who, ({ manual, automatic }) => {
       before = automatic.length
-      const covered = new Set([...notes.flatMap(note => note.sourceTopics), ...discard.map(item => item.topic)])
-      const kept = automatic.filter(entry => !covered.has(entry.topic))
-      automatic.splice(0, automatic.length, ...kept, ...notes.map(note => ({ topic: note.topic, text: note.note })))
+      const current = new Map(automatic.map(entry => [entry.topic, entry.text]))
+      const unchanged = topic => current.has(topic) && current.get(topic) === seen.get(topic)
+      const usable = notes.filter(note => note.sourceTopics.every(unchanged))
+      const discarded = discard.map(item => item.topic).filter(unchanged)
+      const merged = new Set([...usable.flatMap(note => note.sourceTopics), ...discarded])
+      const taken = new Set([...manual.map(entry => entry.topic), ...automatic.map(entry => entry.topic).filter(topic => !merged.has(topic))])
+      const added = usable.filter(note => !taken.has(note.topic))
+      const covered = new Set([...added.flatMap(note => note.sourceTopics), ...discarded])
+      automatic.splice(0, automatic.length, ...automatic.filter(entry => !covered.has(entry.topic)),
+        ...added.map(note => ({ topic: note.topic, text: note.note })))
       after = automatic.length
     })
     return { who, before, after }
   }
 
-  // Members with a memory file: [{ who, count, bytes }]. Unreadable entries are skipped.
+  // Members with a memory file: [{ who, count, bytes, noteBytes }] (noteBytes: the automatic
+  // notes alone). Unreadable entries are skipped.
   async listMembers() {
     const directories = await readdir(this.directory).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error))
     const members = []
     for (const name of directories.filter(name => /^id-[a-f0-9]{64}$/.test(name))) {
       const content = await readFile(join(this.directory, name, 'MEMORY.md'), 'utf8').catch(() => null)
       const parsed = content && parseDocument(content)
-      if (parsed && directoryOf(parsed.id) === name) members.push({ who: parsed.id, count: parsed.automatic.length, bytes: Buffer.byteLength(content) })
+      if (parsed && directoryOf(parsed.id) === name) {
+        const noteBytes = Buffer.byteLength(parsed.automatic.map(entry => entry.topic + entry.text).join(''))
+        members.push({ who: parsed.id, count: parsed.automatic.length, bytes: Buffer.byteLength(content), noteBytes })
+      }
     }
     return members
   }
@@ -220,7 +254,10 @@ export class MarkdownMemory {
       const before = stored?.content
       change(document)
       if (!document.automatic.length && !document.manualRaw.trim()) {
-        if (stored) await rm(dirname(path), { recursive: true, force: true })
+        if (stored) {
+          await rm(path, { force: true })
+          await rmdir(dirname(path)).catch(() => {}) // only if nothing else is in it
+        }
         return
       }
       const content = renderDocument(id, document)

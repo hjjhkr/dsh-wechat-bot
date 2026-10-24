@@ -120,7 +120,7 @@ test('compaction replaces the topics it covered and keeps notes learned meanwhil
   const result = await memory.compact('alice', {
     notes: [{ topic: '游戏', note: '玩原神和星铁', sourceTopics: ['原神', '星铁'] }],
     discard: [{ topic: '行程', reason: 'temporary' }],
-  })
+  }, snapshot)
   assert.equal(snapshot.automatic.length, 3)
   assert.deepEqual(result, { who: 'alice', before: 4, after: 2 })
   assert.deepEqual(await memory.recall('alice'), { 城市: '住在杭州', 游戏: '玩原神和星铁' })
@@ -143,4 +143,48 @@ test('forgetting everything when nothing else is in the file removes the member 
   await memory.apply([note('alice', '城市', '杭州')], [message('m1', 'alice', '我在杭州')])
   assert.equal(await memory.forget('alice', '城市'), 1)
   assert.deepEqual(await readdir(memory.directory), [])
+})
+
+test('a compaction never brings back what was forgotten or overrides what was relearned meanwhile', async t => {
+  const { memory } = await store(t)
+  const evidence = [message('m1', 'alice', '猫和狗都喜欢，忘掉狗吧')]
+  await memory.apply([note('alice', '猫', '喜欢猫'), note('alice', '狗', '喜欢狗'), note('alice', '城市', '杭州')], evidence)
+  const snapshot = await memory.snapshot('alice')
+  await memory.forget('alice', '狗')                                      // while the model works
+  await memory.apply([note('alice', '城市', '搬去上海了')], evidence)       // relearned meanwhile
+  await memory.compact('alice', {
+    notes: [{ topic: '宠物', note: '喜欢猫和狗', sourceTopics: ['猫', '狗'] }],
+    discard: [{ topic: '城市', reason: 'outdated' }],
+  }, snapshot)
+  assert.deepEqual(await memory.recall('alice'), { 猫: '喜欢猫', 城市: '搬去上海了' })
+})
+
+test('a compacted note cannot take the name of a topic it did not merge, or of a manual one', async t => {
+  const { memory } = await store(t)
+  const evidence = [message('m1', 'alice', '玩原神')]
+  await memory.apply([note('alice', '游戏', '玩原神，满级'), note('alice', '原神', '玩原神'), note('alice', '原神角色', '喜欢胡桃')], evidence)
+  const snapshot = await memory.snapshot('alice')
+  await memory.compact('alice', { notes: [{ topic: '游戏', note: '玩原神喜欢胡桃', sourceTopics: ['原神', '原神角色'] }], discard: [] }, snapshot)
+  assert.deepEqual(await memory.recall('alice'), { 游戏: '玩原神，满级', 原神: '玩原神', 原神角色: '喜欢胡桃' }, 'nothing merged, nothing lost')
+})
+
+test('text people wrote outside the manual section makes the file skipped, never silently dropped', async t => {
+  const { memory } = await store(t)
+  const evidence = [message('m1', 'alice', '我在杭州')]
+  await memory.apply([note('alice', '城市', '杭州')], evidence)
+  const path = memory.pathOf('alice')
+  const edited = (await readFile(path, 'utf8')).replace('# 微信用户记忆\n', '# 微信用户记忆\n运营在标题下写的备注\n')
+  await writeFile(path, edited)
+  await memory.apply([note('alice', '城市', '上海')], evidence)
+  assert.equal(await readFile(path, 'utf8'), edited)
+  await writeFile(path, edited.replace('<!-- dsh-memory-id: "alice" -->', '<!-- dsh-memory-id: "car\\ol" -->'))
+  assert.deepEqual(await memory.context(['alice']), { notes: {}, documents: {} }, 'a broken id header is skipped too')
+})
+
+test('forgetting a member removes MEMORY.md, not other files next to it', async t => {
+  const { memory } = await store(t)
+  await memory.apply([note('alice', '城市', '杭州')], [message('m1', 'alice', '我在杭州')])
+  await writeFile(memory.pathOf('alice') + '.bak', 'my backup')
+  await memory.forget('alice')
+  assert.equal(await readFile(memory.pathOf('alice') + '.bak', 'utf8'), 'my backup')
 })

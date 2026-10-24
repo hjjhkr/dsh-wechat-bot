@@ -25,6 +25,7 @@ export class Store {
   #pending = new Map()
   #chains = new Map()
   #memories = new Map()
+  #legacy = new Map() // chat file → old in-state memory that could not be migrated yet
 
   constructor(dir, { delayMs = 1000, onError = () => {} } = {}) {
     this.dir = dir
@@ -53,19 +54,30 @@ export class Store {
   // `onProblem` reports memory files that cannot be read (first caller's is kept).
   memoryFor(chatId, onProblem) {
     const key = basename(this.chatPath(chatId), '.json')
-    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key, onProblem))
-    return this.#memories.get(key)
+    if (!this.#memories.has(key)) this.#memories.set(key, new MarkdownMemory(this.dir, key))
+    const memory = this.#memories.get(key)
+    if (onProblem) memory.onProblem = onProblem
+    return memory
   }
 
   // A state written by an older version may still hold memory and history: the memory
-  // moves to MEMORY.md files and the file is rewritten with the controls only.
+  // moves to MEMORY.md files and the file is rewritten with the controls only. Memory that
+  // cannot be migrated yet is kept (as legacyMemory) and tried again on the next load.
   async loadChat(chatId) {
     const path = this.chatPath(chatId)
     const state = await readJson(path, {})
-    if ((state.memory || state.transcript || state.log) && await this.memoryFor(chatId).migrate(state.memory)) {
-      await this.#serialize(path, () => writeJson(path, durableState(state)))
+    const legacy = state.memory ?? state.legacyMemory
+    if (legacy || state.transcript || state.log) {
+      if (!legacy || await this.memoryFor(chatId).migrate(legacy)) this.#legacy.delete(path)
+      else this.#legacy.set(path, legacy)
+      await this.#serialize(path, () => writeJson(path, this.#durable(path, state)))
     }
     return state
+  }
+
+  #durable(path, state) {
+    const legacy = this.#legacy.get(path)
+    return { ...durableState(state), ...(legacy ? { legacyMemory: legacy } : {}) }
   }
 
   // Schedule a write; the latest value (or value factory) wins.
@@ -89,7 +101,7 @@ export class Store {
       if (!this.#pending.has(path)) return
       const value = this.#pending.get(path)
       this.#pending.delete(path)
-      await writeJson(path, durableState(typeof value === 'function' ? value() : value))
+      await writeJson(path, this.#durable(path, typeof value === 'function' ? value() : value))
     })
   }
 

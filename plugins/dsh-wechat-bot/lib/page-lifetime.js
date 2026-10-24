@@ -36,6 +36,7 @@ export class PageLifetime {
         clearTimeout(this.#timer)
         request.signal?.addEventListener('abort', () => this.#close(page), { once: true })
         controller.enqueue(encode('retry: 1000\n\n'))
+        if (request.signal?.aborted) this.#close(page)
       },
       cancel: () => this.#close(page),
     })

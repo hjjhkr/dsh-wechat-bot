@@ -191,7 +191,7 @@ cd ../../adapters/wechat-db && python -m pytest tests     # 当前适配器 204 
 python -m pytest native-runtime/tests/python             # 已迁入 worker 90 项
 ```
 
-最近一次交付复核（2026-10-24）：Node **203 passed / 0 skipped**（含数据库端到端；`node_modules` 以目录联接指向 DSH 自带依赖，`WECHAT_DB_PYTHON` 指向装好 `requirements.txt` 的 Python），`STRESS_SCALE=3` 压力测试 6 项通过，适配器 **204 passed**。迁入 worker 在复核用的临时环境里 **87 passed / 3 failed**，3 项都是缺 `pywin32`（`win32file`）的环境问题；协作者在装好 `native-runtime/python/requirements.txt` 的环境中为 90 passed。直接运行 Node 测试需先满足 peerDependencies（或像上面那样联接 DSH 依赖）。真实模型以合成用例验证自然记忆、两位作者的玩笑约定、爸爸/爷爷称呼归属和第三方转述保护；未发微信。称呼输出曾在复跑中波动，不把一次通过视为模型永远正确；无请求的记忆删除建议由程序拒绝。
+最近一次交付复核（2026-10-24）：Node **209 passed / 0 skipped**（含数据库端到端；`node_modules` 以目录联接指向 DSH 自带依赖，`WECHAT_DB_PYTHON` 指向装好 `requirements.txt` 的 Python），`STRESS_SCALE=3` 压力测试 6 项通过，适配器 **204 passed**。迁入 worker 在复核用的临时环境里 **87 passed / 3 failed**，3 项都是缺 `pywin32`（`win32file`）的环境问题；协作者在装好 `native-runtime/python/requirements.txt` 的环境中为 90 passed。直接运行 Node 测试需先满足 peerDependencies（或像上面那样联接 DSH 依赖）。真实模型以合成用例验证自然记忆、两位作者的玩笑约定、爸爸/爷爷称呼归属和第三方转述保护；未发微信。称呼输出曾在复跑中波动，不把一次通过视为模型永远正确；无请求的记忆删除建议由程序拒绝。
 
 | 测试文件 | 覆盖 |
 | --- | --- |

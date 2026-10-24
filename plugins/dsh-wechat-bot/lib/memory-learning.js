@@ -368,7 +368,10 @@ export class MemoryLearner {
       // Notes not shown in full may only gain new topics: rewriting or merging needs the old text.
       const partial = new Set(request.partialIds)
       const unseen = update => partial.has(update.who) && (update.mergeTopics || Object.hasOwn(memory[update.who] ?? {}, update.topic.trim()))
-      const { applied, rejected } = await this.apply(proposals.filter(update => !unseen(update)), request.evidence.filter(m => !this.forgotten(m.id)))
+      // Notes only about this batch's authors: the only members whose memory was shown.
+      const authors = new Set(batch.map(m => m.sender.id))
+      const evidence = request.evidence.filter(m => authors.has(m.sender.id) && !this.forgotten(m.id))
+      const { applied, rejected } = await this.apply(proposals.filter(update => !unseen(update)), evidence)
       rejected.push(...proposals.filter(unseen).map(update => ({ update, problem: 'memory_not_shown' })))
       this.write('memory_learning', { count: batch.length, applied, rejected })
       // Saving is not learning: a failed save must not send the same messages to the model again.

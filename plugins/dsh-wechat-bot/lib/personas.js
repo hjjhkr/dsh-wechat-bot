@@ -38,9 +38,17 @@ export class PersonaLibrary {
     return files.filter(file => file.endsWith(EXT)).map(file => file.slice(0, -EXT.length)).sort()
   }
 
-  // The current persona's text.
-  text() {
-    return readFile(this.#path(this.name), 'utf8')
+  // The current persona's text. If its file was removed by hand, the default persona, or else
+  // the last text read, keeps the bot talking until the library is fixed.
+  async text() {
+    for (const name of new Set([this.name, this.fallback])) {
+      try {
+        return this.last = await readFile(this.#path(name), 'utf8')
+      } catch (error) {
+        if (error.code !== 'ENOENT') throw error
+      }
+    }
+    return this.last ?? ''
   }
 
   // Switches to `name`, or back to the configured default when `name` is undefined.

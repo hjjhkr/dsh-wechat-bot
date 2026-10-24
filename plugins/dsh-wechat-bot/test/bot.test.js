@@ -489,3 +489,25 @@ test('a long reply echoed back under a different id is recognised before truncat
   await sleep(100)
   assert.equal(env.bot.runner.transcript.filter(m => m.fromSelf).length, 1)
 })
+
+test('a failed connect that takes longer to close than the back-off is still followed by a new attempt', async t => {
+  const dataDir = await mkdtemp(join(tmpdir(), 'wechat-bot-slowclose-'))
+  t.after(() => rm(dataDir, { recursive: true, force: true, maxRetries: 5 }))
+  const created = []
+  const bot = new Bot({
+    dataDir, store: new Store(dataDir, { delayMs: 5 }), persona: '', think: async () => '{"reply":[]}', settings: FAST,
+    createAdapter: () => {
+      const { client } = linkedSimulator({ loggedIn: true })
+      if (!created.length) {
+        // Times out on the handshake, then takes 1.5 s (longer than the 1 s back-off) to exit.
+        client.initialize = async () => { throw new Error('initialize timed out') }
+        client.shutdown = async () => { client.peer.close(); await sleep(1500) }
+      }
+      created.push(client)
+      return client
+    },
+  })
+  t.after(() => bot.dispose())
+  await bot.start()
+  await until(() => created.length === 2 && bot.ready, { timeoutMs: 6000, what: 'a second attempt' })
+})

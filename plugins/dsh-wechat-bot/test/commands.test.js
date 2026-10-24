@@ -285,3 +285,17 @@ test('the library is seeded with the bundled personas once; hand edits are never
   assert.match(await library.text(), /MINI_WHALE_V4/, 'the default persona is 大肥鱼 (mini)')
   assert.doesNotMatch(await readFile(join(dir, '大肥鱼-pro.md'), 'utf8'), /每条回复最开头必须带/, 'no hidden tag that would be posted to WeChat')
 })
+
+test('a persona file removed by hand falls back to the default persona instead of silencing the bot', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'personas-'))
+  t.after(() => rm(dir, { recursive: true, force: true }))
+  await writeFile(join(dir, '大肥鱼.md'), '你是大肥鱼。')
+  await writeFile(join(dir, '小鲸鱼.md'), '你是小鲸鱼。')
+  const library = new PersonaLibrary({ dir, fallback: '大肥鱼' })
+  await library.use('小鲸鱼')
+  assert.equal(await library.text(), '你是小鲸鱼。')
+  await rm(join(dir, '小鲸鱼.md'))
+  assert.equal(await library.text(), '你是大肥鱼。')
+  await rm(join(dir, '大肥鱼.md'))
+  assert.equal(await library.text(), '你是大肥鱼。', 'the last text read keeps the bot talking')
+})

@@ -141,7 +141,8 @@ export class Bot extends EventEmitter {
     this.#changed()
     const delay = BACKOFF_MS[Math.min(this.#restarts++, BACKOFF_MS.length - 1)]
     this.note('warn', `适配器已断开，${delay / 1000} 秒后重连`)
-    this.restartTimer = setTimeout(() => this.#connect(), delay)
+    // After the failed attempt has finished closing (otherwise #connect would just return it).
+    this.restartTimer = setTimeout(() => (this.#connecting ?? Promise.resolve()).then(() => this.#connect()), delay)
     this.restartTimer.unref?.()
   }
 
