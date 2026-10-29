@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { systemPrompt, turnInput } from '../lib/prompt.js'
+import { systemPrompt, turnInput, splitTurnInput } from '../lib/prompt.js'
 
 const chat = { name: '△ 群', kind: 'group' }
 const at = Date.UTC(2026, 9, 22, 2, 0)
@@ -145,4 +145,46 @@ test('an "@昵称" in the text or the bot’s own name does not list extra membe
     batch: [message('new-1', { id: 'wxid_speaker', name: '说话者' }, '@王大锤 @小鲸鱼 晚上吃啥', { mentions: ['wxid_wang', 'wxid_bot'] })],
   })
   assert.deepEqual(input.chat.mentioned, [{ id: 'wxid_wang', name: '王大锤' }], 'only the @-ed member, by id')
+})
+
+test('reply input keeps new messages visible and injects complete history and ID-scoped memory separately', () => {
+  const original = {
+    now: '2026/10/29 09:40:53', chat, you: { id: 'wxid_bot', name: '小鲸鱼' },
+    recent: {
+      members: [{ id: 'alice', name: '阿离', memory: { 宠物: '养猫' }, messages: [{ id: 'old', text: '昨晚说的话' }] }],
+      yours: [{ id: 'bot-old', text: '之前的回复' }], order: ['old', 'bot-old'],
+    },
+    new: {
+      members: [{ id: 'alice', name: '阿离', aliases: ['Alice'], memoryDocument: '# 阿离的完整记忆',
+        messages: [{ id: 'new', text: '你是谁', addressed: 'you', quote: { messageId: 'bot-old', senderId: 'wxid_bot' } }] }],
+      order: ['new'],
+    },
+    event: { kind: 'engagement', style: 'comfort', target: { id: 'alice', name: '阿离' } },
+  }
+  const serialized = JSON.stringify(original)
+  const { background, input } = splitTurnInput(serialized)
+  assert.deepEqual(JSON.parse(input), {
+    now: original.now, chat, you: original.you,
+    new: { members: [{ id: 'alice', name: '阿离', aliases: ['Alice'], messages: original.new.members[0].messages }], order: ['new'] },
+    event: original.event,
+  })
+  assert.deepEqual(JSON.parse(background), {
+    recent: {
+      members: [{ id: 'alice', name: '阿离', messages: [{ id: 'old', text: '昨晚说的话' }] }],
+      yours: [{ id: 'bot-old', text: '之前的回复' }], order: ['old', 'bot-old'],
+    },
+    memory: { alice: { memory: { 宠物: '养猫' }, memoryDocument: '# 阿离的完整记忆' } },
+  })
+  assert.equal(JSON.stringify(original), serialized, 'splitting does not mutate the source snapshot')
+})
+
+test('an idle reply retains the trigger and all history with no incoming messages or memory', () => {
+  const { background, input } = splitTurnInput(JSON.stringify({
+    recent: { members: [], yours: [{ id: 'last', text: '等你回复' }], order: ['last'] },
+    new: { members: [], order: [] }, event: { kind: 'idle', minutes: 5 },
+  }))
+  assert.deepEqual(JSON.parse(input), { new: { members: [], order: [] }, event: { kind: 'idle', minutes: 5 } })
+  assert.deepEqual(JSON.parse(background), {
+    recent: { members: [], yours: [{ id: 'last', text: '等你回复' }], order: ['last'] }, memory: {},
+  })
 })

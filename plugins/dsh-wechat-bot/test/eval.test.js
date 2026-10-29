@@ -9,7 +9,7 @@ const inputOf = messages => testView(JSON.parse(messages[0].text))
 const oracle = async ({ messages }) => {
   const input = inputOf(messages)
   const target = input.new.findLast(m => m.addressed === 'you' || m.addressed === 'maybe')
-  return JSON.stringify(target ? { to: target.id, reply: ['嗯'] } : { reply: [] })
+  return JSON.stringify(target ? { intent: 'direct', to: target.id, reply: ['嗯'] } : { reply: [] })
 }
 
 test('the suite rewards a model that follows the addressing signals', async () => {
@@ -20,7 +20,7 @@ test('the suite rewards a model that follows the addressing signals', async () =
 })
 
 test('the suite catches a model that answers everything, and invalid output', async () => {
-  const chatty = async ({ messages }) => JSON.stringify({ to: inputOf(messages).new[0].id, reply: ['我来了'] })
+  const chatty = async ({ messages }) => JSON.stringify({ intent: 'direct', to: inputOf(messages).new[0].id, reply: ['我来了'] })
   const [report] = await runEval({ think: chatty, persona: '', settings: { typingDelay: false } })
   const names = report.results.filter(r => !r.ok).map(r => r.name)
   assert.ok(names.includes('两个群友互相 @'))

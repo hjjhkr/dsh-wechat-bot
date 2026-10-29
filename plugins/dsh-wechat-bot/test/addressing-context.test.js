@@ -8,6 +8,7 @@ const message = (id, senderId, time, extra = {}) => ({
   id,
   chatId: 'synthetic-group',
   time,
+  receivedAt: time,
   kind: 'text',
   text: extra.text ?? 'follow-up',
   sender: member(senderId),
@@ -61,10 +62,10 @@ test('sourceTime admits queued follow-ups after the source but rejects earlier o
   assert.deepEqual(addressOf(message('expired', 'member-a', 230_001), ctx), {
     addressed: 'none', reasons: [],
   })
-  assert.deepEqual(addressOf(message('invalid-source-order', 'member-a', 60_000), context({
+  assert.deepEqual(addressOf(message('source-clock-ahead', 'member-a', 60_000), context({
     lastBotTurns: [{ time: 50_000, sourceTime: 50_001, toSenderId: 'member-a' }],
   })), {
-    addressed: 'none', reasons: [],
+    addressed: 'maybe', reasons: ['follows_your_reply'],
   })
   assert.deepEqual(addressOf(message('before-unsourced-turn', 'member-a', 999), context({
     lastBotTurns: [{ time: 1_000, toSenderId: 'member-a' }],
@@ -162,4 +163,18 @@ test('explicit bot targeting and name signals keep their existing priority over 
   }), ctx), {
     addressed: 'maybe', reasons: ['mentions_your_name'],
   })
+})
+
+test('follow-up window and human redirection use local arrival times with source clock skew', () => {
+  const turn = { time: 10_000, sourceTime: 65_000, toSenderId: 'member-a' }
+  const skewed = (id, sender, time, receivedAt, extra = {}) => ({ ...message(id, sender, time, extra), receivedAt })
+  const queued = skewed('queued', 'member-a', 66_000, 9_000)
+  const current = skewed('current', 'member-a', 70_000, 15_000)
+  const earlierHuman = skewed('before-answer', 'member-b', 64_000, 8_000, { mentions: ['member-a'] })
+  const laterHuman = skewed('after-answer', 'member-b', 68_000, 12_000, { mentions: ['member-a'] })
+  assert.deepEqual(addressOf(queued, context({ lastBotTurns: [turn] })), { addressed: 'maybe', reasons: ['follows_your_reply'] })
+  assert.deepEqual(addressOf(current, context({ lastBotTurns: [turn], recent: [earlierHuman] })), { addressed: 'maybe', reasons: ['follows_your_reply'] })
+  assert.deepEqual(addressOf(current, context({ lastBotTurns: [turn], recent: [laterHuman] })), { addressed: 'none', reasons: ['human_conversation_after_reply'] })
+  const expired = skewed('expired', 'member-a', 250_001, 190_001)
+  assert.deepEqual(addressOf(expired, context({ lastBotTurns: [turn] })), { addressed: 'none', reasons: [] })
 })

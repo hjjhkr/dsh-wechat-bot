@@ -26,7 +26,7 @@ function runner(t, { learn, think, settings = {}, state, members } = {}) {
       const input = JSON.parse(args.messages[0].text)
       calls.push(input)
       return JSON.stringify(think ? await think(input) : {
-        to: input.new.order.at(-1), reply: ['收到'], memory: [],
+        intent: 'direct', to: input.new.order.at(-1), reply: ['收到'], memory: [],
       })
     },
     ...(learn && { learn: async args => {
@@ -42,12 +42,14 @@ function runner(t, { learn, think, settings = {}, state, members } = {}) {
 test('infer can learn a natural background fact without replying or being asked to remember', async t => {
   let source
   const { r, sent, calls } = runner(t, {
+    think: () => ({ reply: [] }),
     learn: async () => ({ memory: [{ who: A.id, topic: '工作', note: '在做语音编码器', evidence: source.id }] }),
   })
   source = message(A, '我最近在做语音编码器，正在调流式集成')
   r.receive(source)
   await until(() => r.memory.book.recall([A.id])[A.id]?.工作, { what: 'background memory' })
-  assert.equal(calls.length, 0)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].new.members[0].messages[0].addressed, 'none')
   assert.deepEqual(sent, [])
   assert.equal(r.memory.book.recall([A.id])[A.id].工作, '在做语音编码器')
 })
@@ -186,7 +188,8 @@ test('a roster result arriving after the initial deadline is still cached for la
 })
 
 test('background learning stays bounded and uses its own call budget under a flood', async t => {
-  const { r, learned, calls } = runner(t, {
+  const { r, learned, calls, sent } = runner(t, {
+    think: () => ({ reply: [] }),
     learn: async () => ({ memory: [] }),
     settings: { maxMessages: 3, memoryCallsPerMinute: 1, memoryRateWindowMs: 150 },
   })
@@ -196,7 +199,8 @@ test('background learning stays bounded and uses its own call budget under a flo
   await sleep(40)
   assert.equal(learned.length, 1, 'memory calls have an independent bounded rate')
   assert.ok(r.learner.pending <= 3)
-  assert.equal(calls.length, 0, 'background traffic does not trigger a chat reply')
+  assert.ok(calls.length > 0, 'ordinary messages reach the reply model')
+  assert.deepEqual(sent, [], 'the reply model can stay silent')
   await until(() => learned.length === 2)
 })
 
@@ -247,4 +251,68 @@ test('a transient learner failure retries once without waiting for another user 
   r.receive(source)
   await until(() => r.memory.book.recall([A.id])[A.id]?.偏好)
   assert.equal(attempts, 2)
+})
+
+test('infer follows a reply when WeChat message timestamps are ahead of the local clock', async t => {
+  const { r, sent, calls } = runner(t)
+  r.receive(message(A, '@机器人 看看这个', { mentions: [SELF.id], time: Date.now() + 56_000 }))
+  await until(() => sent.length === 1 && r.status === 'idle')
+  r.receive(message(A, '你个大肥鱼', { time: Date.now() + 56_000 }))
+  await until(() => calls.length === 2, { what: 'follow-up reaches the model' })
+  assert.equal(calls[1].new.members[0].messages[0].addressed, 'maybe')
+})
+
+test('infer gives ordinary messages from both members a model decision, including beside a follow-up', async t => {
+  const { r, sent, calls } = runner(t, {
+    think: input => ({ to: input.new.order.at(-1), reply: input.new.members.some(m => m.messages.some(x => x.addressed === 'you')) ? ['收到'] : [] }),
+  })
+  r.receive(message(A, '同一句普通聊天'))
+  await until(() => calls.length === 1 && r.status === 'idle', { timeoutMs: 500, what: 'first ordinary message' })
+  r.receive(message(B, '同一句普通聊天'))
+  await until(() => calls.length === 2 && r.status === 'idle', { timeoutMs: 500, what: 'second ordinary message' })
+  assert.equal(calls[0].new.members[0].messages[0].addressed, 'none')
+  assert.equal(calls[1].new.members[0].messages[0].addressed, 'none')
+  assert.deepEqual(sent, [])
+  r.receive(message(A, '@机器人 在吗', { mentions: [SELF.id] }))
+  await until(() => sent.length === 1 && r.status === 'idle')
+  r.receive(message(A, '相同的后续消息'))
+  await until(() => calls.length === 4 && r.status === 'idle')
+  r.receive(message(B, '相同的后续消息'))
+  await until(() => calls.length === 5 && r.status === 'idle', { timeoutMs: 500, what: 'other member ordinary message' })
+  assert.equal(calls[3].new.members[0].messages[0].addressed, 'maybe')
+  assert.equal(calls[4].new.members[0].messages[0].addressed, 'none')
+  assert.deepEqual(sent, ['收到'])
+})
+
+test('infer skips messages directed to other people and a redirected follow-up', async t => {
+  const { r, sent, calls } = runner(t)
+  r.receive(message(A, '@机器人 在吗', { mentions: [SELF.id] }))
+  await until(() => sent.length === 1 && r.status === 'idle')
+  await sleep(10)
+  const skipped = () => r.log.filter(e => e.type === 'skipped' && e.reason === 'not_for_me')
+  r.receive(message(A, '@阿乙 看看', { mentions: [B.id] }))
+  await until(() => skipped().length === 1 && r.status === 'idle')
+  r.receive(message(A, '回复阿乙', { quote: { senderId: B.id, text: '消息' } }))
+  await until(() => skipped().length === 2 && r.status === 'idle')
+  r.receive(message(B, '大家好', { mentions: ['all'] }))
+  await until(() => skipped().length === 3 && r.status === 'idle')
+  r.receive(message(A, '你说得对'))
+  await until(() => skipped().length === 4 && r.status === 'idle')
+  assert.deepEqual(skipped().map(e => Object.values(e.why)[0]), [
+    ['at_someone_else'], ['quotes_someone_else'], ['at_all'], ['human_conversation_after_reply'],
+  ])
+  assert.equal(calls.length, 1)
+  assert.deepEqual(sent, ['收到'])
+})
+
+test('infer retries an empty reply when someone explicitly addresses the bot', async t => {
+  let attempts = 0
+  const { r, sent, calls } = runner(t, { think: input => ({
+    to: input.new.order[0], reply: ++attempts === 1 ? [] : ['收到'],
+  }) })
+  r.receive(message(B, '@机器人 在吗', { mentions: [SELF.id] }))
+  await until(() => sent.length === 1 && r.status === 'idle')
+  assert.equal(calls.length, 2)
+  assert.ok(r.log.some(e => e.type === 'invalid_output' && e.code === 'must_reply'))
+  assert.deepEqual(sent, ['收到'])
 })

@@ -43,7 +43,7 @@ test('modes decide which batches reach the model: free / infer / at / silent', a
     assert.deepEqual(seen, expected, mode)
   }
   await probe('free', ['今天好热', 'deepseek出新模型了', '小鲸鱼，你热吗', '在吗'])
-  await probe('infer', ['deepseek出新模型了', '小鲸鱼，你热吗', '在吗'])
+  await probe('infer', ['今天好热', 'deepseek出新模型了', '小鲸鱼，你热吗', '在吗'])
   await probe('at-only', ['在吗'])
   await probe('silent', [])
   assert.match(sent(env).at(-1), /^已执行：切换为 silent/)

@@ -50,11 +50,20 @@ function replyParts(reply, { maxParts, stickers }) {
   return parts
 }
 
-export function parseDecision(text, { batch, maxParts = 3, stickers = [] }) {
+export function parseDecision(text, { batch, maxParts = 3, stickers = [], requireIntent = false }) {
   const value = extractJson(String(text ?? ''))
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new DecisionError('not_object', '输出必须是 JSON 对象')
   const reply = replyParts(value.reply, { maxParts, stickers })
   const to = typeof value.to === 'string' && batch.some(m => m.id === value.to) ? value.to : null
+  let intent
+  if (requireIntent && reply.length) {
+    if (value.intent !== 'direct' && value.intent !== 'interject') {
+      throw new DecisionError('bad_intent', '回复时 intent 必须是 direct 或 interject')
+    }
+    intent = value.intent
+    if (intent === 'direct' && !to) throw new DecisionError('direct_target', 'direct 必须指定 new 中的消息 id')
+    if (intent === 'interject' && reply.length > 1) throw new DecisionError('interject_parts', 'interject 最多回复一条')
+  }
   const memory = Array.isArray(value.memory) ? value.memory : []
-  return { to, reply, memory }
+  return { to, reply, memory, intent }
 }

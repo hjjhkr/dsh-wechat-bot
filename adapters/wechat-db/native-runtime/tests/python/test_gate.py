@@ -7,7 +7,15 @@ from pathlib import Path
 PLUGIN_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PLUGIN_ROOT / "python"))
 
-from dsh_wechat_bridge.gate import GateError, ProcessWatchdog, ensure_no_unresolved_leases, restore_original_byte, watchdog_recover  # noqa: E402
+from dsh_wechat_bridge.gate import (  # noqa: E402
+    GateError,
+    GateExecutionError,
+    ProcessWatchdog,
+    TemporaryByteGate,
+    ensure_no_unresolved_leases,
+    restore_original_byte,
+    watchdog_recover,
+)
 
 
 LEASE = {
@@ -28,6 +36,7 @@ class FakeMemory:
         self.value = value
         self.identity_ok = identity_ok
         self.writes = []
+        self.close_count = 0
 
     def verify_identity(self, lease):
         if not self.identity_ok:
@@ -39,6 +48,33 @@ class FakeMemory:
     def write_byte(self, lease, value):
         self.writes.append(value)
         self.value = value
+
+    def close(self):
+        self.close_count += 1
+
+
+class FakeWatchdog:
+    def __init__(self):
+        self.process = object()
+        self.started = False
+        self.stop_requested = False
+        self.exited = False
+
+    def start(self):
+        self.started = True
+
+    def wait_ready(self, timeout):
+        return True
+
+    def request_stop(self):
+        self.stop_requested = True
+
+    def wait_exit(self, timeout):
+        self.exited = True
+        return True
+
+    def status(self):
+        return {"gateActive": False, "gateRestored": True}
 
 
 class GateRestoreTests(unittest.TestCase):
@@ -76,6 +112,196 @@ class GateRestoreTests(unittest.TestCase):
         self.assertEqual(result, {"gateActive": False, "gateRestored": True})
         self.assertEqual(memory.writes, [0])
         self.assertEqual(memory.value, 0)
+
+
+class TemporaryByteGateTests(unittest.TestCase):
+    def _make_gate(self, state_root, memory):
+        watchdogs = []
+
+        def watchdog_factory(_path):
+            watchdog = FakeWatchdog()
+            watchdogs.append(watchdog)
+            return watchdog
+
+        gate = TemporaryByteGate(
+            LEASE | {"timeoutSeconds": 6},
+            state_root,
+            memory_factory=lambda _lease: memory,
+            watchdog_factory=watchdog_factory,
+        )
+        return gate, watchdogs
+
+    def test_already_enabled_byte_is_borrowed_without_creating_a_restore_lease(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, watchdogs = self._make_gate(temporary, memory)
+            actions = []
+
+            def action(assert_active):
+                assert_active()
+                actions.append("ran")
+                assert_active()
+                return "completed"
+
+            result, state = gate.run(action)
+
+            self.assertEqual((result, state), ("completed", {"gateActive": False, "gateRestored": True}))
+            self.assertEqual(actions, ["ran"])
+            self.assertEqual(memory.value, 1)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+            self.assertFalse((Path(temporary) / "gate-leases").exists())
+            self.assertIsNone(gate.lease_path)
+            self.assertIsNone(gate.memory)
+
+    def test_borrowed_action_cannot_reenter_run_and_outer_gate_closes_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            def action(assert_active):
+                with self.assertRaises(GateError):
+                    gate.run(lambda _assert_active: self.fail("nested action must not run"))
+                assert_active()
+                return "completed"
+
+            result, state = gate.run(action)
+
+            self.assertEqual((result, state), ("completed", {"gateActive": False, "gateRestored": True}))
+            self.assertEqual(memory.value, 1)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+
+    def test_borrowed_enabled_byte_stays_enabled_when_action_raises(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            def action(assert_active):
+                assert_active()
+                raise ValueError("action failed")
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(action)
+
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 1)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+            self.assertFalse((Path(temporary) / "gate-leases").exists())
+
+    def test_borrowed_action_error_keeps_its_reason_and_send_attempted_value(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, _watchdogs = self._make_gate(temporary, memory)
+            failure = RuntimeError("send outcome is uncertain")
+            failure.reason_code = "send_unknown"
+            failure.send_attempted = True
+
+            def action(assert_active):
+                assert_active()
+                raise failure
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(action)
+
+            self.assertEqual(caught.exception.reason_code, "send_unknown")
+            self.assertTrue(caught.exception.send_attempted)
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 1)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+
+    def test_borrowed_gate_assert_rejects_a_changed_byte_without_rewriting_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            def action(assert_active):
+                memory.value = 7
+                assert_active()
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(action)
+
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 7)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+
+    def test_borrowed_gate_assert_rejects_identity_drift_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=1)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            def action(assert_active):
+                memory.identity_ok = False
+                assert_active()
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(action)
+
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 1)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+
+    def test_unknown_initial_byte_fails_without_starting_a_watchdog_or_writing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=7)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(lambda _assert_active: self.fail("action must not run"))
+
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 7)
+            self.assertEqual(memory.writes, [])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(watchdogs, [])
+            self.assertFalse((Path(temporary) / "gate-leases").exists())
+
+    def test_original_byte_still_uses_watchdog_and_restores_the_temporary_enable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=0)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            result, state = gate.run(lambda assert_active: (assert_active(), "completed")[1])
+
+            self.assertEqual((result, state), ("completed", {"gateActive": False, "gateRestored": True}))
+            self.assertEqual(memory.value, 0)
+            self.assertEqual(memory.writes, [1, 0])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(len(watchdogs), 1)
+            self.assertTrue(watchdogs[0].started)
+            self.assertTrue(watchdogs[0].stop_requested)
+            self.assertTrue(watchdogs[0].exited)
+            self.assertFalse(list((Path(temporary) / "gate-leases").glob("*.json")))
+
+    def test_original_byte_is_restored_when_action_raises(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            memory = FakeMemory(value=0)
+            gate, watchdogs = self._make_gate(temporary, memory)
+
+            def action(assert_active):
+                assert_active()
+                raise ValueError("action failed")
+
+            with self.assertRaises(GateExecutionError) as caught:
+                gate.run(action)
+
+            self.assertEqual(caught.exception.state, {"gateActive": False, "gateRestored": True})
+            self.assertEqual(memory.value, 0)
+            self.assertEqual(memory.writes, [1, 0])
+            self.assertEqual(memory.close_count, 1)
+            self.assertEqual(len(watchdogs), 1)
+            self.assertTrue(watchdogs[0].stop_requested)
+            self.assertFalse(list((Path(temporary) / "gate-leases").glob("*.json")))
 
     def test_already_restored_byte_is_idempotent_without_a_write(self):
         memory = FakeMemory(value=0)

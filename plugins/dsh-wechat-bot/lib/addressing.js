@@ -12,24 +12,25 @@ const PUNCT = '\\s,，.。!！?？~～:：;；、…'
 
 const escape = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
-export function nameMatchers(names) {
-  const unique = [...new Set(names.map(n => n?.trim()).filter(n => n && n.length >= 2))]
-  if (!unique.length) return { vocative: () => false, mentioned: () => false }
+export function nameMatchers(names, minLength = 2) {
+  const unique = [...new Set(names.map(n => n?.trim()).filter(n => n && n.length >= minLength))]
+  if (!unique.length) return { vocative: () => false, mentioned: () => false, textAt: () => false }
   const alt = unique.map(escape).join('|')
   // "小鲸鱼，…" / "小鲸鱼你…" / "…，小鲸鱼" / "…你说呢 小鲸鱼?"
   const vocative = new RegExp(`^[${PUNCT}@]*(?:${alt})(?:[${PUNCT}]|你|您|$)|[${PUNCT}](?:${alt})[${PUNCT}]*$`, 'i')
   const mentioned = new RegExp(alt, 'i')
-  return { vocative: text => vocative.test(text), mentioned: text => mentioned.test(text) }
+  const textAt = new RegExp(`(?:^|[${PUNCT}])@(?:${alt})(?=[${PUNCT}]|$)`, 'i')
+  return { vocative: text => vocative.test(text), mentioned: text => mentioned.test(text), textAt: text => textAt.test(text) }
 }
 
-function isFollowUpTime(messageTime, turn) {
-  if (!Number.isFinite(messageTime) || !Number.isFinite(turn?.time)) return false
+// Source timestamps order messages; local arrival and send timestamps measure the window.
+function isFollowUpTime(message, turn) {
+  if (!Number.isFinite(message.receivedAt) || !Number.isFinite(turn?.time)) return false
   if (turn.sourceTime !== undefined) {
-    if (!Number.isFinite(turn.sourceTime) || turn.sourceTime > turn.time
-        || messageTime < turn.sourceTime || messageTime > turn.time + FOLLOW_UP_MS) return false
-    return true
+    return Number.isFinite(message.time) && Number.isFinite(turn.sourceTime)
+      && message.time >= turn.sourceTime && message.receivedAt <= turn.time + FOLLOW_UP_MS
   }
-  return messageTime >= turn.time && messageTime - turn.time <= FOLLOW_UP_MS
+  return message.receivedAt >= turn.time && message.receivedAt - turn.time <= FOLLOW_UP_MS
 }
 
 function quotedSenderId(message, recent = []) {
@@ -55,7 +56,7 @@ function humanConversationAfterTurn(message, turn, context) {
   const selfId = context.self.id
   return recent.some(item => {
     if (!item || item.id === message.id || item.fromSelf === true
-        || !Number.isFinite(item.time) || item.time <= turn.time || item.time > message.time) return false
+        || !Number.isFinite(item.receivedAt) || item.receivedAt <= turn.time || item.receivedAt > message.receivedAt) return false
     const authorId = item.sender?.id
     if (!authorId || authorId === selfId) return false
     if (authorId === memberId) return refersToAnotherMember(item, authorId, selfId, recent)
@@ -66,12 +67,14 @@ function humanConversationAfterTurn(message, turn, context) {
 // `context`: { chatKind, self: {id}, names: matchers, lastBotTurns?: [{time, toSenderId, sourceTime?}], recent?: Message[] }
 export function addressOf(message, context) {
   const reasons = []
-  const { self, names } = context
+  const { self, names, textAtNames } = context
   const quoted = quotedSenderId(message, context.recent)
   if (context.chatKind === 'direct') return { addressed: 'you', reasons: ['direct_chat'] }
+  const textAt = textAtNames?.textAt(message.text)
   if (message.mentions.includes(self.id)) reasons.push('at_you')
+  if (textAt && !message.mentions.length) reasons.push('at_you_text')
   if (quoted === self.id) reasons.push('quotes_you')
-  if (names.vocative(message.text)) reasons.push('calls_your_name')
+  if (names.vocative(message.text) && !(textAt && message.mentions.length && !message.mentions.includes(self.id))) reasons.push('calls_your_name')
   if (reasons.length) return { addressed: 'you', reasons }
 
   const others = message.mentions.filter(id => id !== self.id && id !== 'all')
@@ -84,7 +87,7 @@ export function addressOf(message, context) {
   const last = (context.lastBotTurns ?? [])
     .filter(turn => turn?.toSenderId === message.sender.id && Number.isFinite(turn.time))
     .reduce((latest, turn) => !latest || turn.time > latest.time ? turn : latest, null)
-  if (last && isFollowUpTime(message.time, last)) {
+  if (last && isFollowUpTime(message, last)) {
     // …unless they have turned to another member since (an @ or a quote of someone else).
     if (humanConversationAfterTurn(message, last, context)) {
       return { addressed: 'none', reasons: ['human_conversation_after_reply'] }

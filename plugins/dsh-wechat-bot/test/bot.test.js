@@ -48,6 +48,54 @@ test('addressing facts are attached to every message the model sees', async t =>
   assert.deepEqual(input.recent.map(m => m.text), ['我摔了'], 'already-processed messages move to recent')
 })
 
+test('at mode accepts typed bot account or group names and rejects other names', async t => {
+  const self = { id: 'wxid_bot', name: '初号机' }
+  const chats = [{ id: GROUP, name: '测试群', kind: 'group', members: [
+    { id: 'wxid_alice', name: '阿离' }, { id: 'wxid_bob', name: '老鲍' },
+    { id: self.id, name: '群初号机', aliases: ['旧名字'] },
+  ] }]
+  const env = await watching(t, { simulator: { self, chats }, settings: { mode: 'at', aliases: ['别名'] },
+    reply: () => ({ to: null, reply: ['收到'] }) })
+  await until(() => env.bot.runner.selfNames.includes('群初号机'))
+  for (const text of ['初号机在吗', '@老鲍 在吗', '@初号机宝宝 在吗', '@群初号机宝宝 在吗', '@旧名字 在吗', '@别名 在吗']) {
+    const before = env.bot.chatLog().filter(e => e.reason === 'at_only').length
+    say(env, 'wxid_alice', text)
+    await until(() => env.bot.chatLog().filter(e => e.reason === 'at_only').length > before, { what: `skip ${text}` })
+  }
+  const skipped = env.bot.chatLog().filter(e => e.reason === 'at_only').length
+  say(env, 'wxid_alice', '@初号机 在吗', { mentions: ['wxid_bob'] })
+  await until(() => env.bot.chatLog().filter(e => e.reason === 'at_only').length > skipped, { what: 'skip an actual mention of another member' })
+  assert.deepEqual(Object.values(env.bot.chatLog().filter(e => e.reason === 'at_only').at(-1).addressed), ['other'])
+  for (const text of ['@初号机 在吗', '请问 @群初号机，在吗', '@初号机']) {
+    const before = env.model.calls.length
+    say(env, 'wxid_alice', text)
+    await until(() => env.model.calls.length > before, { what: `respond to ${text}` })
+    assert.equal(env.model.calls.at(-1).input.new[0].addressed, 'you')
+    await until(() => sent(env).length === before + 1)
+  }
+  assert.equal(env.model.calls.length, 3)
+})
+
+test('at mode refreshes the bot group nickname after the member cache expires', async t => {
+  const self = { id: 'wxid_bot', name: '账号名字' }
+  const chats = [{ id: GROUP, name: '测试群', kind: 'group', members: [
+    { id: 'wxid_alice', name: '阿离' }, { id: self.id, name: '旧群名' },
+  ] }]
+  const env = await watching(t, { simulator: { self, chats }, settings: { mode: 'at', memberCacheTtlMs: 10, memoryLearning: false },
+    reply: () => ({ to: null, reply: ['收到'] }) })
+  await until(() => env.bot.runner.selfNames.includes('旧群名'))
+  env.simulator.chats.get(GROUP).members.find(m => m.id === self.id).name = '新群名'
+  await sleep(20)
+  say(env, 'wxid_alice', '普通聊天')
+  await until(() => env.bot.runner.roster.members?.some(m => m.id === self.id && m.name === '新群名'), { what: 'roster refresh' })
+  const skipped = env.bot.chatLog().filter(e => e.reason === 'at_only').length
+  say(env, 'wxid_alice', '@旧群名 在吗')
+  await until(() => env.bot.chatLog().filter(e => e.reason === 'at_only').length > skipped, { what: 'skip old group name' })
+  say(env, 'wxid_alice', '@新群名 在吗')
+  await until(() => sent(env).includes('收到'), { what: 'reply to current group name' })
+  assert.equal(env.model.calls.length, 1)
+})
+
 test('silence is corrected once when someone addressed the bot directly', async t => {
   const env = await watching(t, { reply: (_input, _call, n) => n === 1 ? { reply: [] } : { to: null, reply: ['？'] } })
   say(env, 'wxid_alice', '在吗', { mentions: ['wxid_bot'] })
@@ -347,7 +395,7 @@ test('Markdown memory survives exit while raw chat history is cleared', async t 
 test('background learning writes Markdown and the next reply consumes the same users document', async t => {
   const env = await watching(t, {
     settings: { mode: 'infer', memoryQuietMs: 10, memoryMaxWaitMs: 30 },
-    reply: input => ({ to: input.new[0].id, reply: ['收到'] }),
+    reply: input => ({ to: input.new[0].id, reply: input.new.some(message => message.addressed === 'you') ? ['收到'] : [] }),
     learn: async args => {
       const source = JSON.parse(args.messages[0].text).batch[0]
       return JSON.stringify({ memory: [{ who: source.sender.id, topic: '回答偏好', note: '先给结论，再解释原因', evidence: source.id }] })
@@ -355,10 +403,11 @@ test('background learning writes Markdown and the next reply consumes the same u
   })
   say(env, 'wxid_alice', '以后给我讲问题时，我更喜欢先给结论再解释原因')
   await until(() => logTypes(env).includes('memory_learning'))
-  assert.equal(env.model.calls.length, 0, 'background learning does not require a reply')
+  assert.equal(env.model.calls.length, 1, 'ordinary conversation reaches the reply model')
+  assert.deepEqual(sent(env), [], 'background learning does not require a reply to be sent')
   say(env, 'wxid_alice', '小鲸鱼，帮我比较一下两种方案')
-  await until(() => env.model.calls.length === 1)
-  assert.match(env.model.calls[0].raw.new.members[0].memoryDocument, /先给结论，再解释原因/)
+  await until(() => env.model.calls.length === 2)
+  assert.match(env.model.calls[1].raw.new.members[0].memoryDocument, /先给结论，再解释原因/)
 })
 
 test('stopping the bot\'s group stops processing it', async t => {

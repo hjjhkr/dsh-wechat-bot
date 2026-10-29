@@ -34,8 +34,10 @@ def test_owned_process_identity_never_adopts_a_reused_pid(tmp_path):
     state = {'desktop': spec.desktop, 'botWxid': spec.bot_id, 'pid': 12, 'startedAt': 100}
     assert session_running(spec, state, lambda _pid: {'exe': str(spec.exe), 'start': 100})
     assert not session_running(spec, state, lambda _pid: None)
+    assert not session_running(spec, state, lambda _pid: {'exe': str(spec.exe), 'start': 200})
+    assert not session_running(spec, state, lambda _pid: {'exe': 'unrelated.exe', 'start': 200})
     with pytest.raises(DesktopControlError):
-        session_running(spec, state, lambda _pid: {'exe': str(spec.exe), 'start': 200})
+        session_running(spec, state, lambda _pid: {'exe': 'unrelated.exe', 'start': 100})
     with pytest.raises(DesktopControlError):
         session_running(spec, {**state, 'desktop': 'Default'}, lambda _pid: None)
 
@@ -49,6 +51,9 @@ def test_process_identity_requires_the_recorded_process_instance(tmp_path):
         'pid': 12, 'startedAt': 100.0,
     }
     assert session_identity(spec, state, lambda _pid: None) is None
+    assert session_identity(spec, state, lambda _pid: {'exe': 'unrelated.exe', 'start': 200}) is None
+    with pytest.raises(DesktopControlError):
+        session_identity(spec, state, lambda _pid: {'exe': 'unrelated.exe', 'start': 100})
     with pytest.raises(DesktopControlError):
         session_identity(spec, {**state, 'startedAt': float('nan')}, lambda _pid: None)
     with pytest.raises(DesktopControlError):

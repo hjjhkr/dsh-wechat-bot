@@ -23,7 +23,7 @@ import { EFFORTS, ModelError } from './models.js'
 // When the model is asked at all. All modes answer commands.
 export const MODES = Object.freeze({
   free: '自由：每批消息都给模型，它自己决定要不要接话',
-  infer: '推断：程序先判断是不是在跟我说话（@、引用、叫名字、接话），像是才交给模型',
+  infer: '推断：判断是否有人找我，主动插话有间隔',
   at: '只回@：只有被 @ 或被引用回复时才说话',
   silent: '静音：不说话（命令仍然可用）',
 })

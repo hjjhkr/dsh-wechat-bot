@@ -113,6 +113,6 @@ export class Store {
 }
 
 function durableState(state) {
-  return Object.fromEntries(['mode', 'wait', 'mutedUntil', 'stats', 'cron', 'engagement', 'forgottenEvidence']
+  return Object.fromEntries(['mode', 'wait', 'mutedUntil', 'stats', 'cron', 'briefings', 'engagement', 'forgottenEvidence', 'lastInterjectionAt']
     .filter(key => state[key] !== undefined).map(key => [key, state[key]]))
 }

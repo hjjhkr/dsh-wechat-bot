@@ -35,9 +35,9 @@ export class Bot extends EventEmitter {
   #watchFailures = 0
 
   // `personas`: the persona library; or `persona`, a fixed persona text (tests, evaluation).
-  constructor({ createAdapter, store, persona, personas, settings = {}, think, learn, dataDir, commands = new CommandRegistry(), models }) {
+  constructor({ createAdapter, store, persona, personas, settings = {}, think, learn, dataDir, commands = new CommandRegistry(), models, briefings }) {
     super()
-    Object.assign(this, { createAdapter, store, persona, personas, think, learn, dataDir, commands, models })
+    Object.assign(this, { createAdapter, store, persona, personas, think, learn, dataDir, commands, models, briefings })
     this.settings = { ...botDefaults, ...settings }
     store.onError = error => this.note('error', `保存状态失败：${error.message}`)
   }
@@ -261,7 +261,7 @@ export class Bot extends EventEmitter {
   #createRunner(chat, state) {
     const runner = new ChatRunner({
       chat, state, persona: this.personas ? () => this.personas.text() : this.persona, personas: this.personas,
-      commands: this.commands, settings: this.settings, models: this.models,
+      commands: this.commands, settings: this.settings, models: this.models, briefings: this.briefings,
       memory: this.store.memoryFor(chat.id, message => this.note('warn', message)),
       // During an adapter restart the account is briefly unknown; keep using the last one.
       account: () => this.account.self ?? this.#lastSelf,

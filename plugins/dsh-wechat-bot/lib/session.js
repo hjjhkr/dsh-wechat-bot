@@ -11,9 +11,11 @@ const readOnly = () => { throw new Error(READ_ONLY) }
 export const chatSessionId = (selfId, chatId) =>
   SessionId('wechat-' + createHash('sha256').update(`${selfId}\0${chatId}`).digest('hex').slice(0, 32))
 
-// A separate namespace keeps live-only mirrors from adopting old persisted logs.
+// A live mirror belongs to this host run. Reusing an interrupted run's id leaves
+// a workspace slot with no durable header for the registry to index on startup.
+const LIVE_SESSION_RUN = randomUUID()
 export const liveChatSessionId = (selfId, chatId) =>
-  SessionId(chatSessionId(selfId, chatId).replace('wechat-', 'wechat-live-'))
+  SessionId('wechat-live-' + createHash('sha256').update(`${LIVE_SESSION_RUN}\0${selfId}\0${chatId}`).digest('hex').slice(0, 32))
 
 // A native DSH session that mirrors one WeChat chat's model calls: every turn
 // shows the batch the bot saw and the model's raw decision, streamed live.

@@ -48,14 +48,15 @@ async function runScenario(scenario, { think, persona, settings, effort }) {
     if (quote === undefined) return parseMessage(message)
     const original = history[quote]
     return parseMessage({ ...message, quote: { messageId: original.id, senderId: original.sender.id, senderName: original.sender.name, text: original.text } })
-  })
+  }).map(message => ({ ...message, receivedAt: message.time }))
   const runner = new ChatRunner({
     chat, persona, settings: { ...settings, correctionRetries: 0, idleMinutes: 0 },
     account: () => SELF,
     link: { send: async () => ({}), canSend: () => true, whenCanSend: async () => {} },
     think: args => think({ ...args, effort }),
   })
-  runner.prime(history.map(parseMessage))
+  // Scenarios use one synthetic clock for both source and local arrival times.
+  runner.prime(history.map(message => ({ ...parseMessage(message), receivedAt: message.time })))
   const lastBot = history.findLast(m => m.fromSelf)
   const answered = lastBot && history.findLast(m => !m.fromSelf && m.time < lastBot.time)
   if (answered) runner.lastBotTurns = [{ time: lastBot.time, toSenderId: answered.sender.id }]

@@ -19,6 +19,12 @@ import { until } from './helpers.js'
 
 const CHAT = { id: 'demo@chatroom', name: '测试群', kind: 'group' }
 const ROUTE = { provider: 'test-provider', model: 'test-model', maxTokens: 100, reasoningEffort: 'off' }
+const TURN = {
+  now: '2026/10/29 09:40:53', chat: CHAT, you: { id: 'wxid_bot', name: '小鲸鱼' },
+  recent: { members: [{ id: 'alice', name: '阿离', messages: [{ id: 'old', text: '完整保留的历史消息' }] }], yours: [], order: ['old'] },
+  new: { members: [{ id: 'alice', name: '阿离', memoryDocument: '# 完整保留的个人记忆',
+    messages: [{ id: 'new', text: '你是谁', addressed: 'you' }] }], order: ['new'] },
+}
 
 async function fixture(t, llm = fakeLlm(async function* () {})) {
   const root = await mkdtemp(join(tmpdir(), 'wechat-dsh-'))
@@ -79,20 +85,27 @@ test('each model call becomes a visible, persisted turn in the chat session', as
     yield { type: 'text-delta', index: 0, text: '["草"]}' }
     yield { type: 'finish', reason: { kind: 'stop' } }
   })
-  const think = createThink({ llm, route: () => ROUTE, mirror: async () => session })
-  const output = await think({ chat: CHAT, system: '人设', messages: [{ role: 'user', text: '{"new":[]}' }], readable: '测试群（1 条新消息）' })
+  const think = createThink({ llm, role: 'reply', route: () => ROUTE, mirror: async () => session })
+  const output = await think({ chat: CHAT, system: '人设', messages: [{ role: 'user', text: JSON.stringify(TURN) }], readable: '测试群（1 条新消息）' })
 
   assert.equal(output, '{"reply":["草"]}')
   assert.deepEqual(frames, ['start', 'chunk', 'chunk', 'chunk', 'end'], 'two deltas and the finish chunk')
   assert.equal(llm.requests[0].reasoningEffort, 'off')
-  assert.equal(llm.requests[0].system, '人设')
-  assert.equal(llm.requests[0].tools, undefined, 'the mirror never exposes tools to the model')
+  assert.match(llm.requests[0].system, /人设/)
+  const background = JSON.parse(llm.requests[0].system.split('\n\n# 本轮后台上下文\n')[1])
+  assert.deepEqual(background, { recent: TURN.recent, memory: { alice: { memoryDocument: '# 完整保留的个人记忆' } } })
+  const input = llm.requests[0].messages[0].content[0].text
+  assert.deepEqual(JSON.parse(input), {
+    now: TURN.now, chat: CHAT, you: TURN.you,
+    new: { members: [{ id: 'alice', name: '阿离', messages: [{ id: 'new', text: '你是谁', addressed: 'you' }] }], order: ['new'] },
+  })
+  assert.ok(llm.requests[0].tools.some(tool => tool.name === 'read_website'))
   assert.deepEqual(attached, [{ path: root, id: session.id }])
   assert.equal(ctx.sessionTitle.get(session.session).title, '微信 · 测试群')
 
   const events = session.session.snapshotEvents()
   const shown = events.find(e => e.type === 'user/message').data.content[0].text
-  assert.equal(shown, '测试群（1 条新消息）\n\n模型收到的输入：\n{"new":[]}')
+  assert.equal(shown, input, 'the session displays exactly the current user JSON, with background injected separately')
   assert.equal(events.filter(e => e.type === 'assistant/message').length, 1)
   assert.equal(events.findLast(e => e.type === 'turn/end').data.reason.kind, 'completed')
   assert.throws(() => session.followup({}), /只展示微信机器人/)
@@ -120,13 +133,35 @@ test('app startup binds the saved WeChat group to a native session and mirrors r
     const mirror = ctx.agents.get(attached.at(-1).id)
     assert.ok(mirror, 'the application owns a native session before the first model call')
     const output = await app.bot.think({ chat: CHAT, system: '人设',
-      messages: [{ role: 'user', text: '{"new":[]}' }], readable: '应用接线测试' })
+      messages: [{ role: 'user', text: JSON.stringify(TURN) }], readable: '应用接线测试' })
     assert.equal(output, '{"to":null,"reply":[]}')
     assert.equal(mirror.session.snapshotEvents().filter(e => e.type === 'assistant/message').length, 1)
     assert.equal(llm.requests.length, 1)
   } finally {
     await app.dispose()
   }
+})
+
+test('reply correction keeps the same background and ordered messages while showing only the correction', async t => {
+  const { open } = await fixture(t)
+  const session = await open()
+  t.after(() => session.dispose())
+  const llm = fakeLlm(async function* () {
+    yield { type: 'text-delta', index: 0, text: '{"to":"new","reply":["收到"]}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const think = createThink({ llm, role: 'reply', route: () => ROUTE, mirror: async () => session })
+  const messages = [{ role: 'user', text: JSON.stringify(TURN) }]
+  await think({ chat: CHAT, system: '人设', messages })
+  messages.push({ role: 'assistant', text: '格式错误的回复' }, { role: 'user', text: '请重新输出完整 JSON。' })
+  await think({ chat: CHAT, system: '人设', messages })
+  assert.equal(llm.requests[1].system, llm.requests[0].system)
+  assert.deepEqual(llm.requests[1].messages.map(message => [message.role, message.content[0].text]), [
+    ['user', llm.requests[0].messages[0].content[0].text], ['assistant', '格式错误的回复'], ['user', '请重新输出完整 JSON。'],
+  ])
+  const shown = session.session.snapshotEvents().filter(event => event.type === 'user/message').map(event => event.data.content[0].text)
+  assert.deepEqual(shown, [llm.requests[0].messages[0].content[0].text, '请重新输出完整 JSON。'])
+  assert.equal(messages[0].text, JSON.stringify(TURN), 'a retry retains the original complete source snapshot')
 })
 
 test('a live mirror appears in DSH without a persisted log and is forgotten on dispose', async t => {
@@ -373,7 +408,7 @@ test('production reply and learning calls load only their own AGENTS contract', 
     yield { type: 'finish', reason: { kind: 'stop' } }
   })
   const { app } = await maintenanceApp(t, llm, {})
-  const args = { chat: CHAT, system: '当前调用协议', messages: [{ role: 'user', text: '{}' }], readable: '测试角色' }
+  const args = { chat: CHAT, system: '当前调用协议', messages: [{ role: 'user', text: JSON.stringify(TURN) }], readable: '测试角色' }
   await app.bot.think(args)
   await app.bot.learn(args)
   assert.match(llm.requests[0].system, /# 微信回复决策/)
@@ -401,4 +436,56 @@ test('the thirtieth learned theme automatically enters maintenance through the l
   assert.equal((await memory.snapshot('alice')).automatic.length, 30)
   assert.equal(app.state().memoryMaintenance.results[0].status, 'completed')
   assert.equal(app.chatLog().filter(entry => entry.type === 'sent').length, 0)
+})
+
+
+test('the application prepares a Chinese HLTV briefing from verified cloud news', async t => {
+  const llm = fakeLlm(async function* () {
+    yield { type: 'text-delta', index: 0, text: '{"summary":"赛事对阵出炉：四分之一决赛将上演两场焦点战。"}' }
+    yield { type: 'finish', reason: { kind: 'stop' } }
+  })
+  const { ctx, root } = await fixture(t, llm)
+  await ctx.plugin(class extends Service {
+    constructor(ctx) { super(ctx, 'credentials') }
+    async resolve(ref) { return ref === 'DEEPSEEK_API_KEY' ? { value: 'fake-test-token' } : undefined }
+  }).await()
+  const today = new Date().toISOString().slice(0, 10)
+  const [year, month, day] = today.split('-')
+  const title = 'PGL Masters Bucharest bracket set'
+  const articleUrl = 'https://www.hltv.org/news/45844/pgl-masters-bucharest-bracket-set'
+  const previousFetch = globalThis.fetch
+  globalThis.fetch = async (url, options) => {
+    url = String(url)
+    if (!url.startsWith('https://api.deepseek.com/v1/tools/')) throw new Error('HLTV briefing did not use cloud provider')
+    const input = JSON.parse(options.body)
+    if (url.endsWith('/search')) return Response.json({ results: [{ url: articleUrl, title, snippet: 'fixture', date: null }] })
+    if (!url.endsWith('/fetch')) throw new Error('unexpected fetch endpoint')
+    return Response.json({ content: input.url.includes('/archive/')
+      ? '## News from October, 2026\n\n' + title + '\n\n' + today + '\n\n2 comments\n'
+      : '# ' + title + '\n\n' + day + '-' + month + '-' + year + ' 03:05\n\nAurora plays MOUZ, BETBOOM plays FURIA.' })
+  }
+  t.after(() => { globalThis.fetch = previousFetch })
+  const config = { dataDir: join(root, 'wechat-bot'), adapter: { command: '' }, model: ROUTE, aliases: [],
+    behavior: { staleMinutes: 10, memoryLearning: false }, guard: { maxTurnsPerMinute: 8, commandsPerMinute: 6, modelTimeoutSeconds: 30, maxTextChars: 2000, breakerThreshold: 3, breakerBaseSeconds: 30, stuckMinutes: 5 } }
+  const store = new Store(config.dataDir)
+  const scheduleDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai' }).format(new Date())
+  await store.updateBot({ chat: CHAT, setup: { workspace: root, sessionId: 'setup-session', completedAt: 1, self: { id: 'wxid_bot', name: '小鲸鱼' } } })
+  store.saveChatLater(CHAT.id, { briefings: { date: scheduleDate, hltv: { at: Date.now() - 1000, status: 'pending' }, apex: { at: Date.now() + 3600_000, status: 'pending' } } })
+  await store.flush()
+  const app = await WeChatBotApp.create(ctx, config)
+  try {
+    await until(() => app.bot.runner?.snapshot().briefings?.hltv.status === 'sent', { what: 'scheduled HLTV briefing', timeoutMs: 5000 })
+    const messages = await app.bot.adapter.history(CHAT.id, 30)
+    const text = messages.find(message => message.fromSelf)?.text
+    assert.ok(text, 'the simulated selected group received the message')
+    assert.match(text, /赛事对阵出炉/)
+    assert.ok(text.includes(articleUrl), 'the result includes the verified source')
+    assert.ok(!text.includes('{"summary"'), 'the group sees the summary, not the model wire format')
+    assert.ok(!text.includes('fake-test-token'))
+    llm.stream = async function* () {
+      yield { type: 'text-delta', index: 0, text: '{"summary":"更多内容：www.example.com"}' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    }
+    await assert.rejects(app.bot.briefings.hltv({ signal: AbortSignal.timeout(3000) }), /摘要格式无效/)
+  } finally { await app.dispose() }
 })

@@ -69,9 +69,9 @@ test('addressing distinguishes you / maybe / other / none', () => {
 test('a follow-up from the person the bot just answered is "maybe", others stay "none"', () => {
   const now = Date.now()
   const ctx = { chatKind: 'group', self: { id: 'bot' }, names: nameMatchers([]), lastBotTurns: [{ time: now - 30_000, toSenderId: 'alice' }] }
-  assert.equal(addressOf(msg('a', '真的假的'), ctx).addressed, 'maybe')
-  assert.equal(addressOf(msg('b', '真的假的', { sender: { id: 'bob', name: '老鲍' } }), ctx).addressed, 'none')
-  assert.equal(addressOf(msg('c', '真的假的', { time: now + 10 * 60_000 }), ctx).addressed, 'none')
+  assert.equal(addressOf({ ...msg('a', '真的假的'), receivedAt: now }, ctx).addressed, 'maybe')
+  assert.equal(addressOf({ ...msg('b', '真的假的', { sender: { id: 'bob', name: '老鲍' } }), receivedAt: now }, ctx).addressed, 'none')
+  assert.equal(addressOf({ ...msg('c', '真的假的', { time: now + 10 * 60_000 }), receivedAt: now + 10 * 60_000 }, ctx).addressed, 'none')
 })
 
 test('decision parsing tolerates fences and prose, splits lines, strips only stage directions', () => {

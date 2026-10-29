@@ -25,6 +25,15 @@ test('new snapshots retain controls without writing chat bodies or duplicate mem
   assert.deepEqual(JSON.parse(raw), { mode: 'at', wait: { quietMs: 1000, maxWaitMs: 3000 }, forgottenEvidence: ['old-id'] })
 })
 
+test('the last interjection time survives reopening without persisting its chat body', async t => {
+  const store = await fixture(t)
+  store.saveChatLater('group', { lastInterjectionAt: 1_793_254_123_000, transcript: [{ text: 'temporary-interjection-body' }] })
+  await store.flush()
+  const restored = await new Store(store.dir).loadChat('group')
+  assert.equal(restored.lastInterjectionAt, 1_793_254_123_000)
+  assert.equal(restored.transcript, undefined)
+})
+
 test('loading a chat saved by an older version moves its memory to files and drops the history', async t => {
   const store = await fixture(t)
   const path = store.chatPath('previous-group')
@@ -63,4 +72,12 @@ test('an existing MEMORY.md is never overwritten by the old copy', async t => {
   await writeFile(path, JSON.stringify({ memory: { members: { alice: { notes: [{ topic: '偏好', text: '旧偏好' }] } } } }))
   await store.loadChat('group')
   assert.deepEqual(await memory.recall('alice'), { 偏好: '新偏好' })
+})
+
+
+test('daily briefing state survives reopening a group', async t => {
+  const store = await fixture(t)
+  store.saveChatLater('group', { briefings: { hltv: { date: '2026-10-29', sent: true } } })
+  await store.flush()
+  assert.deepEqual((await store.loadChat('group')).briefings, { hltv: { date: '2026-10-29', sent: true } })
 })

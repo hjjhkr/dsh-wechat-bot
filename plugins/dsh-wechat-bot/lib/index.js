@@ -28,7 +28,8 @@ export const Config = z.object({
   aliases: z.array(z.string()).default(['小鲸鱼', 'DeepSeek']).description('Names people call the bot besides its WeChat name.'),
   stickers: z.dict(z.string()).default({}).description('Sticker name → image path the model may send.'),
   behavior: z.object({
-    mode: z.union(['free', 'infer', 'at', 'silent']).default('infer').description('free: model sees every batch; infer: only batches that seem addressed to the bot; at: only @/quote; silent: never speaks.'),
+    mode: z.union(['free', 'infer', 'at', 'silent']).default('infer').description('free: model sees every batch; infer: decide whether addressed and limit unsolicited interjections; at: only @/quote; silent: never speaks.'),
+    interjectionIntervalMs: z.natural().default(120000).description('Minimum milliseconds between unsolicited infer-mode interjections.'),
     quietMs: z.natural().default(3000).description('Close a batch after this long without new messages.'),
     maxWaitMs: z.natural().default(8000).description('Never hold a batch longer than this after its first message.'),
     maxMessages: z.natural().min(1).default(20),

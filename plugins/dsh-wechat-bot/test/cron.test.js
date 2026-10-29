@@ -239,3 +239,125 @@ test('a failed save never stops the scheduler', async () => {
   assert.deepEqual(sends, ['第一个', '第二个'])
   assert.ok(runner.log.some(e => e.type === 'error' && e.message.includes('定时保存失败')))
 })
+
+test('daily briefing is saved before sending and does not repeat after runner restart', async () => {
+  const now = Date.now()
+  const date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const state = { briefings: { date, hltv: { at: now - 100, status: 'pending' }, apex: { at: now + 3600_000, status: 'pending' } } }
+  const sends = [], saved = []
+  const link = { send: async (content, id) => { sends.push(content.text); return { messageId: id } }, canSend: () => true, whenCanSend: async () => {} }
+  const options = {
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }), link,
+    think: async () => '{}', briefings: { hltv: async () => '新闻', apex: async () => '地图' },
+  }
+  let runner
+  runner = new ChatRunner({ ...options, state, persist: async () => saved.push(structuredClone(runner.snapshot())) })
+  await until(() => sends.length === 1, { timeoutMs: 2000, what: 'daily briefing' })
+  assert.deepEqual(sends, ['新闻'])
+  assert.equal(saved[0].briefings.hltv.status, 'running')
+  await until(() => runner.snapshot().briefings.hltv.status === 'sent')
+  const snapshot = runner.snapshot()
+  await runner.quiesce()
+  runner = new ChatRunner({ ...options, state: snapshot })
+  await sleep(100)
+  await runner.quiesce()
+  assert.deepEqual(sends, ['新闻'])
+})
+
+test('a successful briefing is not reported as failed if saving the result fails', async () => {
+  const now = Date.now(), date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const sends = []
+  let saves = 0
+  const runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async content => { sends.push(content.text); return { messageId: '1' } }, canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: async () => '新闻', apex: async () => '地图' },
+    state: { briefings: { date, hltv: { at: now - 100, status: 'pending' }, apex: { at: now + 3600_000, status: 'pending' } } },
+    persist: async () => { if (++saves > 1) throw new Error('EPERM') },
+  })
+  await until(() => runner.log.some(e => e.type === 'error'), { timeoutMs: 2000 })
+  assert.deepEqual(sends, ['新闻'])
+  assert.equal(runner.snapshot().briefings.hltv.status, 'sent')
+  await runner.quiesce()
+})
+
+test('apex uses 19:30 Beijing time; a fetch failure is recorded and sends nothing', async () => {
+  const now = Date.now(), date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const sends = [], saved = []
+  let target, runner
+  runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async content => sends.push(content.text), canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: async () => '新闻', apex: async ({ at }) => { target = at; throw new Error('地图接口失败') } },
+    state: { briefings: { date, hltv: { at: now + 3600_000, status: 'pending' }, apex: { at: now - 100, status: 'pending' } } },
+    persist: async () => saved.push(structuredClone(runner.snapshot())),
+  })
+  await until(() => runner.snapshot().briefings.apex.status === 'failed', { timeoutMs: 2000 })
+  assert.equal(target, Date.parse(`${date}T11:30:00Z`))
+  assert.deepEqual(sends, [])
+  assert.equal(saved.at(-1).briefings.apex.error, '地图接口失败')
+  assert.ok(runner.log.some(e => e.type === 'briefing_error' && e.message === '地图接口失败'))
+  await runner.quiesce()
+})
+
+test('switching away aborts an in-flight briefing before it can send', async () => {
+  const now = Date.now(), date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const sends = []
+  let release, signal
+  const runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async content => sends.push(content.text), canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: args => { signal = args.signal; return new Promise(resolve => { release = resolve }) }, apex: async () => '地图' },
+    state: { briefings: { date, hltv: { at: now - 100, status: 'pending' }, apex: { at: now + 3600_000, status: 'pending' } } },
+  })
+  await until(() => release, { timeoutMs: 2000 })
+  runner.dispose()
+  assert.equal(signal.aborted, true)
+  release('新闻')
+  await runner.quiesce()
+  assert.deepEqual(sends, [])
+})
+
+test('a briefing interrupted by restart is recorded without sending it again', async () => {
+  const now = Date.now(), date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const sends = []
+  const runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async content => sends.push(content.text), canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: async () => '新闻', apex: async () => '地图' },
+    state: { briefings: { date, hltv: { at: now - 100, status: 'running' }, apex: { at: now + 3600_000, status: 'pending' } } },
+  })
+  await until(() => runner.snapshot().briefings.hltv.status === 'interrupted', { timeoutMs: 2000 })
+  assert.deepEqual(sends, [])
+  assert.ok(runner.log.some(e => e.type === 'briefing_error' && e.kind === 'hltv'))
+  await runner.quiesce()
+})
+
+test('a new day plans Apex at 17:30 and chooses HLTV within the remaining daytime window', async () => {
+  const now = Date.now(), date = new Date(now + 8 * 3600_000).toISOString().slice(0, 10)
+  const start = Date.parse(`${date}T02:00:00Z`), end = Date.parse(`${date}T13:00:00Z`)
+  const runner = new ChatRunner({
+    chat: { id: GROUP, name: '群', kind: 'group' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async () => ({ messageId: '1' }), canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: async () => '新闻', apex: async () => '地图' },
+  })
+  await until(() => runner.snapshot().briefings?.date === date, { timeoutMs: 2000 })
+  const plan = runner.snapshot().briefings
+  assert.equal(plan.apex.at, Date.parse(`${date}T09:30:00Z`))
+  if (now < end) assert.ok(plan.hltv.at >= Math.max(start, now) && plan.hltv.at < end)
+  else assert.equal(plan.hltv.status, 'missed')
+  await runner.quiesce()
+})
+
+test('briefings do not run in a private chat', async () => {
+  const calls = []
+  const runner = new ChatRunner({
+    chat: { id: 'private', name: '私聊', kind: 'private' }, persona: '', account: () => ({ id: 'bot', name: '机器人' }),
+    link: { send: async () => ({ messageId: '1' }), canSend: () => true, whenCanSend: async () => {} },
+    think: async () => '{}', briefings: { hltv: async () => calls.push('hltv'), apex: async () => calls.push('apex') },
+  })
+  await sleep(100)
+  assert.deepEqual(calls, [])
+  assert.equal(runner.snapshot().briefings, undefined)
+  await runner.quiesce()
+})

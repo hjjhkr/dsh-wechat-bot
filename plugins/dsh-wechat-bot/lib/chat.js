@@ -23,6 +23,7 @@ export const chatDefaults = Object.freeze({
   correctionRetries: 1,
   staleMs: 10 * 60_000,
   idleMinutes: 0,
+  interjectionIntervalMs: 120_000, // minimum gap between infer-mode unsolicited interjections
   sendRetries: 2,
   retryDelayMs: 2000,
   typingDelay: true,
@@ -57,7 +58,7 @@ const COMMAND_SENDERS_LIMIT = 500
 // Scheduled messages are checked at least this often, so long delays, sleep and clock changes are safe.
 const CRON_TICK_MS = 60_000
 // Signals that count as "@" for the `at` mode.
-const AT_REASONS = new Set(['at_you', 'quotes_you', 'direct_chat'])
+const AT_REASONS = new Set(['at_you', 'at_you_text', 'quotes_you', 'direct_chat'])
 
 export const WAIT_LIMITS = Object.freeze({ minQuietMs: 500, maxQuietMs: 30_000, maxMaxWaitMs: 120_000 })
 const validWait = w => Number.isFinite(w?.quietMs) && Number.isFinite(w?.maxWaitMs)
@@ -99,7 +100,7 @@ export class ChatRunner {
    * @param {() => Promise<void>} [o.persist]  writes snapshot() to disk now
    * @param {import('./models.js').ModelControl} [o.models]  for /model and /think
    */
-  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memory }) {
+  constructor({ chat, state = {}, settings, persona, personas, account, link, think, learn, commands, emit, persist, models, memory, briefings }) {
     this.chat = chat
     this.settings = { ...chatDefaults, ...settings }
     this.persona = persona // text, or a function reading the current persona before each reply
@@ -118,6 +119,7 @@ export class ChatRunner {
     this.log = state.log ?? []
     // Whom the bot answered recently, one entry per member: their next message may be a follow-up.
     this.lastBotTurns = Array.isArray(state.lastBotTurns) ? state.lastBotTurns : state.lastBotTurn?.toSenderId ? [state.lastBotTurn] : []
+    this.lastInterjectionAt = state.lastInterjectionAt ?? 0
     // Messages of members who used /forget: never evidence for a note again.
     this.forgottenEvidence = new Set(state.forgottenEvidence ?? [])
     // Only a mode chosen explicitly (console, /mode, tool) is persisted; otherwise config decides.
@@ -147,6 +149,8 @@ export class ChatRunner {
     if (this.waitOverride) this.batcher.retime(this.waitOverride)
     this.cronLimits = { ...cronLimits, ...this.settings.cronLimits }
     this.cron = new CronBook(state.cron, this.cronLimits)
+    this.briefingSources = chat.kind === 'group' ? briefings : undefined
+    this.briefings = state.briefings
     this.engagement = state.engagement ?? null // { id, style, target: {id, name}, since, lastTargetAt }
     this.roster = new MemberRoster({
       fetch: async () => (await this.link.members?.()) ?? [],
@@ -175,6 +179,7 @@ export class ChatRunner {
     this.#members() // learn them now; best-effort
     this.#scheduleIdle()
     this.#armCron(0)
+    if (this.briefingSources) this.#armBriefings(0)
   }
 
   // What the console and the watchdog need to know.
@@ -195,6 +200,7 @@ export class ChatRunner {
       memory: this.memory.toJSON?.(), // only StateMemory lives in the state
       log: this.log.slice(-LOG_LIMIT),
       lastBotTurns: this.lastBotTurns,
+      lastInterjectionAt: this.lastInterjectionAt,
       forgottenEvidence: [...this.forgottenEvidence].slice(-SEEN_LIMIT),
       memberCache: this.roster.members, memberCacheAt: this.roster.at,
       mode: this.modeOverride,
@@ -202,6 +208,7 @@ export class ChatRunner {
       mutedUntil: this.mutedUntil,
       stats: this.stats,
       cron: this.cron.toJSON(),
+      briefings: this.briefings,
       engagement: this.engagement,
     }
   }
@@ -217,6 +224,7 @@ export class ChatRunner {
     this.batcher.clear()
     clearTimeout(this.idleTimer)
     clearTimeout(this.cronTimer)
+    clearTimeout(this.briefingTimer)
   }
 
   // Stops like dispose() and resolves once the work already in progress has finished:
@@ -286,6 +294,7 @@ export class ChatRunner {
     if (message.text.length > this.settings.maxTextChars) {
       message = { ...message, text: message.text.slice(0, this.settings.maxTextChars) + '…（太长，已截断）' }
     }
+    message = { ...message, receivedAt: Date.now() }
     if (message.fromSelf) {
       // Someone typing on the bot account's phone: context only.
       this.#record(message)
@@ -306,7 +315,7 @@ export class ChatRunner {
       this.#track(this.#command(message, command, parsed)).catch(error => !this.disposed && this.#write('error', { message: `/${command.name}: ${error.message}` }))
       return
     }
-    this.arrivedAt.set(message, Date.now())
+    this.arrivedAt.set(message, message.receivedAt)
     this.batcher.push(message)
   }
 
@@ -513,6 +522,7 @@ export class ChatRunner {
     }
     const self = known.get(this.account()?.id)
     if (self) this.selfNames = [self.name, ...self.aliases]
+    this.selfGroupName = listed.find(member => member.id === this.account().id)?.name
     return [...known.values()]
   }
 
@@ -523,7 +533,8 @@ export class ChatRunner {
   }
 
   #addresses(batch) {
-    const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(), lastBotTurns: this.lastBotTurns }
+    const context = { chatKind: this.chat.kind, self: this.account(), names: this.#names(),
+      textAtNames: nameMatchers([this.account().name, this.selfGroupName], 1), lastBotTurns: this.lastBotTurns }
     return new Map(batch.map(m => {
       const index = this.transcript.findIndex(item => item.id === m.id)
       const recent = index < 0 ? this.transcript.filter(item => item.time <= m.time) : this.transcript.slice(0, index)
@@ -566,7 +577,8 @@ export class ChatRunner {
     switch (this.mode) {
       case 'silent': return 'silent_mode'
       case 'at': return signals.some(a => a.reasons.some(r => AT_REASONS.has(r))) ? null : 'at_only'
-      case 'infer': return signals.some(a => a.addressed === 'you' || a.addressed === 'maybe') ? null : 'not_for_me'
+      case 'infer': return signals.some(a => a.addressed === 'you' || a.addressed === 'maybe'
+        || (a.addressed === 'none' && a.reasons.length === 0)) ? null : 'not_for_me'
       default: return null
     }
   }
@@ -613,6 +625,7 @@ export class ChatRunner {
       batch = fromTarget
       event = { kind: 'engagement', style: engagement.style, target: engagement.target }
     }
+    if (this.mode === 'at') await this.#members()
     const address = this.#addresses(batch)
     const skip = event ? null : this.#skipReason(batch, address)
     if (skip) {
@@ -700,7 +713,7 @@ export class ChatRunner {
     }
     const engagementId = event?.kind === 'engagement' ? engagement.id : batch.find(m => m.command?.engagement)?.command.engagement
     const sendStarted = Date.now()
-    await this.#deliver(decision.reply, { batch, target, event, started, engagementId })
+    await this.#deliver(decision.reply, { batch, target, event, started, engagementId, interjection: decision.intent === 'interject' })
     this.#write('latency', { modelMs: decision.modelMs, sendMs: Date.now() - sendStarted,
       queueMs: batch.length ? Math.max(0, started - Math.min(...batch.map(m => m.time))) : 0,
       totalMs: batch.length ? Math.max(0, Date.now() - Math.min(...batch.map(m => m.time))) : Date.now() - started })
@@ -740,7 +753,8 @@ export class ChatRunner {
     const recent = this.#recent(batch).map(m => this.#withQuoteSender(m))
     const saved = await this.memory.context(this.#memoryIds(batch))
     const persona = typeof this.persona === 'function' ? await this.persona() : this.persona
-    const system = systemPrompt(persona, { maxParts: settings.maxParts, stickers, memory: !this.learner })
+    const system = systemPrompt(persona, { maxParts: settings.maxParts, stickers, memory: !this.learner,
+      mode: this.mode, interjectionAllowed: Date.now() - this.lastInterjectionAt >= settings.interjectionIntervalMs })
     const members = await this.#members()
     const input = turnInput({
       chat: this.chat, self: this.account(), aliases: settings.aliases ?? [],
@@ -759,7 +773,8 @@ export class ChatRunner {
         settings.modelTimeoutMs, signal)
       let problem
       try {
-        const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers })
+        const decision = parseDecision(output, { batch, maxParts: settings.maxParts, stickers,
+          requireIntent: this.mode === 'infer' && !mustReply })
         if (mustReply && !decision.reply.length) {
           problem = new DecisionError('must_reply', event?.kind === 'engagement'
             ? `你正在按命令回应 ${event.target.name}，TA 刚说了话，reply 不能为空`
@@ -784,14 +799,15 @@ export class ChatRunner {
 
   // ── delivery ────────────────────────────────────────────────────────────
 
-  async #deliver(parts, { batch, target, event, started, engagementId }) {
+  async #deliver(parts, { batch, target, event, started, engagementId, interjection }) {
     this.#setStatus('sending')
     const turnId = createHash('sha256').update(this.chat.id + '\0' + (batch.map(m => m.id).join('\0') || `idle:${event?.at}`)).digest('hex').slice(0, 16)
     const commanded = batch.some(m => m.command)
     // A /mute or /mode silent that arrives mid-reply stops the rest of it (explicit /ask etc. still finish).
     // Likewise, /unattack or a new target stops what is left of a reply that belongs to the old engagement.
     const blocked = () => engagementId && this.engagement?.id !== engagementId ? 'engagement_changed'
-      : !commanded && (this.muted || this.mode === 'silent') ? 'muted' : null
+      : !commanded && (this.muted || this.mode === 'silent') ? 'muted'
+      : interjection && Date.now() - this.lastInterjectionAt < this.settings.interjectionIntervalMs ? 'interjection_interval' : null
     for (const [index, part] of parts.entries()) {
       if (index && this.settings.typingDelay) await sleep(typingMs(part.text ?? ''))
       const content = part.kind === 'sticker'
@@ -800,7 +816,8 @@ export class ChatRunner {
       const result = await this.#sendOne(content, `${turnId}:${index}`, { started, blocked, ownsStatus: true })
       if (!result) return
       this.#sent(result.messageId, part)
-      if (target?.sender.id) this.#answered(target)
+      if (interjection) this.lastInterjectionAt = Date.now()
+      else if (target?.sender.id) this.#answered(target)
     }
   }
 
@@ -878,6 +895,76 @@ export class ChatRunner {
   }
 
   // ── scheduled messages (/cron) ──────────────────────────────────────────
+
+  #armBriefings(delay = CRON_TICK_MS) {
+    if (this.disposed) return
+    clearTimeout(this.briefingTimer)
+    this.briefingTimer = setTimeout(() => {
+      this.#track(this.#briefingTick()).catch(error => {
+        if (!this.disposed) this.#write('error', { message: `每日播报：${error.message}` })
+      }).finally(() => this.#armBriefings())
+    }, delay)
+    this.briefingTimer.unref?.()
+  }
+
+  async #briefingTick() {
+    const now = Date.now()
+    const day = Math.floor((now + 8 * 3600_000) / 86_400_000)
+    const midnight = day * 86_400_000 - 8 * 3600_000
+    const date = new Date(day * 86_400_000).toISOString().slice(0, 10)
+    if (this.briefings?.date !== date) {
+      const start = midnight + 10 * 3600_000
+      const end = midnight + 21 * 3600_000
+      const earliest = Math.max(start, now)
+      this.briefings = {
+        date,
+        hltv: { at: earliest < end ? earliest + Math.floor(Math.random() * (end - earliest)) : end, status: earliest < end ? 'pending' : 'missed' },
+        apex: { at: midnight + 17.5 * 3600_000, status: 'pending' },
+      }
+      await this.persist()
+    }
+    for (const kind of ['hltv', 'apex']) {
+      const job = this.briefings[kind]
+      if (job.status === 'running') {
+        job.status = 'interrupted'
+        job.error = '播报中断，发送结果需人工核查'
+        this.#write('briefing_error', { kind, message: job.error })
+        await this.persist()
+      }
+      if (this.disposed || job.status !== 'pending' || job.at > Date.now()) continue
+      if (Date.now() - job.at > this.cronLimits.graceMs) {
+        job.status = 'missed'
+        this.#write('briefing_missed', { kind, at: job.at })
+        await this.persist()
+        continue
+      }
+      job.status = 'running'
+      try {
+        await this.persist()
+        if (this.disposed) return
+        const args = kind === 'apex' ? { at: midnight + 19.5 * 3600_000, signal: this.abort.signal } : { signal: this.abort.signal }
+        const text = await this.briefingSources[kind](args)
+        if (this.disposed) return
+        if (Date.now() - job.at > this.cronLimits.graceMs) throw new Error('播报已过期')
+        const result = await this.#sendOne({ kind: 'text', text }, `briefing:${kind}:${date}:${this.chat.id}`, {
+          started: Date.now(), urgent: true, blocked: () => Date.now() - job.at > this.cronLimits.graceMs ? 'briefing_expired' : null,
+        })
+        if (this.disposed) return
+        if (!result) throw new Error('发送未完成')
+        this.#sent(result.messageId, { kind: 'text', text })
+        job.status = 'sent'
+        this.#write('briefing_sent', { kind, at: job.at })
+        await this.persist()
+      } catch (error) {
+        if (this.disposed) return
+        if (job.status === 'sent') throw error
+        job.status = 'failed'
+        job.error = error.message
+        this.#write('briefing_error', { kind, message: error.message })
+        await this.persist()
+      }
+    }
+  }
 
   #armCron(delay) {
     clearTimeout(this.cronTimer)

@@ -64,8 +64,11 @@ def session_running(spec, session, process_reader=_process):
     current = process_reader(session['pid'])
     if current is None:
         return False
-    if (os.path.normcase(os.path.realpath(current['exe'])) != os.path.normcase(os.path.realpath(spec.exe))
-            or abs(current['start'] - session['startedAt']) > 0.01):
+    # A different creation time means the recorded instance exited and its PID
+    # was reused. It is not our process, even if it is another WeChat instance.
+    if abs(current['start'] - session['startedAt']) > 0.01:
+        return False
+    if os.path.normcase(os.path.realpath(current['exe'])) != os.path.normcase(os.path.realpath(spec.exe)):
         raise DesktopControlError('bot process identity changed; refusing to adopt another process')
     return True
 

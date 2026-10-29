@@ -222,41 +222,61 @@ class TemporaryByteGate:
         self.memory: Any = None
         self.watchdog: Any = None
         self._active = False
+        self._borrowed_active = False
         self._last_state: dict[str, Any] = {"gateActive": False, "gateRestored": True}
 
     def run(self, action: Callable[[Callable[[], None]], Any]) -> tuple[Any, dict[str, Any]]:
-        if self.watchdog is not None:
+        if self.watchdog is not None or self._active or self.memory is not None:
             raise GateError("a gate lease is already in flight")
-        timeout = self.lease["timeoutSeconds"]
-        self.lease["deadlineEpoch"] = time.time() + timeout
-        lease_dir = self.state_root / "gate-leases"
-        lease_dir.mkdir(parents=True, exist_ok=True)
-        self.lease_path = lease_dir / (uuid.uuid4().hex + ".json")
-        self.memory = self.memory_factory(self.lease)
+        self.lease_path = None
+        self._active = False
+        self._borrowed_active = False
+        self._last_state = {"gateActive": False, "gateRestored": True}
         action_started = False
         action_value = None
         try:
+            timeout = self.lease["timeoutSeconds"]
+            self.lease["deadlineEpoch"] = time.time() + timeout
+            self.memory = self.memory_factory(self.lease)
             self.memory.verify_identity(self.lease)
-            if self.memory.read_byte(self.lease) != self.lease["originalByte"]:
+            current = self.memory.read_byte(self.lease)
+            if current == self.lease["enabledByte"]:
+                self._borrowed_active = True
+                self._active = True
+                action_started = True
+                action_value = action(self.assert_active)
+                self.assert_active()
+            elif current != self.lease["originalByte"]:
                 raise GateError("gate byte does not match the expected original value")
-            _create_marker(self.lease_path, self.lease)
-            self.watchdog = self.watchdog_factory(self.lease_path)
-            self.watchdog.start()
-            if not self.watchdog.wait_ready(min(5.0, timeout / 3)):
-                raise GateError("recovery watchdog did not verify the binding")
-            self.memory.verify_identity(self.lease)
-            if self.memory.read_byte(self.lease) != self.lease["originalByte"]:
-                raise GateError("gate byte changed before enable")
-            self.memory.write_byte(self.lease, self.lease["enabledByte"])
-            if self.memory.read_byte(self.lease) != self.lease["enabledByte"]:
-                raise GateError("gate enable readback failed")
-            self._active = True
-            self._last_state = {"gateActive": True, "gateRestored": False}
-            action_started = True
-            action_value = action(self.assert_active)
+
+            if not self._borrowed_active:
+                lease_dir = self.state_root / "gate-leases"
+                lease_dir.mkdir(parents=True, exist_ok=True)
+                self.lease_path = lease_dir / (uuid.uuid4().hex + ".json")
+                _create_marker(self.lease_path, self.lease)
+                self.watchdog = self.watchdog_factory(self.lease_path)
+                self.watchdog.start()
+                if not self.watchdog.wait_ready(min(5.0, timeout / 3)):
+                    raise GateError("recovery watchdog did not verify the binding")
+                self.memory.verify_identity(self.lease)
+                if self.memory.read_byte(self.lease) != self.lease["originalByte"]:
+                    raise GateError("gate byte changed before enable")
+                self.memory.write_byte(self.lease, self.lease["enabledByte"])
+                if self.memory.read_byte(self.lease) != self.lease["enabledByte"]:
+                    raise GateError("gate enable readback failed")
+                self._active = True
+                self._last_state = {"gateActive": True, "gateRestored": False}
+                action_started = True
+                action_value = action(self.assert_active)
         except BaseException as exc:
             reason_code = safe_reason_code(getattr(exc, "reason_code", None))
             send_attempted = safe_send_attempted(getattr(exc, "send_attempted", False))
+            if (
+                self._borrowed_active
+                and isinstance(action_value, dict)
+                and "sendAttempted" in action_value
+            ):
+                send_attempted = safe_send_attempted(action_value.get("sendAttempted"))
             try:
                 self.close()
             except Exception:
@@ -267,6 +287,21 @@ class TemporaryByteGate:
                 reason_code = "gate_preflight"
                 send_attempted = False
             raise GateExecutionError(dict(self._last_state), reason_code, send_attempted) from exc
+        if self._borrowed_active:
+            try:
+                self._last_state = self.close()
+            except Exception as exc:
+                self._last_state = {"gateActive": None, "gateRestored": False}
+                send_attempted = safe_send_attempted(
+                    action_value.get("sendAttempted") if isinstance(action_value, dict) else None
+                )
+                raise GateExecutionError(dict(self._last_state), "gate_restore", send_attempted) from exc
+            if self._last_state != {"gateActive": False, "gateRestored": True}:
+                send_attempted = safe_send_attempted(
+                    action_value.get("sendAttempted") if isinstance(action_value, dict) else None
+                )
+                raise GateExecutionError(dict(self._last_state), "gate_restore", send_attempted)
+            return action_value, dict(self._last_state)
         try:
             self._last_state = self._restore_and_join()
         except Exception as exc:
@@ -316,8 +351,12 @@ class TemporaryByteGate:
 
     def close(self) -> dict[str, Any]:
         if self.watchdog is None:
+            # A borrowed gate owns no byte change; closing only releases its memory handle.
+            self._active = False
+            self._borrowed_active = False
             self._close_memory()
-            return {"gateActive": False, "gateRestored": True}
+            self._last_state = {"gateActive": False, "gateRestored": True}
+            return dict(self._last_state)
         state = self._restore_and_join()
         if state["gateActive"] is not False or state["gateRestored"] is not True:
             raise GateError("gate closure is unconfirmed")
